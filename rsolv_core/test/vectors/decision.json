@@ -1,0 +1,72 @@
+{
+  "_comment": "Synthetic test vector. The key is RFC 8032 section 7.1 TEST 1; the envelope was signed independently with Python's cryptography package.",
+  "secret_key_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "keys": [
+    {
+      "kid": "test-2026-11",
+      "public_key": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+      "not_after": "2027-01-31"
+    }
+  ],
+  "envelope": {
+    "decision": {
+      "v": 1,
+      "kid": "test-2026-11",
+      "decision_id": "dec_00000000000000000000000000000001",
+      "run_id": 1000000001,
+      "repository_id": 2000000002,
+      "issue": 42,
+      "work_attempt": 1,
+      "verify_attempt": 1,
+      "publish_attempt": 1,
+      "check_run_id_work": 3000000001,
+      "check_run_id_verify": 3000000002,
+      "check_run_id_publish": 3000000003,
+      "base_sha": "fc9c2a7eb52a88aa138ddbcc77205eedd3941141",
+      "target_branch": "main",
+      "branch": "rsolv/1000000001/issue-42",
+      "change_set": [
+        {
+          "path": "src/handler.js",
+          "op": "modify",
+          "base_mode": "100644",
+          "base_blob_sha": "c87fc7eca758d00d29999297a7c83a0aff663fac",
+          "mode": "100644",
+          "new_blob_sha": "6075210439baa009a4a48c3cbd3a3413f3f3d8aa"
+        },
+        {
+          "path": "test/handler.test.js",
+          "op": "add",
+          "base_mode": null,
+          "base_blob_sha": null,
+          "mode": "100644",
+          "new_blob_sha": "96869c56fcd06feaff2bb3a2bfc2c6eff9172591"
+        }
+      ],
+      "change_set_digest": "sha256:9a0ff9597da3410bd66908913cf4e0777ae9706f8c1ef2eab2d4d6df3170012d",
+      "red_paths": [
+        "test/handler.test.js"
+      ],
+      "policy_version": "test-policy-1",
+      "verify_mode": "test-mode",
+      "effects": {
+        "pr_title": "Fix example vulnerability in src/handler.js",
+        "pr_body_sha256": "06f0f7a505cc4170af284de3178058872fa2a94d5ca122cef3cc3d61a8e7dbc7",
+        "labels": [
+          "rsolv:test"
+        ],
+        "comments": [
+          {
+            "issue": 42,
+            "body_sha256": "da932bdd3436b436543b0d198447f5fc8a9b87293504c05caa311e4f6aba9a91"
+          }
+        ],
+        "red_commit_message": "test: add a failing test for issue #42",
+        "fix_commit_message": "fix: resolve issue #42"
+      },
+      "issued_at": "2026-11-05T12:00:00Z",
+      "expires_at": "2026-11-05T12:30:00Z"
+    },
+    "signature": "9pxz20DoO0MVTeOYXlbno9UbITN4eRQFKjzkCx4VS3gfM7yn1YPBqRJBXytAuWSGWu-v4FR2f4ihlqXc6IZ0Bg"
+  }
+}
