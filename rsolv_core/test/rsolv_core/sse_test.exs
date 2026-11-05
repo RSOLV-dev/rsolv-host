@@ -94,6 +94,33 @@ defmodule RsolvCore.Relay.SSETest do
     end
   end
 
+  describe "parse/2" do
+    test "splits complete events and keeps the partial tail" do
+      {events, rest} = SSE.parse("", "event: progress\nid: 1\ndata: {\"a\":1}\n\nevent: heart")
+      assert [%{type: :progress, id: 1, data: %{"a" => 1}}] = events
+      assert rest == "event: heart"
+    end
+
+    test "an event split across chunks arrives once" do
+      {[], rest} = SSE.parse("", "event: complete\nid: 2\nda")
+
+      assert {[%{type: :complete, data: %{"ok" => true}}], ""} =
+               SSE.parse(rest, "ta: {\"ok\":true}\n\n")
+    end
+
+    test "keepalive comments are dropped" do
+      assert {[], ""} = SSE.parse("", ": keepalive\n\n")
+    end
+  end
+
+  describe "decode_event/1 when the event type is unknown" do
+    test "refuses it instead of creating an atom" do
+      name = "pwn_#{System.unique_integer([:positive])}"
+      assert {:error, :unknown_event_type} = SSE.decode_event("event: #{name}\nid: 1\n\n")
+      assert_raise ArgumentError, fn -> String.to_existing_atom(name) end
+    end
+  end
+
   describe "encode_retry/1" do
     test "encodes retry directive in milliseconds" do
       assert SSE.encode_retry(3000) == "retry: 3000\n\n"

@@ -24,7 +24,41 @@ defmodule RsolvCore.Relay.SSE do
   - `heartbeat` — keepalive (no data payload)
   """
 
-  @type event :: %{type: atom(), id: integer() | nil, data: term()}
+  @types %{
+    "tool_request" => :tool_request,
+    "progress" => :progress,
+    "complete" => :complete,
+    "error" => :error,
+    "heartbeat" => :heartbeat
+  }
+
+  @type event_type :: :tool_request | :progress | :complete | :error | :heartbeat
+  @type event :: %{type: event_type(), id: integer() | nil, data: term()}
+
+  @doc """
+  Feeds one chunk of an SSE byte stream into the parser.
+
+  `buffer` is the partial tail returned by the previous call (`""` at first).
+  Returns the complete events in the chunk and the new tail. Comments such as
+  keepalives, and events of an unknown type, are dropped.
+
+      iex> RsolvCore.Relay.SSE.parse("", "event: heartbeat\\nid: 1\\n\\nevent: prog")
+      {[%{type: :heartbeat, id: 1, data: nil}], "event: prog"}
+  """
+  @spec parse(binary(), binary()) :: {[event()], binary()}
+  def parse(buffer, chunk) do
+    {complete, [rest]} = (buffer <> chunk) |> String.split("\n\n") |> Enum.split(-1)
+
+    events =
+      Enum.flat_map(complete, fn raw ->
+        case decode_event(raw) do
+          {:ok, event} -> [event]
+          {:error, _comment_or_unknown} -> []
+        end
+      end)
+
+    {events, rest}
+  end
 
   @doc """
   Encodes a relay event into SSE wire format.
@@ -64,7 +98,9 @@ defmodule RsolvCore.Relay.SSE do
   Decodes a raw SSE event string into a structured event.
 
   Returns `{:ok, event}` with a map containing `:type`, `:id`, and `:data` fields,
-  or `{:error, reason}` for malformed events.
+  or `{:error, reason}` for malformed events. Only the five event types of the
+  protocol decode; any other `event:` name is `{:error, :unknown_event_type}`,
+  so no wire input becomes an atom.
 
   ## Examples
 
@@ -87,8 +123,8 @@ defmodule RsolvCore.Relay.SSE do
       Enum.reduce(lines, %{}, fn line, acc ->
         cond do
           String.starts_with?(line, "event: ") ->
-            type = line |> String.replace_prefix("event: ", "") |> String.to_atom()
-            Map.put(acc, :type, type)
+            name = String.replace_prefix(line, "event: ", "")
+            Map.put(acc, :type, Map.get(@types, name, :unknown))
 
           String.starts_with?(line, "id: ") ->
             id = line |> String.replace_prefix("id: ", "") |> String.to_integer()
@@ -102,20 +138,17 @@ defmodule RsolvCore.Relay.SSE do
         end
       end)
 
-    if Map.has_key?(parsed, :type) do
-      event = %{
-        type: parsed[:type],
-        id: parsed[:id],
-        data: parsed[:data]
-      }
-
-      {:ok, event}
-    else
-      {:error, :missing_event_type}
-    end
+    to_event(parsed)
   end
 
   def decode_event(_), do: {:error, :invalid_input}
+
+  defp to_event(%{type: :unknown}), do: {:error, :unknown_event_type}
+
+  defp to_event(%{type: type} = parsed),
+    do: {:ok, %{type: type, id: parsed[:id], data: parsed[:data]}}
+
+  defp to_event(_parsed), do: {:error, :missing_event_type}
 
   defp decode_data(json_str) do
     case JSON.decode(json_str) do
