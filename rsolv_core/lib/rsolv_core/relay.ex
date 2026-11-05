@@ -13,10 +13,20 @@ defmodule RsolvCore.Relay do
       {:error, :unknown_tool}
   """
 
+  @protocol_version 1
   @tools [:read_file, :write_file, :edit_file, :glob, :grep, :bash]
   @by_name Map.new(@tools, &{Atom.to_string(&1), &1})
 
   @type tool :: :read_file | :write_file | :edit_file | :glob | :grep | :bash
+
+  @doc "The version of the relay and token-exchange protocol this core speaks."
+  @spec protocol_version() :: pos_integer()
+  def protocol_version, do: @protocol_version
+
+  @doc "Accepts a peer's `protocol_version` only when it equals ours."
+  @spec check_version(term()) :: :ok | {:error, {:protocol_version, term()}}
+  def check_version(@protocol_version), do: :ok
+  def check_version(other), do: {:error, {:protocol_version, other}}
 
   @doc "The tools of the relay protocol, in protocol order."
   @spec tools() :: [tool()]

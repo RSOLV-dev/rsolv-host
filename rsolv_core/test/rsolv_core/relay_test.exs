@@ -70,7 +70,8 @@ defmodule RsolvCore.RelayTest do
         "id" => "req_1",
         "tool" => "bash",
         "input" => %{"command" => "ls"},
-        "timeout_ms" => 5_000
+        "timeout_ms" => 5_000,
+        "protocol_version" => 1
       }
 
       assert {:ok, %ToolRequest{id: "req_1", tool: :bash, timeout_ms: 5_000}} =
@@ -79,14 +80,24 @@ defmodule RsolvCore.RelayTest do
 
     test "defaults the timeout to 30 s" do
       assert {:ok, %ToolRequest{timeout_ms: 30_000}} =
-               ToolRequest.from_wire(%{"id" => "req_1", "tool" => "glob", "input" => %{}})
+               ToolRequest.from_wire(%{
+                 "id" => "req_1",
+                 "tool" => "glob",
+                 "input" => %{},
+                 "protocol_version" => 1
+               })
     end
 
     test "refuses an unknown tool without creating an atom" do
       name = "pwn_#{System.unique_integer([:positive])}"
 
       assert {:error, :unknown_tool} =
-               ToolRequest.from_wire(%{"id" => "r", "tool" => name, "input" => %{}})
+               ToolRequest.from_wire(%{
+                 "id" => "r",
+                 "tool" => name,
+                 "input" => %{},
+                 "protocol_version" => 1
+               })
 
       assert_raise ArgumentError, fn -> String.to_existing_atom(name) end
     end
@@ -94,6 +105,60 @@ defmodule RsolvCore.RelayTest do
     test "refuses a malformed request" do
       assert {:error, :malformed_tool_request} =
                ToolRequest.from_wire(%{"id" => 1, "tool" => "bash"})
+    end
+  end
+
+  describe "protocol_version/0" do
+    test "is 1" do
+      assert Relay.protocol_version() == 1
+    end
+  end
+
+  describe "check_version/1" do
+    test "accepts our version" do
+      assert Relay.check_version(1) == :ok
+    end
+
+    test "refuses a newer version" do
+      assert Relay.check_version(2) == {:error, {:protocol_version, 2}}
+    end
+
+    test "refuses a missing version" do
+      assert Relay.check_version(nil) == {:error, {:protocol_version, nil}}
+    end
+  end
+
+  describe "ToolRequest protocol_version" do
+    test "defaults to 1 and is encoded on the wire" do
+      request = %ToolRequest{id: "r", tool: :bash, input: %{}}
+
+      assert request.protocol_version == 1
+      assert JSON.encode!(Map.from_struct(request)) =~ ~s("protocol_version":1)
+    end
+  end
+
+  describe "ToolRequest.from_wire/1 when the protocol version differs" do
+    test "refuses a newer version" do
+      wire = %{"id" => "r", "tool" => "bash", "input" => %{}, "protocol_version" => 2}
+      assert ToolRequest.from_wire(wire) == {:error, {:protocol_version, 2}}
+    end
+
+    test "refuses a missing version" do
+      wire = %{"id" => "r", "tool" => "bash", "input" => %{}}
+      assert ToolRequest.from_wire(wire) == {:error, {:protocol_version, nil}}
+    end
+  end
+
+  describe "ToolResponse.to_wire/1" do
+    test "builds the string-keyed wire map with the protocol version" do
+      response = %ToolResponse{request_id: "r", result: %{"ok" => true}}
+
+      assert ToolResponse.to_wire(response) == %{
+               "request_id" => "r",
+               "result" => %{"ok" => true},
+               "error" => nil,
+               "protocol_version" => 1
+             }
     end
   end
 end
