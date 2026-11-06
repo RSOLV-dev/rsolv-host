@@ -4,17 +4,20 @@ defmodule RsolvCore.Decision do
   publish job verifies it before any write. The signature is Ed25519 over
   `"rsolv-decision-v1\\n" <> CanonicalJson.encode!(decision)`.
 
-  An envelope is `%{"decision" => decision, "signature" => base64url}`. `verify/3`
-  checks, in order: the shape, the key (`kid` known and not past `not_after`), the
+  An envelope is `%{"decision" => decision, "signature" => base64url}`; the publish
+  response may carry an unsigned `"bodies"` member beside them. `verify/3` takes
+  the response bytes and checks, in order: strict decoding, the shape, the key (`kid` known and not past `not_after`), the
   signature, the version, the validity window (at most 30 minutes, with 60 s of
   clock skew), the change set and its digest, and finally the run binding.
   """
 
-  alias RsolvCore.{CanonicalJson, ChangeSet}
+  alias RsolvCore.{CanonicalJson, ChangeSet, StrictJson}
 
   @context "rsolv-decision-v1\n"
   @max_validity_s 30 * 60
   @skew_s 60
+  @max_envelope_bytes 1024 * 1024
+  @max_keys_bytes 64 * 1024
   @fields ~w(v kid decision_id run_id repository_id issue work_attempt verify_attempt
              publish_attempt check_run_id_work check_run_id_verify check_run_id_publish
              base_sha target_branch branch change_set change_set_digest red_paths
@@ -54,7 +57,7 @@ defmodule RsolvCore.Decision do
   """
   @spec parse_keys(String.t()) :: {:ok, [key()]} | {:error, :invalid_keys}
   def parse_keys(json) when is_binary(json) do
-    with {:ok, [_ | _] = list} <- JSON.decode(json),
+    with {:ok, [_ | _] = list} <- StrictJson.decode(json, max_bytes: @max_keys_bytes),
          {:ok, keys} <- parse_each(list, []),
          true <- keys |> Enum.uniq_by(& &1.kid) |> length() == length(keys) do
       {:ok, keys}
@@ -66,22 +69,37 @@ defmodule RsolvCore.Decision do
   def parse_keys(_json), do: {:error, :invalid_keys}
 
   @doc """
-  Verifies an envelope against a key set at `:now`, and checks that the decision
-  carries every `{field, value}` of `:expect` (the run binding).
+  Verifies the decision response body, the raw JSON bytes of
+  `{"decision", "signature", ...}`, against a key set at `:now`, and checks that
+  the decision carries every `{field, value}` of `:expect` (the run binding).
+
+  The bytes are decoded here, through `RsolvCore.StrictJson` (at most
+  1 MiB, no repeated member names), so no caller can
+  verify a map another parser built. The decoded envelope is returned too, for
+  its unsigned `bodies`.
   """
-  @spec verify(map(), [key()], now: DateTime.t(), expect: map()) ::
-          {:ok, %{decision: map(), change_set: [ChangeSet.Entry.t()]}} | {:error, error()}
-  def verify(envelope, keys, opts) do
+  @spec verify(binary(), [key()], now: DateTime.t(), expect: map()) ::
+          {:ok, %{decision: map(), change_set: [ChangeSet.Entry.t()], envelope: map()}}
+          | {:error, error()}
+  def verify(json, keys, opts) do
     now = Keyword.fetch!(opts, :now)
 
-    with {:ok, decision, signature} <- shape(envelope),
+    with {:ok, envelope} <- decode(json),
+         {:ok, decision, signature} <- shape(envelope),
          {:ok, key} <- key_for(keys, decision["kid"], now),
          :ok <- signature(decision, signature, key),
          :ok <- version(decision),
          :ok <- validity(decision, now),
          {:ok, change_set} <- change_set(decision),
          :ok <- binding(decision, Keyword.fetch!(opts, :expect)) do
-      {:ok, %{decision: decision, change_set: change_set}}
+      {:ok, %{decision: decision, change_set: change_set, envelope: envelope}}
+    end
+  end
+
+  defp decode(json) do
+    case StrictJson.decode(json, max_bytes: @max_envelope_bytes) do
+      {:ok, envelope} -> {:ok, envelope}
+      {:error, _reason} -> {:error, :malformed_decision}
     end
   end
 

@@ -22,9 +22,14 @@ defmodule RsolvCore.DecisionTest do
     keys
   end
 
-  defp verify(envelope, opts \\ []) do
+  defp verify(envelope, opts \\ [])
+
+  defp verify(envelope, opts) when is_map(envelope),
+    do: envelope |> JSON.encode!() |> verify(opts)
+
+  defp verify(json, opts) do
     Decision.verify(
-      envelope,
+      json,
       Keyword.get(opts, :keys, keys()),
       now: Keyword.get(opts, :now, @now),
       expect: Keyword.get(opts, :expect, @expect)
@@ -52,6 +57,31 @@ defmodule RsolvCore.DecisionTest do
     test "accepts the golden envelope and returns its change set" do
       assert {:ok, %{decision: @decision, change_set: [%Entry{op: :modify}, %Entry{op: :add}]}} =
                verify(@envelope)
+    end
+  end
+
+  describe "verify/3 when the response repeats a member name" do
+    test "refuses a duplicate kid in an otherwise valid envelope" do
+      json =
+        @envelope
+        |> JSON.encode!()
+        |> String.replace(~s({"decision":{), ~s({"decision":{"kid":"evil",), global: false)
+
+      assert verify(json) == {:error, :malformed_decision}
+    end
+
+    test "refuses a duplicate member inside effects" do
+      json =
+        @envelope
+        |> JSON.encode!()
+        |> String.replace(~s("effects":{), ~s("effects":{"pr_title":"other",), global: false)
+
+      assert verify(json) == {:error, :malformed_decision}
+    end
+
+    test "refuses a decoded map instead of the response bytes" do
+      assert Decision.verify(@envelope, keys(), now: @now, expect: @expect) ==
+               {:error, :malformed_decision}
     end
   end
 
@@ -185,6 +215,15 @@ defmodule RsolvCore.DecisionTest do
 
     test "refuses duplicate kids" do
       json = JSON.encode!(@vector["keys"] ++ @vector["keys"])
+      assert Decision.parse_keys(json) == {:error, :invalid_keys}
+    end
+
+    test "refuses a key record that repeats kid" do
+      [%{"public_key" => key}] = @vector["keys"]
+
+      json =
+        ~s([{"kid":"evil","kid":"test-2026-11","public_key":"#{key}","not_after":"2027-01-31"}])
+
       assert Decision.parse_keys(json) == {:error, :invalid_keys}
     end
 
