@@ -149,6 +149,43 @@ defmodule RsolvCore.RelayTest do
     end
   end
 
+  describe "ToolRequest.from_wire/1 on timeout_ms" do
+    defp request(timeout_ms) do
+      %{
+        "id" => "r",
+        "tool" => "bash",
+        "input" => %{},
+        "timeout_ms" => timeout_ms,
+        "protocol_version" => 1
+      }
+    end
+
+    test "accepts the 30-minute maximum" do
+      assert ToolRequest.max_timeout_ms() == 1_800_000
+
+      assert {:ok, %ToolRequest{timeout_ms: 1_800_000}} =
+               ToolRequest.from_wire(request(1_800_000))
+    end
+
+    test "accepts the platform's 15-minute tool timeout" do
+      assert {:ok, %ToolRequest{timeout_ms: 900_000}} = ToolRequest.from_wire(request(900_000))
+    end
+
+    for {label, value} <- [
+          over_the_maximum: 1_800_001,
+          huge: 1_000_000_000_000_000_000_000,
+          zero: 0,
+          negative: -1,
+          float: 5_000.0,
+          string: "5000",
+          null: nil
+        ] do
+      test "refuses #{label}" do
+        assert ToolRequest.from_wire(request(unquote(value))) == {:error, :malformed_tool_request}
+      end
+    end
+  end
+
   describe "ToolResponse.to_wire/1" do
     test "builds the string-keyed wire map with the protocol version" do
       response = %ToolResponse{request_id: "r", result: %{"ok" => true}}
