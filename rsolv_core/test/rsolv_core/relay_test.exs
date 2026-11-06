@@ -186,6 +186,78 @@ defmodule RsolvCore.RelayTest do
     end
   end
 
+  describe "ToolResponse.from_wire/1" do
+    defp response(overrides \\ %{}) do
+      Map.merge(
+        %{
+          "request_id" => "req_1",
+          "result" => %{"content" => "x"},
+          "error" => nil,
+          "protocol_version" => 1
+        },
+        overrides
+      )
+    end
+
+    test "decodes a result" do
+      assert ToolResponse.from_wire(response()) ==
+               {:ok, %ToolResponse{request_id: "req_1", result: %{"content" => "x"}, error: nil}}
+    end
+
+    test "decodes an error" do
+      assert {:ok, %ToolResponse{result: nil, error: "file not found"}} =
+               ToolResponse.from_wire(response(%{"result" => nil, "error" => "file not found"}))
+    end
+
+    test "decodes a string result" do
+      assert {:ok, %ToolResponse{result: "text"}} =
+               ToolResponse.from_wire(response(%{"result" => "text"}))
+    end
+
+    test "inverts to_wire/1" do
+      response = %ToolResponse{request_id: "r", result: %{"ok" => true}, error: nil}
+      assert response |> ToolResponse.to_wire() |> ToolResponse.from_wire() == {:ok, response}
+    end
+  end
+
+  describe "ToolResponse.from_wire/1 when the protocol version differs" do
+    test "refuses a newer version" do
+      assert ToolResponse.from_wire(response(%{"protocol_version" => 2})) ==
+               {:error, {:protocol_version, 2}}
+    end
+
+    test "refuses a missing version" do
+      assert ToolResponse.from_wire(Map.delete(response(), "protocol_version")) ==
+               {:error, {:protocol_version, nil}}
+    end
+  end
+
+  describe "ToolResponse.from_wire/1 when the response is malformed" do
+    for {label, overrides} <- [
+          integer_request_id: %{"request_id" => 1},
+          empty_request_id: %{"request_id" => ""},
+          list_result: %{"result" => [1]},
+          integer_result: %{"result" => 1},
+          map_error: %{"error" => %{"message" => "x"}}
+        ] do
+      test "refuses #{label}" do
+        assert ToolResponse.from_wire(response(unquote(Macro.escape(overrides)))) ==
+                 {:error, :malformed_tool_response}
+      end
+    end
+
+    for key <- ~w(request_id result error) do
+      test "refuses a response without #{key}" do
+        assert ToolResponse.from_wire(Map.delete(response(), unquote(key))) ==
+                 {:error, :malformed_tool_response}
+      end
+    end
+
+    test "refuses a non-map" do
+      assert ToolResponse.from_wire("req_1") == {:error, :malformed_tool_response}
+    end
+  end
+
   describe "ToolResponse.to_wire/1" do
     test "builds the string-keyed wire map with the protocol version" do
       response = %ToolResponse{request_id: "r", result: %{"ok" => true}}
