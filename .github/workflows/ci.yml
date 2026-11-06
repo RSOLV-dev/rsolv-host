@@ -31,7 +31,7 @@ jobs:
       - run: mix compile --warnings-as-errors
       - run: mix format --check-formatted
       - run: mix credo --strict
-      - run: mix test
+      - run: mix test --warnings-as-errors
   ci-success:
     name: CI Success
     if: always()

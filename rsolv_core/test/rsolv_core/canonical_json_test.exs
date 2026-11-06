@@ -39,6 +39,14 @@ defmodule RsolvCore.CanonicalJsonTest do
     test "refuses a struct" do
       assert CanonicalJson.encode(%URI{}) == {:error, :unsupported_value}
     end
+
+    test "refuses an improper list" do
+      assert CanonicalJson.encode([1 | 2]) == {:error, :unsupported_value}
+    end
+
+    test "refuses an improper list nested in an object" do
+      assert CanonicalJson.encode(%{"a" => [1, 2 | "x"]}) == {:error, :unsupported_value}
+    end
   end
 
   describe "encode!/1" do

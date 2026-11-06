@@ -128,6 +128,18 @@ defmodule RsolvCore.ChangeSetPropertyTest do
       end
     end
 
+    property "refuses an improper list of entries, and never raises" do
+      check all(
+              entries <- change_set(1),
+              tail <- filter(term(), &(not is_list(&1)))
+            ) do
+        improper =
+          entries |> ChangeSet.to_json() |> Enum.reverse() |> Enum.reduce(tail, &[&1 | &2])
+
+        assert ChangeSet.from_json(improper) == {:error, :malformed_change_set}
+      end
+    end
+
     property "returns a result when any field of a valid document is replaced, and never raises" do
       check all(
               entries <- change_set(1),

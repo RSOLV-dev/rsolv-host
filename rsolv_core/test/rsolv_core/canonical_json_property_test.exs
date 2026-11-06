@@ -86,5 +86,11 @@ defmodule RsolvCore.CanonicalJsonPropertyTest do
                  CanonicalJson.encode(value) == {:error, :unsupported_value}
       end
     end
+
+    property "refuses any improper list, and never raises" do
+      check all(value <- nonempty_improper_list_of(json(), filter(json(), &(not is_list(&1))))) do
+        assert CanonicalJson.encode(value) == {:error, :unsupported_value}
+      end
+    end
   end
 end

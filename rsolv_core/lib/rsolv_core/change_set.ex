@@ -100,6 +100,8 @@ defmodule RsolvCore.ChangeSet do
     with {:ok, entry} <- entry(json), do: entries(rest, [entry | acc])
   end
 
+  defp entries(_improper_tail, _acc), do: {:error, :malformed_change_set}
+
   defp entry(
          %{
            "path" => path,

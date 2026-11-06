@@ -24,7 +24,7 @@ defmodule RsolvCore.ChangeSetTest do
     )
   end
 
-  defp modify(path, overrides \\ %{}) do
+  defp modify(path, overrides) do
     Map.merge(
       %{
         "path" => path,
@@ -155,6 +155,10 @@ defmodule RsolvCore.ChangeSetTest do
 
     test "refuses an extra field" do
       assert ChangeSet.from_json([add("a", %{"x" => 1})]) == {:error, :malformed_change_set}
+    end
+
+    test "refuses an improper list" do
+      assert ChangeSet.from_json([add("a") | :tail]) == {:error, :malformed_change_set}
     end
   end
 

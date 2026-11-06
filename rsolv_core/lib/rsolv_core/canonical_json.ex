@@ -36,8 +36,10 @@ defmodule RsolvCore.CanonicalJson do
   defp enc(int) when is_integer(int) and abs(int) <= @max_safe, do: Integer.to_string(int)
   defp enc(string) when is_binary(string), do: string(string)
 
-  defp enc(list) when is_list(list),
-    do: ["[", list |> Enum.map(&enc/1) |> Enum.intersperse(","), "]"]
+  defp enc(list) when is_list(list) do
+    if List.improper?(list), do: throw(:unsupported)
+    ["[", list |> Enum.map(&enc/1) |> Enum.intersperse(","), "]"]
+  end
 
   defp enc(map) when is_map(map) and not is_struct(map) do
     members =
