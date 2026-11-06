@@ -5,13 +5,17 @@ defmodule RsolvCore.ChangeSet do
 
   Paths are strictly increasing by byte order. Only regular files are allowed:
   an add is `100644`, a modify keeps its mode (`100644` or `100755`), and
-  symlinks, gitlinks and paths into `.git` are refused.
+  symlinks, gitlinks and paths into `.git` are refused. Besides duplicate paths,
+  traversal and absolute paths (§4.2), a change set is refused when a path is
+  unsafe to show a reviewer (`valid_path?/1`), or when an added or modified path
+  is a directory of another added or modified path (`x` and `x/y`), which no tree
+  can hold.
 
       iex> RsolvCore.ChangeSet.blob_sha("hello world\\n")
       "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
   """
 
-  alias RsolvCore.CanonicalJson
+  alias RsolvCore.{CanonicalJson, Text}
 
   defmodule Entry do
     @moduledoc "One file in a change set. See `RsolvCore.ChangeSet`."
@@ -42,10 +46,16 @@ defmodule RsolvCore.ChangeSet do
   @spec from_json(term()) ::
           {:ok, [Entry.t()]}
           | {:error,
-             :malformed_change_set | :invalid_path | :invalid_entry | :unsorted | :duplicate_path}
+             :malformed_change_set
+             | :invalid_path
+             | :invalid_entry
+             | :unsorted
+             | :duplicate_path
+             | :path_conflict}
   def from_json(list) when is_list(list) do
     with {:ok, entries} <- entries(list, []),
-         :ok <- sorted(entries) do
+         :ok <- sorted(entries),
+         :ok <- no_file_under_file(entries) do
       {:ok, entries}
     end
   end
@@ -79,17 +89,20 @@ defmodule RsolvCore.ChangeSet do
   end
 
   @doc """
-  Whether `path` is a safe repository-relative file path: valid UTF-8, 1–4096
-  bytes, no NUL or backslash, not absolute, and no empty, `.`, `..` or `.git`
-  (in any case) segment.
+  Whether `path` is a safe repository-relative file path: 1–4096 bytes of
+  `RsolvCore.Text.plain?/1` text (valid UTF-8, no control or bidirectional
+  characters, so no NUL, tab or newline), no backslash, not absolute, and no
+  empty, `.`, `..` or `.git` (in any case) segment, nor one starting with `-`.
   """
   @spec valid_path?(term()) :: boolean()
   def valid_path?(path) when is_binary(path) and byte_size(path) in 1..@max_path_bytes do
-    String.valid?(path) and not String.contains?(path, [<<0>>, "\\"]) and
+    Text.plain?(path) and not String.contains?(path, "\\") and
       path |> String.split("/") |> Enum.all?(&valid_segment?/1)
   end
 
   def valid_path?(_path), do: false
+
+  defp valid_segment?("-" <> _option_like), do: false
 
   defp valid_segment?(segment),
     do: segment not in ["", ".", ".."] and String.downcase(segment) != ".git"
@@ -158,6 +171,19 @@ defmodule RsolvCore.ChangeSet do
   defp build(_op, _json, false), do: {:error, :invalid_entry}
 
   defp sha?(sha), do: is_binary(sha) and sha =~ ~r/\A[0-9a-f]{40}\z/
+
+  defp no_file_under_file(entries) do
+    files = for %Entry{op: op, path: path} <- entries, op != :delete, into: MapSet.new(), do: path
+
+    if Enum.any?(files, &(&1 |> directories() |> Enum.any?(fn dir -> dir in files end))),
+      do: {:error, :path_conflict},
+      else: :ok
+  end
+
+  defp directories(path) do
+    segments = String.split(path, "/")
+    for n <- 1..(length(segments) - 1)//1, do: segments |> Enum.take(n) |> Enum.join("/")
+  end
 
   defp sorted([%Entry{path: a}, %Entry{path: a} | _rest]), do: {:error, :duplicate_path}
   defp sorted([%Entry{path: a}, %Entry{path: b} | _rest]) when a > b, do: {:error, :unsorted}

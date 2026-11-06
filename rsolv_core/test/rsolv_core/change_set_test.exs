@@ -104,11 +104,59 @@ defmodule RsolvCore.ChangeSetTest do
           "a\0b",
           <<0xFF, ?a>>,
           String.duplicate("a", 4097),
-          ""
+          "",
+          "a\nb",
+          "a\rb",
+          "a\tb",
+          "a\x01b",
+          "a\x1fb",
+          "a\x7fb",
+          "a\u0085b",
+          "a\u009fb",
+          "a\u202ab",
+          "\u202eevil.js",
+          "a\u2066b",
+          "a\u2069b",
+          "-rf",
+          "src/-b"
         ] do
       test "refuses #{inspect(path, limit: 3, printable_limit: 16)}" do
         assert ChangeSet.from_json([add(unquote(path))]) == {:error, :invalid_path}
       end
+    end
+  end
+
+  describe "from_json/1 when a path is unusual but valid" do
+    for path <- ["a-b", "src/b-", "caf\u00e9.txt", "\u00a0nbsp", "a b"] do
+      test "accepts #{inspect(path)}" do
+        assert {:ok, [_entry]} = ChangeSet.from_json([add(unquote(path))])
+      end
+    end
+  end
+
+  describe "from_json/1 when one path is a directory of another" do
+    test "refuses adding both x and x/y" do
+      assert ChangeSet.from_json([add("x"), add("x/y")]) == {:error, :path_conflict}
+    end
+
+    test "refuses modifying x while adding x/y/z" do
+      assert ChangeSet.from_json([modify("x", %{}), add("x/y/z")]) == {:error, :path_conflict}
+    end
+
+    test "refuses the conflict when another path sorts between them" do
+      assert ChangeSet.from_json([add("x"), add("x-a"), add("x/y")]) == {:error, :path_conflict}
+    end
+
+    test "accepts deleting the file x and adding x/y" do
+      assert {:ok, [_delete, _add]} = ChangeSet.from_json([delete("x"), add("x/y")])
+    end
+
+    test "accepts adding x and deleting x/y" do
+      assert {:ok, [_add, _delete]} = ChangeSet.from_json([add("x"), delete("x/y")])
+    end
+
+    test "accepts x and xy, which share only a prefix of the name" do
+      assert {:ok, [_x, _xy]} = ChangeSet.from_json([add("x"), add("xy")])
     end
   end
 

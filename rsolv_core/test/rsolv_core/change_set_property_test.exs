@@ -11,10 +11,19 @@ defmodule RsolvCore.ChangeSetPropertyTest do
     [?a..?z, ?0..?9, [?., ?_, ?-]]
     |> Enum.concat()
     |> string(min_length: 1, max_length: 12)
-    |> filter(&(&1 not in [".", "..", ".git"]))
+    |> filter(&(&1 not in [".", "..", ".git"] and not String.starts_with?(&1, "-")))
   end
 
-  defp path, do: segment() |> list_of(min_length: 1, max_length: 4) |> map(&Enum.join(&1, "/"))
+  # Directory segments start with "d" and file names with "f", so no generated
+  # path is a directory of another.
+  defp path do
+    map({list_of(segment(), max_length: 3), segment()}, fn {dirs, name} ->
+      Enum.map_join(dirs, "/", &("d" <> &1)) |> join_name("f" <> name)
+    end)
+  end
+
+  defp join_name("", name), do: name
+  defp join_name(dirs, name), do: dirs <> "/" <> name
 
   defp sha, do: string(Enum.concat(?0..?9, ?a..?f), length: 40)
 
@@ -156,6 +165,18 @@ defmodule RsolvCore.ChangeSetPropertyTest do
 
         assert match?({:ok, _}, ChangeSet.from_json(document)) or
                  match?({:error, _}, ChangeSet.from_json(document))
+      end
+    end
+  end
+
+  describe "valid_path?/1 on control characters" do
+    property "refuses any path containing a C0 control or DEL" do
+      check all(
+              prefix <- path(),
+              byte <- one_of([integer(0..0x1F), constant(0x7F)]),
+              suffix <- string(:alphanumeric)
+            ) do
+        refute ChangeSet.valid_path?(prefix <> <<byte>> <> suffix)
       end
     end
   end
