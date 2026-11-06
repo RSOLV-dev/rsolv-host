@@ -16,10 +16,26 @@ jobs:
           docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo"
           ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
           git --redact --config /repo/.gitleaks.toml /repo
+  core:
+    strategy:
+      matrix: { runner: [ubuntu-24.04, ubuntu-24.04-arm] }
+    runs-on: ${{ matrix.runner }}
+    permissions: { contents: read }
+    defaults: { run: { working-directory: rsolv_core } }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with: { otp-version: "29.0.4", elixir-version: "1.20.2", version-type: strict }
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+      - run: mix format --check-formatted
+      - run: mix credo --strict
+      - run: mix test --warnings-as-errors
   ci-success:
     name: CI Success
     if: always()
-    needs: [gitleaks]
+    needs: [gitleaks, core]
     runs-on: ubuntu-24.04
     permissions: {}
     steps:

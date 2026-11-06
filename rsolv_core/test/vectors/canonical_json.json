@@ -1,0 +1,22 @@
+[
+  {
+    "name": "key order (RFC 8785 section 3.2.3)",
+    "input": "{\"\u20ac\":\"Euro Sign\",\"\\r\":\"Carriage Return\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\",\"1\":\"One\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\"}",
+    "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\",\"\u20ac\":\"Euro Sign\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\"}"
+  },
+  {
+    "name": "escapes",
+    "input": "{\"s\":\"\\\"\\\\\\b\\f\\n\\r\\t\\u0001\\u001f/<\"}",
+    "canonical": "{\"s\":\"\\\"\\\\\\b\\f\\n\\r\\t\\u0001\\u001f/<\"}"
+  },
+  {
+    "name": "nesting",
+    "input": "{\"b\":[1,{\"z\":null,\"a\":true}],\"a\":{}}",
+    "canonical": "{\"a\":{},\"b\":[1,{\"a\":true,\"z\":null}]}"
+  },
+  {
+    "name": "integers",
+    "input": "[0,-1,9007199254740991]",
+    "canonical": "[0,-1,9007199254740991]"
+  }
+]

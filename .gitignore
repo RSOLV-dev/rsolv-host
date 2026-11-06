@@ -4,3 +4,4 @@ deps/
 erl_crash.dump
 burrito_out/
 rsolv_host/erts/
+tmp/
