@@ -48,7 +48,7 @@
         "test/handler.test.js"
       ],
       "policy_version": "test-policy-1",
-      "verify_mode": "test-mode",
+      "verify_mode": "job",
       "effects": {
         "pr_title": "Fix example vulnerability in src/handler.js",
         "pr_body_sha256": "06f0f7a505cc4170af284de3178058872fa2a94d5ca122cef3cc3d61a8e7dbc7",
@@ -67,6 +67,6 @@
       "issued_at": "2026-11-05T12:00:00Z",
       "expires_at": "2026-11-05T12:30:00Z"
     },
-    "signature": "9pxz20DoO0MVTeOYXlbno9UbITN4eRQFKjzkCx4VS3gfM7yn1YPBqRJBXytAuWSGWu-v4FR2f4ihlqXc6IZ0Bg"
+    "signature": "mZR5tqgSVasngSPJAzTAtoIdHNQDaBhdlGDBu-h7G7s4D-j11falz6o6tkbGjrr3AOgciVb7xta0u2mHUycsAQ"
   }
 }
