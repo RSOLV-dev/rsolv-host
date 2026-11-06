@@ -16,6 +16,7 @@ defmodule RsolvCore.Decision do
   @context "rsolv-decision-v1\n"
   @max_validity_s 30 * 60
   @skew_s 60
+  @binding ~w(check_run_id_publish issue publish_attempt repository_id run_id)
   @max_envelope_bytes 1024 * 1024
   @max_keys_bytes 64 * 1024
   @fields ~w(v kid decision_id run_id repository_id issue work_attempt verify_attempt
@@ -41,6 +42,7 @@ defmodule RsolvCore.Decision do
           | :invalid_entry
           | :unsorted
           | :duplicate_path
+          | :invalid_binding
           | {:binding_mismatch, String.t()}
 
   @doc "Signs `decision` with an Ed25519 secret key, returning the envelope."
@@ -71,7 +73,13 @@ defmodule RsolvCore.Decision do
   @doc """
   Verifies the decision response body, the raw JSON bytes of
   `{"decision", "signature", ...}`, against a key set at `:now`, and checks that
-  the decision carries every `{field, value}` of `:expect` (the run binding).
+  the decision carries the run binding in `:expect`.
+
+  `:expect` is required and complete: a map with exactly the string keys
+  `run_id`, `repository_id`, `issue`, `publish_attempt` and
+  `check_run_id_publish`, each a positive integer the publish job established
+  from its own trusted identity. Anything else is `{:error, :invalid_binding}`,
+  before the response is looked at. Each field is compared with `===`.
 
   The bytes are decoded here, through `RsolvCore.StrictJson` (at most
   1 MiB, no repeated member names), so no caller can
@@ -83,18 +91,29 @@ defmodule RsolvCore.Decision do
           | {:error, error()}
   def verify(json, keys, opts) do
     now = Keyword.fetch!(opts, :now)
+    expect = Keyword.fetch!(opts, :expect)
 
-    with {:ok, envelope} <- decode(json),
+    with :ok <- expected_binding(expect),
+         {:ok, envelope} <- decode(json),
          {:ok, decision, signature} <- shape(envelope),
          {:ok, key} <- key_for(keys, decision["kid"], now),
          :ok <- signature(decision, signature, key),
          :ok <- version(decision),
          :ok <- validity(decision, now),
          {:ok, change_set} <- change_set(decision),
-         :ok <- binding(decision, Keyword.fetch!(opts, :expect)) do
+         :ok <- binding(decision, expect) do
       {:ok, %{decision: decision, change_set: change_set, envelope: envelope}}
     end
   end
+
+  defp expected_binding(expect) when is_map(expect) and map_size(expect) == length(@binding) do
+    if expect |> Map.keys() |> Enum.sort() == @binding and
+         expect |> Map.values() |> Enum.all?(&(is_integer(&1) and &1 > 0)),
+       do: :ok,
+       else: {:error, :invalid_binding}
+  end
+
+  defp expected_binding(_expect), do: {:error, :invalid_binding}
 
   defp decode(json) do
     case StrictJson.decode(json, max_bytes: @max_envelope_bytes) do
@@ -209,7 +228,7 @@ defmodule RsolvCore.Decision do
   defp red_paths_added(_entries, _red_paths), do: {:error, :bad_red_paths}
 
   defp binding(decision, expect) do
-    case Enum.find(expect, fn {field, value} -> decision[field] != value end) do
+    case Enum.find(expect, fn {field, value} -> decision[field] !== value end) do
       nil -> :ok
       {field, _value} -> {:error, {:binding_mismatch, field}}
     end

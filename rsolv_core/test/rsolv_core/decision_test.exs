@@ -190,6 +190,46 @@ defmodule RsolvCore.DecisionTest do
     end
   end
 
+  describe "verify/3 when the expected binding is incomplete" do
+    test "refuses an empty binding" do
+      assert verify(@envelope, expect: %{}) == {:error, :invalid_binding}
+    end
+
+    for field <- ~w(run_id repository_id issue publish_attempt check_run_id_publish) do
+      test "refuses a binding without #{field}" do
+        expect = Map.delete(@expect, unquote(field))
+        assert verify(@envelope, expect: expect) == {:error, :invalid_binding}
+      end
+
+      test "refuses a binding whose #{field} is not a positive integer" do
+        expect = Map.put(@expect, unquote(field), "#{@expect[unquote(field)]}")
+        assert verify(@envelope, expect: expect) == {:error, :invalid_binding}
+      end
+    end
+
+    test "refuses 1.0 where the decision says 1" do
+      expect = %{@expect | "publish_attempt" => 1.0}
+      assert verify(@envelope, expect: expect) == {:error, :invalid_binding}
+    end
+
+    test "refuses a binding with an extra field" do
+      expect = Map.put(@expect, "work_attempt", 1)
+      assert verify(@envelope, expect: expect) == {:error, :invalid_binding}
+    end
+
+    test "refuses a binding with atom keys" do
+      expect = %{
+        run_id: 1_000_000_001,
+        repository_id: 2_000_000_002,
+        issue: 42,
+        publish_attempt: 1,
+        check_run_id_publish: 3_000_000_003
+      }
+
+      assert verify(@envelope, expect: expect) == {:error, :invalid_binding}
+    end
+  end
+
   describe "parse_keys/1" do
     test "parses a key set" do
       assert {:ok, [%{kid: "test-2026-11", public_key: <<_::256>>, not_after: ~D[2027-01-31]}]} =
