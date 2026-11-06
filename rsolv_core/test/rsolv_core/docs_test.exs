@@ -7,6 +7,10 @@ defmodule RsolvCore.DocsTest do
   end
 
   describe "every module" do
+    test "has loadable docs", %{docs: docs} do
+      assert for({module, {:error, reason}} <- docs, do: {module, reason}) == []
+    end
+
     test "has a @moduledoc", %{docs: docs} do
       assert for({module, {:docs_v1, _, _, _, :none, _, _}} <- docs, do: module) == []
     end
