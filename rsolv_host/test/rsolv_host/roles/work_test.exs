@@ -163,6 +163,53 @@ defmodule RsolvHost.Roles.WorkTest do
       assert io_text(context.io) =~ ~r/::stop-commands::([0-9a-f]{32})\n::add-mask::x\n::\1::\n/
     end
 
+    test "asks bootstrap for exact runtime versions when the job requires them", context do
+      platform()
+      sandbox()
+      env = Map.put(context.env, "RSOLV_EXACT_RUNTIME_VERSIONS", "true")
+
+      Work.run(%{issue: 7}, env, deps(context))
+
+      assert {_, _, opts} = Enum.find(FakeExec.calls(), &match?({"docker", ["exec" | _], _}, &1))
+      assert opts[:input] == Frame.encode(%{"exact_runtime_versions" => true})
+    end
+
+    test "requires exactly \"true\" for exact runtime versions", context do
+      platform()
+      sandbox()
+      env = Map.put(context.env, "RSOLV_EXACT_RUNTIME_VERSIONS", "1")
+
+      Work.run(%{issue: 7}, env, deps(context))
+
+      assert {_, _, opts} = Enum.find(FakeExec.calls(), &match?({"docker", ["exec" | _], _}, &1))
+      assert opts[:input] == "0\n"
+    end
+
+    test "annotates the runtime installs bootstrap reports", context do
+      platform()
+
+      result = %{
+        "ok" => true,
+        "ecosystems" => ["python"],
+        "log_tail" => "",
+        "runtimes" => [
+          %{
+            "runtime" => "python",
+            "requested" => "3.11.9",
+            "actual" => "3.11.11",
+            "status" => "fallback"
+          }
+        ]
+      }
+
+      sandbox(bootstrap: {:ok, %{status: 0, output: JSON.encode!(result)}})
+
+      Work.run(%{issue: 7}, context.env, deps(context))
+
+      assert io_text(context.io) =~
+               "::warning title=RSOLV runtime::Python 3.11.9 has no published build attestations, so 3.11.11"
+    end
+
     test "never touches the mounted tree once the sandbox starts (acceptance 5a)", context do
       platform()
       sandbox()
