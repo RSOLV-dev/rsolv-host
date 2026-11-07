@@ -264,6 +264,12 @@ defmodule RsolvHost.Platform do
     |> ok()
   end
 
+  @doc "`:ok` when `GET /health` answers 2xx; its body is read (at most 64 KiB) and ignored."
+  @spec health(Req.Request.t()) :: :ok | {:error, error()}
+  def health(req) do
+    with {:ok, _resp} <- send_capped(req, :get, "/health", [], 64 * 1024), do: :ok
+  end
+
   @doc """
   Sends a request and decodes its JSON response with `RsolvCore.StrictJson`,
   reading at most `max_bytes` (16 MiB by default).

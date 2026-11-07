@@ -12,6 +12,20 @@ defmodule RsolvHost.ReleaseConfigTest do
   end
 
   describe "the release's steps" do
+    test "verify the ERTS against erts.lock before anything is assembled or wrapped" do
+      steps = Mix.Project.config()[:releases][:rsolv_host][:steps]
+
+      assert [verify, :assemble, wrap] = steps
+      assert verify == (&RsolvHost.Release.verify_erts/1)
+      assert wrap == (&Burrito.wrap/1)
+    end
+
+    test "add the step that keeps Burrito from writing a musl loader to /tmp" do
+      burrito = Mix.Project.config()[:releases][:rsolv_host][:burrito]
+
+      assert burrito[:extra_steps][:build][:pre] == [RsolvHost.Release.NoMuslLoader]
+    end
+
     test "are Mix's own or functions that exist, so `mix release` can run" do
       steps = Mix.Project.config()[:releases][:rsolv_host][:steps]
 

@@ -92,5 +92,27 @@ an error response never reaches them.
 - `rsolv_core/`: what the platform and the host must agree on byte for byte: the relay
   protocol types, canonical JSON (RFC 8785, for the subset RSOLV signs, which has no floats),
   the change set and the signed decision envelope. It depends on nothing in the platform.
-- `rsolv_host/`: the host client, to be packaged with Burrito as a self-contained Linux binary
+- `rsolv_host/`: the host client, packaged with Burrito as a self-contained Linux binary
   (not yet released).
+
+## Building the binary
+
+The binary wraps a glibc ERTS that we build ourselves from pinned sources
+(`rsolv_host/scripts/erts-inputs.env`), never Burrito's downloaded musl ERTS. `erts.lock`
+pins each architecture's ERTS tarball by SHA-256, and the release refuses any tarball that
+doesn't match (`RsolvHost.Release.verify_erts/2`). Each architecture builds natively on its
+own machine; nothing runs under emulation.
+
+```bash
+cd rsolv_host
+scripts/install-zig.sh "$HOME/zig-0.16.0" && export PATH="$HOME/zig-0.16.0:$PATH"  # Burrito 1.6.0 needs exactly 0.16.0
+scripts/build-erts.sh "$(uname -m)" erts                # needs Docker; prints the tarball's SHA-256
+MIX_ENV=prod BURRITO_TARGET="linux_$(uname -m)" mix do deps.get, release
+scripts/smoke.sh "burrito_out/rsolv_host_linux_$(uname -m)" --online
+```
+
+The ERTS build is reproducible: the same inputs give the same tarball, byte for byte, so a
+rebuild can be checked against `erts.lock`. The first run of the binary extracts it into
+`$RSOLV_HOST_INSTALL_DIR`, which must be under `$RUNNER_TEMP`. Two first runs against the same
+directory race (the loser exits 1, and the extracted tree stays intact), so the workflows must run
+the binary once, serially, before anything else.

@@ -20,8 +20,11 @@ defmodule RsolvHost.MixProject do
       ],
       releases: [
         rsolv_host: [
-          steps: [:assemble, &Burrito.wrap/1],
-          burrito: [targets: targets()]
+          steps: [&RsolvHost.Release.verify_erts/1, :assemble, &Burrito.wrap/1],
+          burrito: [
+            targets: targets(),
+            extra_steps: [build: [pre: [RsolvHost.Release.NoMuslLoader]]]
+          ]
         ]
       ]
     ]

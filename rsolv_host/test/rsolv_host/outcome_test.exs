@@ -53,6 +53,7 @@ defmodule RsolvHost.OutcomeTest do
             [
               :usage,
               {:preflight, "RSOLV_HOST_INSTALL_DIR"},
+              {:vm_env, "ERL_FLAGS"},
               :oidc_unavailable,
               {:oidc_http, 403},
               :api_url_not_allowed,
@@ -158,6 +159,11 @@ defmodule RsolvHost.OutcomeTest do
     test "names a missing Actions variable" do
       assert capture(&Outcome.annotate({:missing_env, "GITHUB_WORKSPACE"}, &1)) =~
                ~r/\A::error title=RSOLV configuration::GITHUB_WORKSPACE is not set/
+    end
+
+    test "names an ERL_* variable to unset" do
+      assert capture(&Outcome.annotate({:vm_env, "ERL_AFLAGS"}, &1)) =~
+               ~r/\A::error title=RSOLV configuration::Unset ERL_AFLAGS/
     end
 
     test "titles each class as the contract says" do

@@ -50,6 +50,7 @@ defmodule RsolvHost.Outcome do
   @spec classify(term()) :: class()
   def classify(:usage), do: :configuration
   def classify({:preflight, _variable}), do: :configuration
+  def classify({:vm_env, _variable}), do: :configuration
   def classify({:missing_env, _variable}), do: :configuration
   def classify(:oidc_unavailable), do: :configuration
   def classify({:oidc_http, status}) when status == 429 or status >= 500, do: :transient
@@ -131,6 +132,10 @@ defmodule RsolvHost.Outcome do
   defp message({:preflight, variable}, _class),
     do:
       "Set #{variable} so rsolv-host installs under $RUNNER_TEMP. Call RSOLV through its reusable workflows."
+
+  defp message({:vm_env, variable}, _class),
+    do:
+      "Unset #{variable}: it changes how rsolv-host's VM runs (crash dumps, configuration, code). Call RSOLV through its reusable workflows."
 
   defp message({:missing_env, variable}, _class),
     do: "#{variable} is not set. Run rsolv-host only inside RSOLV's reusable workflows."

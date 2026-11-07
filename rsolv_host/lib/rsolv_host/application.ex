@@ -1,8 +1,10 @@
 defmodule RsolvHost.Application do
   @moduledoc """
-  Starts the host. In a release (`run_cli`), it runs the command line once and
-  halts with its exit code; Burrito runs the release embedded, so this is the
-  entry point. `RsolvHost.TaskSupervisor` runs the token keeper's refreshes.
+  Starts the host. In a release (`run_cli`), `start/2` runs the command line to
+  the end and halts with its exit code, before it returns: Burrito boots the
+  release with `-s elixir start_cli`, which, once boot finishes, would run the
+  first argument as an Elixir script file. `RsolvHost.TaskSupervisor` (started
+  first) runs the token keeper's refreshes.
   """
 
   use Application
@@ -12,25 +14,20 @@ defmodule RsolvHost.Application do
 
   @impl true
   def start(_type, _args) do
-    Supervisor.start_link(children(Application.get_env(:rsolv_host, :run_cli, false)),
-      strategy: :one_for_one,
-      name: RsolvHost.Supervisor
-    )
-  end
+    {:ok, sup} =
+      Supervisor.start_link([{Task.Supervisor, name: RsolvHost.TaskSupervisor}],
+        strategy: :one_for_one,
+        name: RsolvHost.Supervisor
+      )
 
-  defp children(false), do: [{Task.Supervisor, name: RsolvHost.TaskSupervisor}]
+    if Application.get_env(:rsolv_host, :run_cli, false),
+      do:
+        run_cli(
+          fn -> CLI.main(Args.argv(), System.get_env(), :code.root_dir()) end,
+          &System.halt/1
+        )
 
-  defp children(true) do
-    children(false) ++
-      [
-        {Task,
-         fn ->
-           run_cli(
-             fn -> CLI.main(Args.argv(), System.get_env(), :code.root_dir()) end,
-             &System.halt/1
-           )
-         end}
-      ]
+    {:ok, sup}
   end
 
   @doc """

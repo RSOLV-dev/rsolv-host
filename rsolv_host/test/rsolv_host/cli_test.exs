@@ -132,6 +132,37 @@ defmodule RsolvHost.CLITest do
     end
   end
 
+  describe "main/3 selftest" do
+    test "signs and verifies the RFC 8032 vector and exits 0" do
+      out = capture_io(fn -> assert CLI.main(["selftest"], @env, @root) == 0 end)
+
+      assert out == "selftest: ed25519 ok\n"
+    end
+
+    test "when --online and the platform's /health answers 200, exits 0" do
+      Req.Test.stub(RsolvHost.Platform, fn conn ->
+        assert {conn.method, conn.request_path} == {"GET", "/health"}
+        Req.Test.json(conn, %{status: "ok"})
+      end)
+
+      out = capture_io(fn -> assert CLI.main(["selftest", "--online"], @env, @root) == 0 end)
+
+      assert out == "selftest: ed25519 ok\nselftest: platform ok\n"
+    end
+
+    test "when --online and /health answers 503, exits 3" do
+      Req.Test.stub(RsolvHost.Platform, &Plug.Conn.send_resp(&1, 503, ""))
+
+      capture_io(fn -> assert CLI.main(["selftest", "--online"], @env, @root) == 3 end)
+    end
+
+    test "when --online and the platform URL isn't allowed (no trailing dot), exits 2" do
+      env = Map.put(@env, "RSOLV_API_URL", "https://api.rsolv.dev")
+
+      capture_io(fn -> assert CLI.main(["selftest", "--online"], env, @root) == 2 end)
+    end
+  end
+
   describe "commands/0" do
     test "is exactly the five roles and leaves maintenance to Burrito" do
       assert CLI.commands() == ~w(publish scan selftest version work)
