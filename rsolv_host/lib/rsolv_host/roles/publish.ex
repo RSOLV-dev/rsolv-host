@@ -442,12 +442,12 @@ defmodule RsolvHost.Roles.Publish do
   end
 
   # A signed comment the host already posted on its issue (same body digest,
-  # by the token's own login, as often as the effects list it) isn't posted
+  # by the token's own actor, as often as the effects list it) isn't posted
   # again. Anyone can post the same text, so only the host's own count.
   defp comments(ctx, comments) do
-    with {:ok, login} <- GitHub.login(ctx.gh),
+    with {:ok, me} <- GitHub.viewer(ctx.gh),
          issues = comments |> Enum.map(&elem(&1, 0)) |> Enum.uniq(),
-         {:ok, posted} <- posted(ctx, login, issues),
+         {:ok, posted} <- posted(ctx, me, issues),
          {:ok, _posted} <- Enum.reduce_while(comments, {:ok, posted}, &comment(ctx, &1, &2)),
          do: :ok
   end
@@ -470,26 +470,27 @@ defmodule RsolvHost.Roles.Publish do
 
   # Reads at most 10 pages (1,000 comments) per issue. Past that, what the host
   # posted can't be known, so it posts nothing: {:error, :comment_scan_incomplete}.
-  defp posted(ctx, login, issues) do
+  defp posted(ctx, me, issues) do
     Enum.reduce_while(issues, {:ok, %{}}, fn issue, {:ok, acc} ->
-      case posted(ctx, login, issue, 1, acc) do
+      case posted(ctx, me, issue, 1, acc) do
         {:ok, acc} -> {:cont, {:ok, acc}}
         error -> {:halt, error}
       end
     end)
   end
 
-  defp posted(ctx, login, issue, page, acc) do
+  defp posted(ctx, me, issue, page, acc) do
     with {:ok, comments} <- GitHub.list_comments(ctx.gh, issue, page) do
       acc =
-        for %{"body" => body, "user" => %{"login" => ^login}} when is_binary(body) <- comments,
+        for %{"body" => body} = comment when is_binary(body) <- comments,
+            GitHub.same_actor?(me, comment["user"]),
             reduce: acc do
           acc -> Map.update(acc, {issue, sha256(body)}, 1, &(&1 + 1))
         end
 
       cond do
         length(comments) < 100 -> {:ok, acc}
-        page < 10 -> posted(ctx, login, issue, page + 1, acc)
+        page < 10 -> posted(ctx, me, issue, page + 1, acc)
         true -> {:error, :comment_scan_incomplete}
       end
     end

@@ -572,6 +572,40 @@ defmodule RsolvHost.Roles.PublishTest do
       assert FakeGithub.writes(context.gh).comments == [{7, %{"body" => @comment_body}}]
     end
 
+    test "with a GITHUB_TOKEN (GraphQL `github-actions`, REST `github-actions[bot]`), posts nothing new",
+         context do
+      platform(context)
+      :ok = run(context)
+
+      assert run(context) == :ok
+      assert FakeGithub.writes(context.gh).comments == [{7, %{"body" => @comment_body}}]
+    end
+
+    test "when GraphQL gives no database id, matches the login with `[bot]` stripped", context do
+      platform(context)
+      FakeGithub.viewer(context.gh, %{"login" => "github-actions", "databaseId" => nil})
+      :ok = run(context)
+
+      assert run(context) == :ok
+      assert FakeGithub.writes(context.gh).comments == [{7, %{"body" => @comment_body}}]
+    end
+
+    test "a user whose login matches the bot's but whose id doesn't isn't the host", context do
+      platform(context)
+      FakeGithub.put_comment(context.gh, 7, @comment_body, "github-actions")
+
+      assert run(context) == :ok
+      assert FakeGithub.writes(context.gh).comments == [{7, %{"body" => @comment_body}}]
+    end
+
+    test "when the token's identity is unknown, posts no comment", context do
+      platform(context)
+      FakeGithub.viewer(context.gh, %{"login" => nil, "databaseId" => 41_898_282})
+
+      assert {:error, :malformed_response} = run(context)
+      assert FakeGithub.writes(context.gh).comments == []
+    end
+
     test "when an issue has more comments than it can read, posts nothing and says so",
          context do
       platform(context)

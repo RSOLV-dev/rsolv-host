@@ -2,6 +2,7 @@ defmodule RsolvHost.GitHubTest do
   use ExUnit.Case, async: true
 
   alias RsolvHost.GitHub
+  doctest RsolvHost.GitHub, only: [same_actor?: 2]
 
   @env %{"GITHUB_TOKEN" => "ghs_test", "GITHUB_REPOSITORY" => "acme/app"}
 
@@ -70,7 +71,7 @@ defmodule RsolvHost.GitHubTest do
                GitHub.create_issue(gh(), %{"title" => "t", "body" => "b", "labels" => []})
     end
 
-    test "login/1 asks GraphQL's viewer at GITHUB_GRAPHQL_URL, and refuses anything else" do
+    test "viewer/1 asks GraphQL's viewer at GITHUB_GRAPHQL_URL, and refuses anything else" do
       {:ok, gh} =
         GitHub.new(Map.put(@env, "GITHUB_GRAPHQL_URL", "https://ghe.example/api/graphql"))
 
@@ -78,13 +79,40 @@ defmodule RsolvHost.GitHubTest do
         assert {conn.method, conn.host, conn.request_path} ==
                  {"POST", "ghe.example", "/api/graphql"}
 
-        Req.Test.json(conn, %{data: %{viewer: %{login: "github-actions[bot]"}}})
+        Req.Test.json(conn, %{data: %{viewer: %{login: "github-actions", databaseId: 41_898_282}}})
       end)
 
-      assert GitHub.login(gh) == {:ok, "github-actions[bot]"}
+      assert GitHub.viewer(gh) == {:ok, %{login: "github-actions", id: 41_898_282}}
+
+      Req.Test.stub(GitHub, &Req.Test.json(&1, %{data: %{viewer: %{login: "octocat"}}}))
+      assert GitHub.viewer(gh) == {:ok, %{login: "octocat", id: nil}}
 
       Req.Test.stub(GitHub, &Req.Test.json(&1, %{errors: [%{message: "no"}]}))
-      assert GitHub.login(gh) == {:error, :malformed_response}
+      assert GitHub.viewer(gh) == {:error, :malformed_response}
+
+      Req.Test.stub(
+        GitHub,
+        &Req.Test.json(&1, %{data: %{viewer: %{login: "x", databaseId: "7"}}})
+      )
+
+      assert GitHub.viewer(gh) == {:error, :malformed_response}
+    end
+
+    test "same_actor?/2 compares ids when both have one, else logins without `[bot]`" do
+      bot = %{login: "github-actions", id: 41_898_282}
+
+      assert GitHub.same_actor?(bot, %{"login" => "github-actions[bot]", "id" => 41_898_282})
+      refute GitHub.same_actor?(bot, %{"login" => "github-actions", "id" => 1})
+      refute GitHub.same_actor?(bot, %{"login" => "mallory", "id" => 2})
+
+      assert GitHub.same_actor?(%{bot | id: nil}, %{"login" => "github-actions[bot]", "id" => 9})
+
+      assert GitHub.same_actor?(%{bot | login: "github-actions[bot]"}, %{
+               "login" => "github-actions"
+             })
+
+      refute GitHub.same_actor?(%{bot | id: nil}, %{"login" => "github-actions-x[bot]"})
+      refute GitHub.same_actor?(bot, nil)
     end
 
     test "a refusal is the status and a fixed code, never GitHub's text" do

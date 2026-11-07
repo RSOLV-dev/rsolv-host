@@ -64,7 +64,7 @@ defmodule RsolvHost.GitHub do
 
   @doc """
   Req's retry policy (`RsolvHost.Http.retry/3`): only a read (the one GraphQL
-  query, `login/1`, included), or a blob or tree (content-addressed, so writing
+  query, `viewer/1`, included), or a blob or tree (content-addressed, so writing
   it twice gives the same object), is repeated after a transient failure. An issue, comment, label, pull request, commit or ref may have been
   written when the answer was lost; it is never repeated blind.
   """
@@ -90,26 +90,53 @@ defmodule RsolvHost.GitHub do
     end
   end
 
+  @typedoc "Who the token acts as: its login, and its database id when GraphQL gives one."
+  @type actor :: %{login: String.t(), id: pos_integer() | nil}
+
   @doc """
-  The login the token acts as: `github-actions[bot]` for a job's
-  `GITHUB_TOKEN`. Asked of GraphQL's `viewer` (`GITHUB_GRAPHQL_URL`), since
-  REST's `GET /user` refuses an installation token.
+  Who the token acts as, asked of GraphQL's `viewer` (`GITHUB_GRAPHQL_URL`),
+  since REST's `GET /user` refuses an installation token. The two APIs name a
+  bot differently (GraphQL `github-actions`, REST `github-actions[bot]`), so
+  compare with `same_actor?/2`, never `==`.
   """
-  @spec login(t()) :: {:ok, String.t()} | {:error, term()}
-  def login(gh) do
-    query = %{query: "query { viewer { login } }"}
+  @spec viewer(t()) :: {:ok, actor()} | {:error, term()}
+  def viewer(gh) do
+    query = %{query: "query { viewer { login databaseId } }"}
 
     with {:ok, %{status: 200, body: body}} <-
            Http.request(gh.req, [method: :post, url: gh.graphql_url, json: query], 64 * 1024),
-         {:ok, %{"data" => %{"viewer" => %{"login" => login}}}} when is_binary(login) <-
-           StrictJson.decode(body) do
-      {:ok, login}
+         {:ok, %{"data" => %{"viewer" => %{"login" => login} = viewer}}} when is_binary(login) <-
+           StrictJson.decode(body),
+         id when is_nil(id) or (is_integer(id) and id > 0) <- viewer["databaseId"] do
+      {:ok, %{login: login, id: id}}
     else
       {:ok, %{status: status}} -> {:error, {:github, status, code(status)}}
       {:error, _reason} = error -> error
       _malformed -> {:error, :malformed_response}
     end
   end
+
+  @doc """
+  Whether a REST `user` object is `actor`: by id when both have one, else by
+  login with a trailing `[bot]` stripped from both.
+
+      iex> RsolvHost.GitHub.same_actor?(%{login: "github-actions", id: 41898282},
+      ...>   %{"login" => "github-actions[bot]", "id" => 41898282})
+      true
+      iex> RsolvHost.GitHub.same_actor?(%{login: "github-actions", id: 41898282},
+      ...>   %{"login" => "github-actions", "id" => 7})
+      false
+  """
+  @spec same_actor?(actor(), map() | nil) :: boolean()
+  def same_actor?(%{id: id}, %{"id" => user_id}) when is_integer(id) and is_integer(user_id),
+    do: id == user_id
+
+  def same_actor?(%{login: login}, %{"login" => user_login}) when is_binary(user_login),
+    do: unbot(login) == unbot(user_login)
+
+  def same_actor?(_actor, _user), do: false
+
+  defp unbot(login), do: String.replace_suffix(login, "[bot]", "")
 
   @doc "One page (100) of the repository's open issues carrying every label in `labels`."
   @spec list_issues(t(), [String.t()], pos_integer()) :: {:ok, [map()]} | {:error, error()}
