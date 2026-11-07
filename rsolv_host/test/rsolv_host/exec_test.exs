@@ -45,7 +45,8 @@ defmodule RsolvHost.ExecTest do
     end
 
     test "stderr joins the captured output, so it never reaches the Actions log" do
-      assert {:ok, %{output: "ls:" <> _}} = Exec.run("ls", ["/rsolv-no-such-path"])
+      assert {:ok, %{status: 2, output: output}} = Exec.run("ls", ["/rsolv-no-such-path"])
+      assert output =~ "/rsolv-no-such-path"
     end
 
     test "leaves no port messages behind after a kill" do
