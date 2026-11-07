@@ -109,10 +109,22 @@ jobs:
             rsolv_host/burrito_out/rsolv_host_linux_${{ matrix.arch }}.sha256
           if-no-files-found: error
           retention-days: 14
+  viewer:
+    # The publish role finds its own comments by the token's databaseId. This
+    # asks GraphQL's viewer what a real GITHUB_TOKEN is.
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - name: GITHUB_TOKEN's GraphQL viewer is github-actions[bot] (databaseId 41898282)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          viewer=$(gh api graphql -f query='{viewer{login databaseId}}' --jq .data.viewer)
+          echo "viewer: $viewer"
+          test "$(jq -r .databaseId <<<"$viewer")" = 41898282
   ci-success:
     name: CI Success
     if: always()
-    needs: [gitleaks, core, host, package]
+    needs: [gitleaks, core, host, package, viewer]
     runs-on: ubuntu-24.04
     permissions: {}
     steps:
