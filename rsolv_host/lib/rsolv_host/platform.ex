@@ -121,6 +121,29 @@ defmodule RsolvHost.Platform do
     |> ok()
   end
 
+  @doc """
+  Opens a session's event stream, feeding each chunk to `into` (a `Req` `:into`
+  function), with no retry: the relay reconnects itself. The body is the
+  relay's to bound, through `RsolvCore.Relay.SSE`.
+  """
+  @spec stream(Req.Request.t(), String.t(), phase(), String.t(), function()) ::
+          {:ok, Req.Response.t()} | {:error, error()}
+  def stream(req, raw, phase, session_id, into) do
+    case Req.request(req,
+           method: :get,
+           url: "/api/v1/#{Map.fetch!(@phases, phase)}/stream/#{segment(session_id)}",
+           auth: {:bearer, raw},
+           headers: [accept: "text/event-stream"],
+           retry: false,
+           into: into
+         ) do
+      {:ok, %Req.Response{status: 200} = resp} -> {:ok, resp}
+      {:ok, %Req.Response{status: status}} -> {:error, {:platform, status, nil}}
+      {:error, %Req.TransportError{reason: reason}} -> {:error, {:transport, reason}}
+      {:error, _exception} -> {:error, {:transport, :request_failed}}
+    end
+  end
+
   @doc "Reads a session's status."
   @spec session_status(Req.Request.t(), String.t(), phase(), String.t()) ::
           {:ok, map()} | {:error, error()}

@@ -22,7 +22,12 @@ defmodule RsolvHost.TokenKeeper do
   @default_retry_ms 30_000
 
   @type role :: :scan | :work | :publish
-  @type served :: %{raw: String.t(), binding: map(), expires_at: DateTime.t()}
+  @type served :: %{
+          raw: String.t(),
+          binding: map(),
+          expires_at: DateTime.t(),
+          req: Req.Request.t()
+        }
 
   @doc """
   Exchanges (or, with `resume: true`, refreshes the hand-off token) and starts
@@ -48,7 +53,10 @@ defmodule RsolvHost.TokenKeeper do
     end
   end
 
-  @doc "The current run token, or `{:error, :token_expired}` once it has expired unrefreshed."
+  @doc """
+  The current run token with its binding and the platform request to use it with,
+  or `{:error, :token_expired}` once it has expired unrefreshed.
+  """
   @spec token(GenServer.server()) :: {:ok, served()} | {:error, :token_expired}
   def token(keeper), do: GenServer.call(keeper, :token)
 
@@ -79,7 +87,7 @@ defmodule RsolvHost.TokenKeeper do
   def handle_call(:token, _from, state) do
     reply =
       if DateTime.compare(DateTime.utc_now(), state.expires_at) == :lt,
-        do: {:ok, Map.take(state, [:raw, :binding, :expires_at])},
+        do: {:ok, Map.take(state, [:raw, :binding, :expires_at, :req])},
         else: {:error, :token_expired}
 
     {:reply, reply, state}
