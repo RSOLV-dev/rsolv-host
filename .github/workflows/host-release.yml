@@ -1,0 +1,158 @@
+# Releases the host client binaries (ADR-077 amendment). See docs/RELEASE-RUNBOOK.md.
+#   build:   natively per architecture, read-only, with the pinned toolchain on the
+#            released, attested ERTS; smoke-tested before anything leaves the job.
+#   attest:  build provenance for both binaries (no repository code runs here).
+#   publish: tags only, behind the `release` environment; draft, attach, publish.
+# A pull request that touches the release path runs build and attest as a dry run,
+# on an ERTS built from the same pinned sources (checked against erts.lock), since
+# a pull request must not depend on a release existing.
+name: host-release
+on:
+  push:
+    tags: ["host-v*"]
+  pull_request:
+    paths:
+      - .github/workflows/host-release.yml
+      - rsolv_host/scripts/install-toolchain.sh
+      - rsolv_host/scripts/install-zig.sh
+      - rsolv_host/scripts/smoke.sh
+permissions: {}
+# A tag runs once; a pull request's newer push replaces its older dry run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run: { shell: bash }
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    permissions: { contents: read, attestations: read }
+    defaults: { run: { working-directory: rsolv_host } }
+    env:
+      ARCH: ${{ matrix.arch }}
+      ASSET: rsolv-host-linux-${{ matrix.arch }}
+      BURRITO_TARGET: linux_${{ matrix.arch }}
+      MIX_ENV: prod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false, fetch-depth: 0 }
+      - name: The tag matches the app version, its commit is on main, and the sandbox image is pinned
+        if: github.event_name == 'push'
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          grep -qF "version: \"${GITHUB_REF_NAME#host-v}\"," mix.exs
+          grep -qE 'rsolv-sandbox@sha256:[0-9a-f]{64}"' config/config.exs
+          if grep -qE 'rsolv-sandbox@sha256:0{64}' config/config.exs; then exit 1; fi
+      - name: Install Zig 0.16.0 (pinned tarball, SHA-256 checked)
+        run: |
+          scripts/install-zig.sh "$RUNNER_TEMP/zig"
+          echo "$RUNNER_TEMP/zig" >>"$GITHUB_PATH"
+      - name: Fetch the released ERTS and verify its provenance
+        if: github.event_name == 'push'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          otp=$(jq -er .otp erts.lock)
+          gh release download "erts-otp-$otp" --repo "$GITHUB_REPOSITORY" --dir erts --pattern "linux_$ARCH.tar.gz"
+          gh attestation verify "erts/linux_$ARCH.tar.gz" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/host-erts.yml" \
+            --source-ref "refs/tags/erts-otp-$otp" --deny-self-hosted-runners
+      - name: "Dry run: build the ERTS from the same pinned sources"
+        if: github.event_name == 'pull_request'
+        run: scripts/build-erts.sh "$ARCH" erts
+      - name: The ERTS matches erts.lock
+        run: |
+          want=$(jq -er --arg t "linux_$ARCH" '.targets[$t].sha256' erts.lock)
+          echo "$want  erts/linux_$ARCH.tar.gz" | sha256sum -c -
+      - name: Install OTP (that ERTS), Elixir, Hex and rebar3, each SHA-256 checked
+        run: |
+          tc="$RUNNER_TEMP/toolchain"
+          scripts/install-toolchain.sh erts "$tc"
+          { echo "$tc/otp/bin"; echo "$tc/elixir/bin"; } >>"$GITHUB_PATH"
+          echo "MIX_HOME=$tc/mix" >>"$GITHUB_ENV"
+      - name: Build the binary (verify_erts checks the ERTS against erts.lock again)
+        run: |
+          export XDG_CACHE_HOME="$RUNNER_TEMP/cache"
+          mix deps.get --check-locked
+          mix release
+          test "$(find "$XDG_CACHE_HOME" -path '*burrito*' -type f | wc -l)" -eq 0
+      - name: Smoke-test the real binary
+        run: scripts/smoke.sh "burrito_out/rsolv_host_linux_$ARCH" --online
+      - name: Name the asset and record its checksum
+        run: |
+          mkdir ../dist
+          mv "burrito_out/rsolv_host_linux_$ARCH" "../dist/$ASSET"
+          (cd ../dist && sha256sum "$ASSET" | tee "$ASSET.sha256")
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rsolv-host-linux-${{ matrix.arch }}
+          path: |
+            dist/rsolv-host-linux-${{ matrix.arch }}
+            dist/rsolv-host-linux-${{ matrix.arch }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+  attest:
+    needs: build
+    # Fork pull requests get no OIDC token, so they stop after build.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: { id-token: write, attestations: write }
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { pattern: "rsolv-host-linux-*", merge-multiple: true, path: dist }
+      - name: Checksums still match
+        working-directory: dist
+        run: |
+          sha256sum -c ./*.sha256
+          cat ./*.sha256 >SHA256SUMS && rm ./*.sha256
+          tee -a "$GITHUB_STEP_SUMMARY" <SHA256SUMS
+      - id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with: { subject-checksums: dist/SHA256SUMS }
+      - name: The attestation verifies with the runbook's flags
+        env: { GH_TOKEN: "${{ github.token }}", BUNDLE: "${{ steps.attest.outputs.bundle-path }}" }
+        run: |
+          cp "$BUNDLE" dist/provenance.sigstore.jsonl
+          for f in dist/rsolv-host-linux-x86_64 dist/rsolv-host-linux-aarch64; do
+            gh attestation verify "$f" --bundle dist/provenance.sigstore.jsonl --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/host-release.yml" \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: { name: release, path: dist/, if-no-files-found: error, retention-days: 7 }
+  publish:
+    needs: attest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/host-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: release, path: dist }
+      - name: Draft, attach, then publish (immutable release)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          tag=$GITHUB_REF_NAME
+          {
+            echo "RSOLV host client ${tag#host-v} for x86_64 and aarch64 Linux, each built and smoke-tested natively on GitHub-hosted runners by \`host-release.yml\` at $GITHUB_SHA."
+            echo; echo "SHA-256 (pin these):"; echo; echo '```'; cat dist/SHA256SUMS; echo '```'; echo
+            echo "Verify:"; echo; echo '```'
+            echo "sha256sum -c SHA256SUMS"
+            echo "gh attestation verify rsolv-host-linux-x86_64 --repo $GITHUB_REPOSITORY \\"
+            echo "  --signer-workflow $GITHUB_REPOSITORY/.github/workflows/host-release.yml \\"
+            echo "  --source-ref refs/tags/$tag --source-digest $GITHUB_SHA --deny-self-hosted-runners"
+            echo '```'
+          } >notes.md
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$tag" --notes-file notes.md
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
+            dist/rsolv-host-linux-x86_64 dist/rsolv-host-linux-aarch64 dist/SHA256SUMS dist/provenance.sigstore.jsonl
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
