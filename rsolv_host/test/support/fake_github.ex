@@ -365,14 +365,14 @@ defmodule RsolvHost.FakeGithub do
     end
   end
 
-  defp user(@bot), do: %{login: @bot, id: @bot_id, type: "Bot"}
-  defp user(login), do: %{login: login, id: :erlang.phash2(login) + 1, type: "User"}
-
   defp route(%{compare: :not_found} = state, "GET", "/compare/" <> _range, _query),
     do: {{404, %{message: "Not Found"}}, state}
 
   defp route(state, "GET", "/compare/" <> _range, _query),
     do: {{200, %{status: state.compare}}, state}
+
+  defp user(@bot), do: %{login: @bot, id: @bot_id, type: "Bot"}
+  defp user(login), do: %{login: login, id: :erlang.phash2(login) + 1, type: "User"}
 
   defp load(_state, nil), do: %{}
 

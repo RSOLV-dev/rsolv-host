@@ -98,7 +98,7 @@ defmodule RsolvHost.GitHubTest do
       assert GitHub.viewer(gh) == {:error, :malformed_response}
     end
 
-    test "same_actor?/2 compares ids when both have one, else logins without `[bot]`" do
+    test "same_actor?/2 compares ids when the actor has one, else logins without `[bot]`" do
       bot = %{login: "github-actions", id: 41_898_282}
 
       assert GitHub.same_actor?(bot, %{"login" => "github-actions[bot]", "id" => 41_898_282})
@@ -107,12 +107,20 @@ defmodule RsolvHost.GitHubTest do
 
       assert GitHub.same_actor?(%{bot | id: nil}, %{"login" => "github-actions[bot]", "id" => 9})
 
-      assert GitHub.same_actor?(%{bot | login: "github-actions[bot]"}, %{
+      assert GitHub.same_actor?(%{login: "github-actions[bot]", id: nil}, %{
                "login" => "github-actions"
              })
 
       refute GitHub.same_actor?(%{bot | id: nil}, %{"login" => "github-actions-x[bot]"})
       refute GitHub.same_actor?(bot, nil)
+    end
+
+    test "same_actor?/2, when the actor's id is known, never falls back to the login" do
+      bot = %{login: "github-actions", id: 41_898_282}
+
+      refute GitHub.same_actor?(bot, %{"login" => "github-actions[bot]"})
+      refute GitHub.same_actor?(bot, %{"login" => "github-actions[bot]", "id" => nil})
+      refute GitHub.same_actor?(bot, %{"login" => "github-actions", "id" => "41898282"})
     end
 
     test "a refusal is the status and a fixed code, never GitHub's text" do

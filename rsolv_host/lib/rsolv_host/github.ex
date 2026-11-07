@@ -117,8 +117,9 @@ defmodule RsolvHost.GitHub do
   end
 
   @doc """
-  Whether a REST `user` object is `actor`: by id when both have one, else by
-  login with a trailing `[bot]` stripped from both.
+  Whether a REST `user` object is `actor`: by id when the actor has one (a
+  user without an integer id is then never `actor`), else by login with a
+  trailing `[bot]` stripped from both.
 
       iex> RsolvHost.GitHub.same_actor?(%{login: "github-actions", id: 41898282},
       ...>   %{"login" => "github-actions[bot]", "id" => 41898282})
@@ -130,6 +131,8 @@ defmodule RsolvHost.GitHub do
   @spec same_actor?(actor(), map() | nil) :: boolean()
   def same_actor?(%{id: id}, %{"id" => user_id}) when is_integer(id) and is_integer(user_id),
     do: id == user_id
+
+  def same_actor?(%{id: id}, _user) when is_integer(id), do: false
 
   def same_actor?(%{login: login}, %{"login" => user_login}) when is_binary(user_login),
     do: unbot(login) == unbot(user_login)
