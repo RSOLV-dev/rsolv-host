@@ -73,6 +73,14 @@ defmodule RsolvHost.SandboxDockerTest do
       assert run(sbx, code ++ ["%{http_connect}", "https://1.1.1.1"]).output == "403"
     end
 
+    test "can't use an allowlisted host's other ports, by plain HTTP or CONNECT", %{sbx: sbx} do
+      code = ["curl", "-s", "-m", "20", "-o", "/dev/null", "-w"]
+
+      assert run(sbx, code ++ ["%{http_code}", "http://github.com/"]).output == "403"
+      assert run(sbx, code ++ ["%{http_code}", "http://github.com:8080/"]).output == "403"
+      assert run(sbx, code ++ ["%{http_connect}", "https://github.com:8443/"]).output == "403"
+    end
+
     test "has no network at all once disconnected", %{sbx: sbx} do
       assert Sandbox.disconnect(sbx) == :ok
       assert run(sbx, ["curl", "-sS", "-m", "5", "https://api.github.com/zen"]).status != 0

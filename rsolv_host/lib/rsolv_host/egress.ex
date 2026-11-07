@@ -1,8 +1,9 @@
 defmodule RsolvHost.Egress do
   @moduledoc """
   The sandbox's default-deny egress (RFC-150 §9, ADR-076): a squid proxy that
-  allows CONNECT to port 443 of the allowlisted hosts only. `dstdomain -n`
-  disables reverse-DNS matching, so an IP literal never matches a name.
+  allows port 443 of the allowlisted hosts only, by CONNECT or plain HTTP;
+  every other port is denied first. `dstdomain -n` disables reverse-DNS
+  matching, so an IP literal never matches a name.
   """
 
   @external_resource squid_conf = Path.join([__DIR__, "..", "..", "priv", "squid.conf"])
@@ -23,7 +24,7 @@ defmodule RsolvHost.Egress do
   @spec allowlist() :: String.t()
   def allowlist, do: Enum.map_join(@hosts, &(&1 <> "\n"))
 
-  @doc "The proxy's configuration, the step-1 spike's `squid.conf` byte for byte."
+  @doc "The proxy's configuration: the step-1 spike's `squid.conf`, plus a deny for every port but 443."
   @spec squid_conf() :: String.t()
   def squid_conf, do: @squid_conf
 end
