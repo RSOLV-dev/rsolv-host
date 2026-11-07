@@ -9,14 +9,18 @@ defmodule RsolvHost.FakeGithub do
   As on GitHub, a commit's SHA covers its author date, so writing the same
   commit twice gives two SHAs; a second open pull request for the same head
   and base is refused with 422; adding labels is a union. `drop_response/3`
-  commits a write and then loses its response. The token is
-  `github-actions[bot]` (GraphQL `viewer`), and authors every comment it posts.
+  commits a write and then loses its response. The token acts as GitHub
+  Actions' bot and authors every comment it posts. As on GitHub, the two APIs
+  name it differently: GraphQL's `viewer` says `github-actions` (database id
+  41898282), REST's comment `user` says `github-actions[bot]` (`id` 41898282,
+  `type` `Bot`). `viewer/2` overrides what GraphQL says.
   """
 
   alias RsolvCore.ChangeSet
 
   @repo "/repos/acme/app"
   @bot "github-actions[bot]"
+  @bot_id 41_898_282
 
   @doc "Starts an empty repository and routes `RsolvHost.GitHub` to it."
   @spec start() :: pid()
@@ -32,6 +36,7 @@ defmodule RsolvHost.FakeGithub do
           pulls: [],
           labels: [],
           comments: [],
+          viewer: %{"login" => "github-actions", "databaseId" => @bot_id},
           compare: "identical",
           tamper: nil,
           truncated: false,
@@ -153,6 +158,10 @@ defmodule RsolvHost.FakeGithub do
         %{state | comments: state.comments ++ [{number, id, %{"body" => body}, login}]}
       end)
 
+  @doc "What GraphQL's `viewer` answers from now on."
+  @spec viewer(pid(), map()) :: :ok
+  def viewer(agent, viewer), do: Agent.update(agent, &%{&1 | viewer: viewer})
+
   @doc "Makes every tree listing say `truncated: true`."
   @spec truncate(pid()) :: :ok
   def truncate(agent), do: Agent.update(agent, &%{&1 | truncated: true})
@@ -200,8 +209,8 @@ defmodule RsolvHost.FakeGithub do
   defp handle(agent, %{request_path: "/graphql"} = conn) do
     {:ok, raw, conn} = Plug.Conn.read_body(conn)
     Agent.update(agent, &%{&1 | requests: [{conn.method, "/graphql"} | &1.requests]})
-    %{"query" => "query { viewer { login } }"} = JSON.decode!(raw)
-    Req.Test.json(conn, %{data: %{viewer: %{login: @bot}}})
+    %{"query" => "query { viewer { login databaseId } }"} = JSON.decode!(raw)
+    Req.Test.json(conn, %{data: %{viewer: Agent.get(agent, & &1.viewer)}})
   end
 
   defp handle(agent, conn) do
@@ -324,7 +333,7 @@ defmodule RsolvHost.FakeGithub do
 
     comments =
       for {^issue, id, %{"body" => body}, login} <- state.comments,
-          do: %{id: id, body: body, user: %{login: login}}
+          do: %{id: id, body: body, user: user(login)}
 
     {{200, comments |> Enum.chunk_every(100) |> Enum.at(String.to_integer(page) - 1, [])}, state}
   end
@@ -355,6 +364,9 @@ defmodule RsolvHost.FakeGithub do
          %{state | comments: state.comments ++ [{String.to_integer(n), id, body, @bot}]}}
     end
   end
+
+  defp user(@bot), do: %{login: @bot, id: @bot_id, type: "Bot"}
+  defp user(login), do: %{login: login, id: :erlang.phash2(login) + 1, type: "User"}
 
   defp route(%{compare: :not_found} = state, "GET", "/compare/" <> _range, _query),
     do: {{404, %{message: "Not Found"}}, state}
