@@ -1,6 +1,8 @@
 defmodule RsolvHost.ReleaseTest do
   use ExUnit.Case, async: true
 
+  import Bitwise
+
   alias RsolvHost.Release
 
   @moduletag :tmp_dir
@@ -48,12 +50,34 @@ defmodule RsolvHost.ReleaseTest do
   defp sha256(bytes), do: :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
 
   describe "verify_erts/2" do
-    test "when every target's tarball matches the lock, returns the release unchanged",
+    defp custom_erts(%Mix.Release{options: options}, name),
+      do: options[:burrito][:targets][name][:custom_erts]
+
+    defp verify(release, lock, tmp_dir, env \\ %{}),
+      do: Release.verify_erts(release, lock: lock, env: env, stage_root: tmp_dir)
+
+    test "when every target's tarball matches the lock, points each target at a checked copy in a private directory",
          %{tmp_dir: tmp_dir} do
       {tarballs, lock} = setup_erts(tmp_dir, %{})
-      release = release(tarballs)
 
-      assert Release.verify_erts(release, lock: lock, env: %{}) == release
+      verified = verify(release(tarballs), lock, tmp_dir)
+
+      for {name, source} <- tarballs do
+        staged = custom_erts(verified, name)
+        assert staged != source
+        assert File.read!(staged) == File.read!(source)
+        assert (File.stat!(Path.dirname(staged)).mode &&& 0o777) == 0o700
+      end
+    end
+
+    test "when a tarball is swapped after the check, Burrito still gets the checked bytes",
+         %{tmp_dir: tmp_dir} do
+      {tarballs, lock} = setup_erts(tmp_dir, %{})
+      verified = verify(release(tarballs), lock, tmp_dir)
+
+      File.write!(tarballs.linux_x86_64, "tampered erts")
+
+      assert File.read!(custom_erts(verified, :linux_x86_64)) == "x86 erts"
     end
 
     test "when a tarball's hash differs from the lock, raises naming the target",
@@ -84,10 +108,9 @@ defmodule RsolvHost.ReleaseTest do
 
     test "when BURRITO_TARGET picks one target, only that one is checked", %{tmp_dir: tmp_dir} do
       {tarballs, lock} = setup_erts(tmp_dir, %{linux_aarch64: ""})
-      release = release(tarballs)
+      verified = verify(release(tarballs), lock, tmp_dir, %{"BURRITO_TARGET" => "linux_x86_64"})
 
-      assert Release.verify_erts(release, lock: lock, env: %{"BURRITO_TARGET" => "linux_x86_64"}) ==
-               release
+      assert File.read!(custom_erts(verified, :linux_x86_64)) == "x86 erts"
     end
 
     test "when BURRITO_TARGET picks a target whose hash differs, raises", %{tmp_dir: tmp_dir} do

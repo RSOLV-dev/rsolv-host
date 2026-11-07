@@ -74,41 +74,79 @@ defmodule RsolvHost.Release do
   end
 
   @doc """
-  Returns `release` unchanged when the ERTS tarball of every target being built
-  (all of them, or only `BURRITO_TARGET` when that's set) exists and matches the
-  lock; raises `Mix.Error` naming the target otherwise.
+  Checks the ERTS tarball of every target being built (all of them, or only
+  `BURRITO_TARGET` when that's set) and returns `release` with each one's
+  `custom_erts` pointing at the checked bytes: the tarball is copied into a new
+  private (0700) directory, and that copy must match `erts.lock`. Burrito
+  unpacks the copy, so changing the source after this step changes nothing.
+  Raises `Mix.Error` naming the target otherwise.
 
-  Options: `:lock` (default `"erts.lock"`) and `:env` (default `System.get_env/0`).
+  Options: `:lock` (default `"erts.lock"`), `:env` (default
+  `System.get_env/0`) and `:stage_root` (default `System.tmp_dir!/0`).
   """
   @spec verify_erts(Mix.Release.t(), keyword()) :: Mix.Release.t()
   def verify_erts(%Mix.Release{options: options} = release, opts \\ []) do
     lock = opts |> Keyword.get(:lock, "erts.lock") |> File.read!() |> JSON.decode!()
     env = Keyword.get_lazy(opts, :env, &System.get_env/0)
-    targets = options |> Keyword.fetch!(:burrito) |> Keyword.fetch!(:targets)
+    stage = opts |> Keyword.get_lazy(:stage_root, &System.tmp_dir!/0) |> private_dir()
 
-    for {name, target} <- targets, building?(name, env) do
-      verify_target(Atom.to_string(name), target[:custom_erts], lock["targets"])
-    end
+    targets =
+      for {name, target} <- options |> Keyword.fetch!(:burrito) |> Keyword.fetch!(:targets) do
+        if building?(name, env) do
+          staged =
+            stage_target(Atom.to_string(name), target[:custom_erts], lock["targets"], stage)
 
-    release
+          {name, Keyword.put(target, :custom_erts, staged)}
+        else
+          {name, target}
+        end
+      end
+
+    %{release | options: put_in(options, [:burrito, :targets], targets)}
+  end
+
+  # A new directory only this user can enter; File.mkdir! fails if it exists.
+  defp private_dir(root) do
+    dir =
+      Path.join(
+        root,
+        "rsolv-host-erts-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+      )
+
+    File.mkdir!(dir)
+    File.chmod!(dir, 0o700)
+    dir
   end
 
   defp building?(name, %{"BURRITO_TARGET" => only}), do: Atom.to_string(name) == only
   defp building?(_name, _env), do: true
 
-  defp verify_target(name, nil, _locked),
+  defp stage_target(name, nil, _locked, _stage),
     do: Mix.raise("ERTS #{name}: no custom_erts, so Burrito would download its musl ERTS")
 
-  defp verify_target(name, path, locked) do
+  defp stage_target(name, path, locked, stage) do
+    staged = Path.join(stage, "#{name}.tar.gz")
+
     with %{"sha256" => "" <> want} when want != "" <- locked[name],
          true <- String.ends_with?(path, ".tar.gz") and File.regular?(path),
-         ^want <- sha256_file(path) do
-      :ok
+         :ok <- File.cp(path, staged),
+         ^want <- sha256_file(staged) do
+      staged
     else
-      nil -> Mix.raise("ERTS #{name}: not in erts.lock")
-      %{} -> Mix.raise("ERTS #{name}: erts.lock has no SHA-256")
-      false -> Mix.raise("ERTS #{name}: #{path} is not a local .tar.gz file")
-      _other -> Mix.raise("ERTS #{name}: #{path} doesn't match its erts.lock SHA-256")
+      nil ->
+        Mix.raise("ERTS #{name}: not in erts.lock")
+
+      %{} ->
+        Mix.raise("ERTS #{name}: erts.lock has no SHA-256")
+
+      false ->
+        Mix.raise("ERTS #{name}: #{path} is not a local .tar.gz file")
+
+      {:error, reason} ->
+        Mix.raise("ERTS #{name}: can't stage #{path}: #{:file.format_error(reason)}")
+
+      _other ->
+        Mix.raise("ERTS #{name}: #{path} doesn't match its erts.lock SHA-256")
     end
   end
 

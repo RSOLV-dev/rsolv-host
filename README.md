@@ -100,7 +100,8 @@ an error response never reaches them.
 The binary wraps a glibc ERTS that we build ourselves from pinned sources
 (`rsolv_host/scripts/erts-inputs.env`), never Burrito's downloaded musl ERTS. `erts.lock`
 pins each architecture's ERTS tarball by SHA-256, and the release refuses any tarball that
-doesn't match (`RsolvHost.Release.verify_erts/2`). Each architecture builds natively on its
+doesn't match (`RsolvHost.Release.verify_erts/2`). It checks a copy in a new private
+directory, and Burrito unpacks that copy, so the tarball can't change between check and use. Each architecture builds natively on its
 own machine; nothing runs under emulation.
 
 Burrito's launcher is patched at build time (`rsolv_host/patches/burrito-launcher-env.patch`,
