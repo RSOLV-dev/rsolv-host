@@ -120,6 +120,25 @@ defmodule RsolvHost.RuntimesTest do
       end
     end
 
+    test "writes a bounded number of annotations, however many reports the sandbox returns" do
+      failed = %{
+        "runtime" => "php",
+        "requested" => "8.3.36",
+        "status" => "failed",
+        "reason" => "build_failed"
+      }
+
+      lines =
+        [failed]
+        |> Stream.cycle()
+        |> Enum.take(10_000)
+        |> annotate()
+        |> String.split("\n", trim: true)
+
+      assert length(lines) == 4
+      assert List.last(lines) =~ "couldn't read"
+    end
+
     test "reads nothing from a result that isn't a list of reports" do
       assert annotate(nil) == ""
       assert annotate("python") =~ "couldn't read"

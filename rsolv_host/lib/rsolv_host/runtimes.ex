@@ -8,12 +8,14 @@ defmodule RsolvHost.Runtimes do
   The reports come from the sandbox, so each value must match a strict format
   (a known runtime, status and reason; a version; a build file name and
   digest) before it goes into fixed text. A fallback across a minor version is
-  refused here too. Anything else gets one generic warning.
+  refused here too. Anything else gets one generic warning, and so do reports
+  past the first three.
   """
 
   alias RsolvHost.ActionsLog
 
   @title "RSOLV runtime"
+  @max_reports 3
   @names %{"python" => "Python", "php" => "PHP", "maven" => "Maven"}
   @reasons %{
     "no_attestations" => "it has no published build attestations",
@@ -34,7 +36,14 @@ defmodule RsolvHost.Runtimes do
   @spec annotate(term(), IO.device()) :: :ok
   def annotate(reports, io \\ :stdio)
   def annotate(nil, _io), do: :ok
-  def annotate(reports, io) when is_list(reports), do: Enum.each(reports, &report(&1, io))
+
+  # Bootstrap reports at most one install each of Python, PHP and Maven.
+  def annotate(reports, io) when is_list(reports) do
+    {reports, rest} = Enum.split(reports, @max_reports)
+    Enum.each(reports, &report(&1, io))
+    if rest != [], do: unreadable(io), else: :ok
+  end
+
   def annotate(_malformed, io), do: unreadable(io)
 
   defp report(%{"status" => "installed", "runtime" => runtime}, _io)
