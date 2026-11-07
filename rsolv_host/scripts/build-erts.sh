@@ -18,6 +18,7 @@ out=$(realpath -m "$out")
 mkdir -p "$out"
 docker run --rm --network bridge --platform "$platform" \
   -v "$here:/scripts:ro" -v "$out:/out" \
+  -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro \
   -e OTP_VERSION="$OTP_VERSION" -e OTP_SHA256="$OTP_SHA256" \
   -e OPENSSL_VERSION="$OPENSSL_VERSION" -e OPENSSL_SHA256="$OPENSSL_SHA256" \
   -e APT_SNAPSHOT="$APT_SNAPSHOT" -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \

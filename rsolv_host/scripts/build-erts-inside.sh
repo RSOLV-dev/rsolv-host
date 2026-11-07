@@ -5,13 +5,18 @@
 # Burrito copies erts-*/bin and every */lib/**/*.so from it into the release.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C TZ=UTC
-# The snapshot service is HTTPS-only, so CA certificates come first (from the
-# live archive; they don't reach the build output). Then every build package
-# at the version the archive held at $APT_SNAPSHOT. The snapshot's "ubuntu"
-# archive serves every architecture, arm64 included (its "ubuntu-ports" path
-# answers 401).
-apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates >/dev/null
-sed -i -E "s#https?://(archive|security|ports)\.ubuntu\.com/[a-z-]+/?#https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT/#" /etc/apt/sources.list
+# Every apt operation, from the first update on, uses the Ubuntu archive
+# snapshot at $APT_SNAPSHOT (signed metadata fixes every package version). The
+# snapshot is HTTPS-only (plain HTTP answers 301) and the image has no CA
+# bundle, so build-erts.sh mounts the runner's CA file read-only; nothing comes
+# from the live archive. The snapshot's "ubuntu" archive serves every
+# architecture, arm64 included (its "ubuntu-ports" path answers 401).
+snapshot="https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT/"
+sed -i -E "s#https?://(archive|security|ports)\.ubuntu\.com/[a-z-]+/?#$snapshot#" /etc/apt/sources.list
+outside=$(grep -rhE '^[[:space:]]*(deb|deb-src|URIs:)' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null |
+  grep -vF " $snapshot " || true)
+[ -z "$outside" ] || { echo "apt source outside the snapshot: $outside" >&2; exit 1; }
+echo "apt sources: $(grep -chE '^deb ' /etc/apt/sources.list) lines, all $snapshot"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends build-essential autoconf libncurses-dev curl perl >/dev/null
 cd /tmp
