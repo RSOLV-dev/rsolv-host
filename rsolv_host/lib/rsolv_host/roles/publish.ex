@@ -6,10 +6,10 @@ defmodule RsolvHost.Roles.Publish do
 
   In order: verify the signed decision against `RSOLV_DECISION_KEYS` and the
   job's own identity; check the unsigned bodies and post-images against their
-  signed digests; check the base tree; write the RED commit (exactly the
-  `red_paths`) on `base_sha` and the fix commit on it; check both written trees;
-  create the branch; open the pull request with its labels and comments; report
-  it. Every refusal before the first write is configuration (exit 2): the remedy
+  signed digests; check the base tree and that the target branch still contains
+  `base_sha`; write the RED commit (exactly the `red_paths`) on `base_sha` and
+  the fix commit on it; check both written trees; create the branch; open the
+  pull request with its labels and comments; report it. Every refusal before the first write is configuration (exit 2): the remedy
   is re-running the issue's workflow for a fresh decision.
   """
 
@@ -82,6 +82,7 @@ defmodule RsolvHost.Roles.Publish do
          {:ok, bodies} <- bodies(verified),
          {:ok, images} <- post_images(ctx, verified.change_set),
          :ok <- GitTree.check_base(ctx.gh, verified.decision["base_sha"], verified.change_set),
+         :ok <- on_target(ctx, verified.decision),
          {:ok, commits} <- write_commits(ctx, verified.decision, verified.change_set, images),
          :ok <- branch(ctx, verified.decision["branch"], commits) do
       open_pull(ctx, verified.decision, bodies, commits)
@@ -154,6 +155,18 @@ defmodule RsolvHost.Roles.Publish do
         _mismatch -> {:halt, {:error, :digest_mismatch}}
       end
     end)
+  end
+
+  # RFC-150 §3: the signed base must be reachable from the target's head before
+  # anything is written. In compare(target...base), only `behind` (the target
+  # moved on from the base) and `identical` prove that; a moved target is
+  # disclosed in the platform-signed PR body, never by the host.
+  defp on_target(ctx, %{"target_branch" => target, "base_sha" => base}) do
+    case GitHub.compare(ctx.gh, target, base) do
+      {:ok, status} when status in ["behind", "identical"] -> :ok
+      {:ok, _ahead_or_diverged} -> {:error, :base_not_on_target}
+      error -> error
+    end
   end
 
   defp write_commits(ctx, decision, change_set, images) do
@@ -233,8 +246,7 @@ defmodule RsolvHost.Roles.Publish do
              "base" => decision["target_branch"]
            }),
          :ok <- labels(ctx, number, effects["labels"]),
-         :ok <- comments(ctx, bodies.comments),
-         :ok <- target_moved(ctx, number, decision) do
+         :ok <- comments(ctx, bodies.comments) do
       Platform.published(ctx.req, ctx.raw, ctx.run, ctx.issue, %{
         decision_id: decision["decision_id"],
         pr_number: number,
@@ -259,23 +271,5 @@ defmodule RsolvHost.Roles.Publish do
         error -> {:halt, error}
       end
     end)
-  end
-
-  # compare(target...base): `behind` or `diverged` means the target moved on.
-  defp target_moved(ctx, number, %{"target_branch" => target, "base_sha" => base}) do
-    case GitHub.compare(ctx.gh, target, base) do
-      {:ok, moved} when moved in ["behind", "diverged"] ->
-        GitHub.comment(
-          ctx.gh,
-          number,
-          "The target branch moved after this run started; this PR is based on " <> base
-        )
-
-      {:ok, _same_or_ahead} ->
-        :ok
-
-      error ->
-        error
-    end
   end
 end

@@ -25,7 +25,7 @@ defmodule RsolvHost.FakeGithub do
           pulls: [],
           labels: [],
           comments: [],
-          compare: "ahead",
+          compare: "identical",
           tamper: nil,
           truncated: false
         }
@@ -73,8 +73,11 @@ defmodule RsolvHost.FakeGithub do
   @spec tamper(pid(), (map() -> map())) :: :ok
   def tamper(agent, fun), do: Agent.update(agent, &%{&1 | tamper: fun})
 
-  @doc "Sets what `GET /compare` reports (`ahead`, `behind`, `diverged`, `identical`)."
-  @spec compare(pid(), String.t()) :: :ok
+  @doc """
+  Sets what `GET /compare` reports (`ahead`, `behind`, `diverged`, `identical`),
+  or `:not_found` for a 404.
+  """
+  @spec compare(pid(), String.t() | :not_found) :: :ok
   def compare(agent, status), do: Agent.update(agent, &%{&1 | compare: status})
 
   @doc "Makes every tree listing say `truncated: true`."
@@ -205,6 +208,9 @@ defmodule RsolvHost.FakeGithub do
         {{201, %{id: 1}}, %{state | comments: state.comments ++ [{String.to_integer(n), body}]}}
     end
   end
+
+  defp route(%{compare: :not_found} = state, "GET", "/compare/" <> _range, nil),
+    do: {{404, %{message: "Not Found"}}, state}
 
   defp route(state, "GET", "/compare/" <> _range, nil),
     do: {{200, %{status: state.compare}}, state}

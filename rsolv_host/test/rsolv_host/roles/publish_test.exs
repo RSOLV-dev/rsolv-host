@@ -253,21 +253,15 @@ defmodule RsolvHost.Roles.PublishTest do
                        }}
     end
 
-    test "when the target branch moved, says so on the pull request", context do
+    test "when the target branch moved on from the base, opens the PR with only signed effects",
+         context do
       platform(context)
       FakeGithub.compare(context.gh, "behind")
 
       assert run(context) == :ok
 
-      %{comments: comments} = FakeGithub.writes(context.gh)
-
-      assert {100,
-              %{
-                "body" =>
-                  "The target branch moved after this run started; this PR is based on " <> base
-              }} = List.last(comments)
-
-      assert base == context.base
+      %{pulls: [_pull], comments: comments} = FakeGithub.writes(context.gh)
+      assert comments == [{7, %{"body" => @comment_body}}]
     end
   end
 
@@ -346,6 +340,23 @@ defmodule RsolvHost.Roles.PublishTest do
       end
 
       assert posts(context.gh) == []
+    end
+
+    test "a target branch that no longer contains the base (compare says ahead or diverged)",
+         context do
+      for status <- ["ahead", "diverged"] do
+        platform(context)
+        FakeGithub.compare(context.gh, status)
+
+        refused(context, :base_not_on_target)
+      end
+    end
+
+    test "a target branch GitHub can't compare with the base", context do
+      platform(context)
+      FakeGithub.compare(context.gh, :not_found)
+
+      refused(context, {:github, 404, :not_found})
     end
 
     test "a platform that doesn't serve decisions yet", context do

@@ -63,6 +63,7 @@ defmodule RsolvHost.Outcome do
   def classify({:base_mismatch, _path}), do: :configuration
   def classify({:tree_mismatch, _path}), do: :configuration
   def classify(:branch_collision), do: :configuration
+  def classify(:base_not_on_target), do: :configuration
 
   def classify({api, status, _code})
       when api in [:platform, :github] and status in @client_errors,
@@ -133,6 +134,10 @@ defmodule RsolvHost.Outcome do
   defp message(:branch_collision, _class),
     do:
       "The fix branch already exists with different content. Delete it and re-run the issue's workflow."
+
+  defp message(:base_not_on_target, _class),
+    do:
+      "The target branch no longer contains the commit this run was scanned at (it was rewritten). Run a new scan."
 
   defp message({:platform, status, _code}, :configuration),
     do:
