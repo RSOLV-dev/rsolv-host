@@ -5,12 +5,12 @@ core library it shares with the RSOLV platform. Apache-2.0.
 
 ## Status
 
-This repository is at its first stage: only the shared core library, `rsolv_core/`, is here.
-The host client (`rsolv_host/`) and its attested release binaries are planned and land in
-later changes. Until they do, the trust model below is the design those changes must meet,
-not behaviour you can run today.
+The shared core library, `rsolv_core/`, and the host client's source, `rsolv_host/`, are here.
+The host client has no release yet: its attested release binaries and the sandbox image it
+runs land in later changes. Until they do, the last point of the trust model below (pinned,
+attested binaries) is the design those changes must meet, not something you can verify today.
 
-## Trust model (planned)
+## Trust model
 
 - **What runs where.** RSOLV's AI model runs on the RSOLV platform. Its tool calls (read a file,
   run the tests) run on your runner, inside a sandbox container that `rsolv-host` starts: no
@@ -44,10 +44,53 @@ The relay and token-exchange messages between `rsolv-host` and the RSOLV platfor
 release; knowing it grants no access, because every request is bound to a run token issued for
 one workflow run and role (and, for every role but scan, one issue).
 
+## Exit codes
+
+`rsolv-host` exits with one of these codes. They are a stable interface; changing one is a
+breaking change. `rsolv-work.yml` retries once on 3.
+
+| Code | Meaning | Annotation | Workflow behaviour |
+|---|---|---|---|
+| 0 | A model outcome was reached (any of them) | `::notice::` for a false positive | none |
+| 1 | Bug in the host client | `::error title=RSOLV host client bug::`, asking for an issue on `RSOLV-dev/rsolv-host` with the run URL | none |
+| 2 | Configuration, or something the customer can fix | `::error title=RSOLV configuration::` naming the fix (for example "Grant `id-token: write`") | none |
+| 3 | Transient platform or network failure | `::error title=RSOLV transient failure::` | `rsolv-work.yml` retries once, only on 3 |
+| 4 | Sandbox or runner infrastructure | `::error title=RSOLV sandbox setup::` naming the failed step | none |
+
+What falls in each class:
+
+- **1, host bug:** an exception, exit or throw inside `rsolv-host`, or a process it depends on
+  ending abnormally. The release always exits; it never hangs until the job timeout.
+- **2, configuration:** missing permissions or variables, a platform or GitHub refusal (4xx, or
+  any redirect, which is never followed), a signed decision refused or expired, a target branch
+  that no longer contains the scanned commit, a fix branch or pull request that already holds
+  something else, a fix touching `.github/`.
+- **3, transient:** network failures, 429 and 5xx, a run token that expired or a token keeper
+  that stopped answering, the platform or GitHub breaking the protocol (a malformed answer or
+  event stream), a session past its time budget, and a token exchange whose answer was lost
+  (`409 already_exchanged` on the retry).
+- **4, sandbox:** Docker or a sandbox setup step failing, the run-token hand-off file not
+  writable, the sandbox breaking its CLI contract: a malformed or oversized frame, more frames or
+  issues than allowed, an issue it didn't file, a malformed patch. The scanner's stdout and stderr
+  share the frame channel, so `rsolv-sandbox scan` must write nothing to stderr.
+
+The `work` role writes the step outputs `outcome` and `has_patch` (`true` or `false`), and a
+job-summary row. `outcome` is one of:
+
+- `mitigated`: a fix was produced and uploaded;
+- `mitigation_failed`: the vulnerability was confirmed but no usable fix was produced;
+- `false_positive`: VALIDATE found the finding is not a vulnerability;
+- `not_validated`: VALIDATE could not confirm the vulnerability;
+- `validated`: VALIDATE confirmed it, then the job failed (non-zero exit) before MITIGATE
+  reported an outcome.
+
+Annotations and summaries are fixed text plus host-controlled values; text from the sandbox or
+an error response never reaches them.
+
 ## Layout
 
 - `rsolv_core/`: what the platform and the host must agree on byte for byte: the relay
   protocol types, canonical JSON (RFC 8785, for the subset RSOLV signs, which has no floats),
   the change set and the signed decision envelope. It depends on nothing in the platform.
-- `rsolv_host/` (planned): the host client, packaged with Burrito as a self-contained Linux
-  binary.
+- `rsolv_host/`: the host client, to be packaged with Burrito as a self-contained Linux binary
+  (not yet released).
