@@ -524,6 +524,28 @@ defmodule RsolvHost.Roles.PublishTest do
       assert FakeGithub.writes(context.gh).comments == [{7, %{"body" => @comment_body}}]
     end
 
+    test "counts only the host's own comments: an identical one by someone else isn't it",
+         context do
+      platform(context)
+      FakeGithub.put_comment(context.gh, 7, @comment_body, "mallory")
+
+      assert run(context) == :ok
+      assert FakeGithub.writes(context.gh).comments == [{7, %{"body" => @comment_body}}]
+    end
+
+    test "when an issue has more comments than it can read, posts nothing and says so",
+         context do
+      platform(context)
+      for n <- 1..1_000, do: FakeGithub.put_comment(context.gh, 7, "comment #{n}", "someone")
+
+      result = run(context)
+
+      assert result == {:error, :comment_scan_incomplete}
+      assert Outcome.exit_code(result) == 2
+      assert FakeGithub.writes(context.gh).comments == []
+      refute_received {:published, _}
+    end
+
     test "refuses a branch with the fix's tree but another history", context do
       platform(context)
       :ok = run(context)

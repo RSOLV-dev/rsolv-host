@@ -373,10 +373,13 @@ defmodule RsolvHost.Roles.Publish do
     end
   end
 
-  # A signed comment already on its issue (same body digest, as often as the
-  # effects list it) isn't posted again.
+  # A signed comment the host already posted on its issue (same body digest,
+  # by the token's own login, as often as the effects list it) isn't posted
+  # again. Anyone can post the same text, so only the host's own count.
   defp comments(ctx, comments) do
-    with {:ok, posted} <- posted(ctx, comments |> Enum.map(&elem(&1, 0)) |> Enum.uniq()),
+    with {:ok, login} <- GitHub.login(ctx.gh),
+         issues = comments |> Enum.map(&elem(&1, 0)) |> Enum.uniq(),
+         {:ok, posted} <- posted(ctx, login, issues),
          {:ok, _posted} <- Enum.reduce_while(comments, {:ok, posted}, &comment(ctx, &1, &2)),
          do: :ok
   end
@@ -397,27 +400,30 @@ defmodule RsolvHost.Roles.Publish do
     end
   end
 
-  # ponytail: reads at most 10 pages (1,000 comments) per issue; past that a
-  # re-run could post a signed comment twice.
-  defp posted(ctx, issues) do
+  # Reads at most 10 pages (1,000 comments) per issue. Past that, what the host
+  # posted can't be known, so it posts nothing: {:error, :comment_scan_incomplete}.
+  defp posted(ctx, login, issues) do
     Enum.reduce_while(issues, {:ok, %{}}, fn issue, {:ok, acc} ->
-      case posted(ctx, issue, 1, acc) do
+      case posted(ctx, login, issue, 1, acc) do
         {:ok, acc} -> {:cont, {:ok, acc}}
         error -> {:halt, error}
       end
     end)
   end
 
-  defp posted(ctx, issue, page, acc) do
+  defp posted(ctx, login, issue, page, acc) do
     with {:ok, comments} <- GitHub.list_comments(ctx.gh, issue, page) do
       acc =
-        for %{"body" => body} when is_binary(body) <- comments, reduce: acc do
+        for %{"body" => body, "user" => %{"login" => ^login}} when is_binary(body) <- comments,
+            reduce: acc do
           acc -> Map.update(acc, {issue, sha256(body)}, 1, &(&1 + 1))
         end
 
-      if length(comments) == 100 and page < 10,
-        do: posted(ctx, issue, page + 1, acc),
-        else: {:ok, acc}
+      cond do
+        length(comments) < 100 -> {:ok, acc}
+        page < 10 -> posted(ctx, login, issue, page + 1, acc)
+        true -> {:error, :comment_scan_incomplete}
+      end
     end
   end
 end

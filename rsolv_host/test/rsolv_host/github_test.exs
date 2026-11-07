@@ -70,6 +70,23 @@ defmodule RsolvHost.GitHubTest do
                GitHub.create_issue(gh(), %{"title" => "t", "body" => "b", "labels" => []})
     end
 
+    test "login/1 asks GraphQL's viewer at GITHUB_GRAPHQL_URL, and refuses anything else" do
+      {:ok, gh} =
+        GitHub.new(Map.put(@env, "GITHUB_GRAPHQL_URL", "https://ghe.example/api/graphql"))
+
+      Req.Test.stub(GitHub, fn conn ->
+        assert {conn.method, conn.host, conn.request_path} ==
+                 {"POST", "ghe.example", "/api/graphql"}
+
+        Req.Test.json(conn, %{data: %{viewer: %{login: "github-actions[bot]"}}})
+      end)
+
+      assert GitHub.login(gh) == {:ok, "github-actions[bot]"}
+
+      Req.Test.stub(GitHub, &Req.Test.json(&1, %{errors: [%{message: "no"}]}))
+      assert GitHub.login(gh) == {:error, :malformed_response}
+    end
+
     test "a refusal is the status and a fixed code, never GitHub's text" do
       Req.Test.stub(GitHub, fn conn ->
         conn

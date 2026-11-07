@@ -79,6 +79,7 @@ defmodule RsolvHost.Outcome do
   def classify(:run_unbound), do: :configuration
   def classify(:truncated), do: :configuration
   def classify(:workflow_path), do: :configuration
+  def classify(:comment_scan_incomplete), do: :configuration
 
   def classify({:transport, _reason}), do: :transient
   def classify(:token_expired), do: :transient
@@ -172,6 +173,10 @@ defmodule RsolvHost.Outcome do
   defp message(:workflow_path, _class),
     do:
       "The fix touches .github/, which RSOLV never publishes. Apply that part of the fix by hand."
+
+  defp message(:comment_scan_incomplete, _class),
+    do:
+      "An issue the fix comments on has more than 1,000 comments, so RSOLV can't tell whether it already posted there and posted nothing. The pull request is open; add the comment by hand."
 
   defp message(:base_not_on_target, _class),
     do:

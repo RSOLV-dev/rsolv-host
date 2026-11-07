@@ -12,10 +12,10 @@ defmodule RsolvHost.GitHub do
   alias RsolvCore.StrictJson
   alias RsolvHost.Http
 
-  @enforce_keys [:req, :repository]
+  @enforce_keys [:req, :repository, :graphql_url]
   defstruct @enforce_keys
 
-  @type t :: %__MODULE__{req: Req.Request.t(), repository: String.t()}
+  @type t :: %__MODULE__{req: Req.Request.t(), repository: String.t(), graphql_url: String.t()}
   @type error :: {:github, pos_integer(), atom()} | {:transport, term()}
 
   @max_body_bytes 32 * 1024 * 1024
@@ -50,7 +50,12 @@ defmodule RsolvHost.GitHub do
           ] ++ extra
         )
 
-      {:ok, %__MODULE__{req: req, repository: repository}}
+      {:ok,
+       %__MODULE__{
+         req: req,
+         repository: repository,
+         graphql_url: env["GITHUB_GRAPHQL_URL"] || "https://api.github.com/graphql"
+       }}
     else
       true -> {:error, {:missing_env, "GITHUB_REPOSITORY"}}
       error -> error
@@ -58,9 +63,9 @@ defmodule RsolvHost.GitHub do
   end
 
   @doc """
-  Req's retry policy (`RsolvHost.Http.retry/3`): only a read, or a blob or tree
-  (content-addressed, so writing it twice gives the same object), is repeated
-  after a transient failure. An issue, comment, label, pull request, commit or ref may have been
+  Req's retry policy (`RsolvHost.Http.retry/3`): only a read (the one GraphQL
+  query, `login/1`, included), or a blob or tree (content-addressed, so writing
+  it twice gives the same object), is repeated after a transient failure. An issue, comment, label, pull request, commit or ref may have been
   written when the answer was lost; it is never repeated blind.
   """
   @spec retry(Req.Request.t(), Req.Response.t() | Exception.t()) ::
@@ -69,7 +74,10 @@ defmodule RsolvHost.GitHub do
     do: Http.retry(req, result, repeatable?(method, path || ""))
 
   defp repeatable?(method, _path) when method in [:get, :head], do: true
-  defp repeatable?(:post, path), do: String.ends_with?(path, ["/git/blobs", "/git/trees"])
+
+  defp repeatable?(:post, path),
+    do: String.ends_with?(path, ["/git/blobs", "/git/trees", "/graphql"])
+
   defp repeatable?(_method, _path), do: false
 
   defp fetch(env, name, format) do
@@ -79,6 +87,27 @@ defmodule RsolvHost.GitHub do
 
       nil ->
         {:error, {:missing_env, name}}
+    end
+  end
+
+  @doc """
+  The login the token acts as: `github-actions[bot]` for a job's
+  `GITHUB_TOKEN`. Asked of GraphQL's `viewer` (`GITHUB_GRAPHQL_URL`), since
+  REST's `GET /user` refuses an installation token.
+  """
+  @spec login(t()) :: {:ok, String.t()} | {:error, term()}
+  def login(gh) do
+    query = %{query: "query { viewer { login } }"}
+
+    with {:ok, %{status: 200, body: body}} <-
+           Http.request(gh.req, [method: :post, url: gh.graphql_url, json: query], 64 * 1024),
+         {:ok, %{"data" => %{"viewer" => %{"login" => login}}}} when is_binary(login) <-
+           StrictJson.decode(body) do
+      {:ok, login}
+    else
+      {:ok, %{status: status}} -> {:error, {:github, status, code(status)}}
+      {:error, _reason} = error -> error
+      _malformed -> {:error, :malformed_response}
     end
   end
 

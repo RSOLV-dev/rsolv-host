@@ -9,12 +9,14 @@ defmodule RsolvHost.FakeGithub do
   As on GitHub, a commit's SHA covers its author date, so writing the same
   commit twice gives two SHAs; a second open pull request for the same head
   and base is refused with 422; adding labels is a union. `drop_response/3`
-  commits a write and then loses its response.
+  commits a write and then loses its response. The token is
+  `github-actions[bot]` (GraphQL `viewer`), and authors every comment it posts.
   """
 
   alias RsolvCore.ChangeSet
 
   @repo "/repos/acme/app"
+  @bot "github-actions[bot]"
 
   @doc "Starts an empty repository and routes `RsolvHost.GitHub` to it."
   @spec start() :: pid()
@@ -78,7 +80,7 @@ defmodule RsolvHost.FakeGithub do
         &%{
           pulls: &1.pulls |> Enum.reverse() |> Enum.map(fn pull -> pull.request end),
           labels: &1.labels,
-          comments: Enum.map(&1.comments, fn {n, _id, body} -> {n, body} end)
+          comments: for({n, _id, body, @bot} <- &1.comments, do: {n, body})
         }
       )
 
@@ -115,6 +117,15 @@ defmodule RsolvHost.FakeGithub do
   @spec put_pull(pid(), map()) :: :ok
   def put_pull(agent, request),
     do: Agent.update(agent, fn state -> state |> open_pull(request) |> elem(1) end)
+
+  @doc "Posts a comment on issue `number` as `login` (someone other than the host)."
+  @spec put_comment(pid(), pos_integer(), String.t(), String.t()) :: :ok
+  def put_comment(agent, number, body, login),
+    do:
+      Agent.update(agent, fn state ->
+        id = length(state.comments) + 1
+        %{state | comments: state.comments ++ [{number, id, %{"body" => body}, login}]}
+      end)
 
   @doc "Makes every tree listing say `truncated: true`."
   @spec truncate(pid()) :: :ok
@@ -158,6 +169,13 @@ defmodule RsolvHost.FakeGithub do
           "blob" -> Map.put(acc, path, {entry["mode"], state.blobs[entry["sha"]]})
         end
     end
+  end
+
+  defp handle(agent, %{request_path: "/graphql"} = conn) do
+    {:ok, raw, conn} = Plug.Conn.read_body(conn)
+    Agent.update(agent, &%{&1 | requests: [{conn.method, "/graphql"} | &1.requests]})
+    %{"query" => "query { viewer { login } }"} = JSON.decode!(raw)
+    Req.Test.json(conn, %{data: %{viewer: %{login: @bot}}})
   end
 
   defp handle(agent, conn) do
@@ -277,7 +295,11 @@ defmodule RsolvHost.FakeGithub do
   defp route(state, "GET", "/issues/" <> rest, %{"page" => page}) do
     [n, "comments"] = String.split(rest, "/")
     issue = String.to_integer(n)
-    comments = for {^issue, id, %{"body" => body}} <- state.comments, do: %{id: id, body: body}
+
+    comments =
+      for {^issue, id, %{"body" => body}, login} <- state.comments,
+          do: %{id: id, body: body, user: %{login: login}}
+
     {{200, comments |> Enum.chunk_every(100) |> Enum.at(String.to_integer(page) - 1, [])}, state}
   end
 
@@ -304,7 +326,7 @@ defmodule RsolvHost.FakeGithub do
         id = length(state.comments) + 1
 
         {{201, %{id: id}},
-         %{state | comments: state.comments ++ [{String.to_integer(n), id, body}]}}
+         %{state | comments: state.comments ++ [{String.to_integer(n), id, body, @bot}]}}
     end
   end
 
