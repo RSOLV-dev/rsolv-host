@@ -150,6 +150,32 @@ defmodule RsolvHost.GitHub do
   @spec create_pull(t(), map()) :: {:ok, map()} | {:error, term()}
   def create_pull(gh, pull), do: object(call(gh, :post, "/pulls", json: pull))
 
+  @doc """
+  The pull requests, in any state, from `branch` of this repository into
+  `base` (GitHub's `head`/`base` filter; one page of 100).
+  """
+  @spec list_pulls(t(), String.t(), String.t()) :: {:ok, [map()]} | {:error, term()}
+  def list_pulls(gh, branch, base) do
+    [owner, _name] = String.split(gh.repository, "/")
+    params = [head: owner <> ":" <> branch, base: base, state: "all", per_page: 100]
+
+    case call(gh, :get, "/pulls", params: params) do
+      {:ok, pulls} when is_list(pulls) -> {:ok, pulls}
+      {:ok, _other} -> {:error, :malformed_response}
+      error -> error
+    end
+  end
+
+  @doc "One page (100) of an issue's or pull request's comments, oldest first."
+  @spec list_comments(t(), pos_integer(), pos_integer()) :: {:ok, [map()]} | {:error, term()}
+  def list_comments(gh, number, page) do
+    case call(gh, :get, "/issues/#{number}/comments", params: [per_page: 100, page: page]) do
+      {:ok, comments} when is_list(comments) -> {:ok, comments}
+      {:ok, _other} -> {:error, :malformed_response}
+      error -> error
+    end
+  end
+
   @doc "Adds labels to an issue or pull request."
   @spec add_labels(t(), pos_integer(), [String.t()]) :: :ok | {:error, term()}
   def add_labels(gh, number, labels) do

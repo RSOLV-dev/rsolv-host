@@ -401,6 +401,102 @@ defmodule RsolvHost.Roles.PublishTest do
     end
   end
 
+  describe "run/3 re-run after an earlier attempt (resume)" do
+    # The branch's real chain: [fix, red] from the ref down.
+    defp chain(context) do
+      fix = head(context)
+      %{parents: [red]} = FakeGithub.commit_info(context.gh, fix)
+      {red, fix}
+    end
+
+    test "after a complete run, reuses the branch and PR and writes nothing twice", context do
+      platform(context)
+      :ok = run(context)
+      assert_received {:published, _first}
+      {red, fix} = chain(context)
+
+      assert run(context) == :ok
+
+      assert %{pulls: [_one], comments: [{7, _one_comment}]} = FakeGithub.writes(context.gh)
+      assert length(FakeGithub.writes(context.gh).labels) == 1
+      assert Enum.count(FakeGithub.requests(context.gh), &(&1 == {"POST", "/pulls"})) == 1
+
+      assert_received {:published,
+                       %{"pr_number" => 100, "red_commit_sha" => ^red, "fix_commit_sha" => ^fix}}
+    end
+
+    test "after the report failed, finishes and reports the commits the branch holds", context do
+      platform(context, published: {503, %{}})
+      assert run(context) == {:error, {:platform, 503, nil}}
+      {red, fix} = chain(context)
+
+      platform(context)
+      assert run(context) == :ok
+
+      assert %{pulls: [_one], comments: [_one_comment]} = FakeGithub.writes(context.gh)
+      assert_received {:published, %{"red_commit_sha" => ^red, "fix_commit_sha" => ^fix}}
+    end
+
+    test "after GitHub opened the PR but the answer was lost, doesn't open another", context do
+      platform(context)
+      FakeGithub.drop_response(context.gh, "POST", "/pulls")
+      first = run(context)
+
+      assert {:error, {:transport, :closed}} = first
+      assert Outcome.exit_code(first) == 3
+
+      assert run(context) == :ok
+      assert %{pulls: [_one], comments: [_one_comment]} = FakeGithub.writes(context.gh)
+    end
+
+    test "after a comment was posted but the answer was lost, doesn't post it again", context do
+      platform(context)
+      FakeGithub.drop_response(context.gh, "POST", "/issues/7/comments")
+      assert {:error, {:transport, :closed}} = run(context)
+
+      assert run(context) == :ok
+      assert FakeGithub.writes(context.gh).comments == [{7, %{"body" => @comment_body}}]
+    end
+
+    test "refuses a branch with the fix's tree but another history", context do
+      platform(context)
+      :ok = run(context)
+      {_red, fix} = chain(context)
+      %{tree: tree} = FakeGithub.commit_info(context.gh, fix)
+
+      for {parents, message} <- [
+            {[], "fix: sanitize the query"},
+            {[context.base], "fix: sanitize the query"},
+            {[fix], "something else"}
+          ] do
+        FakeGithub.put_ref(
+          context.gh,
+          @branch,
+          FakeGithub.put_commit(context.gh, tree, parents, message)
+        )
+
+        assert run(context) == {:error, :branch_collision}
+      end
+    end
+
+    test "refuses an open PR from the branch whose title or body isn't the signed one", context do
+      platform(context)
+
+      FakeGithub.put_pull(context.gh, %{
+        "title" => "Something else",
+        "body" => @pr_body,
+        "head" => @branch,
+        "base" => "main"
+      })
+
+      result = run(context)
+
+      assert result == {:error, :pull_collision}
+      assert Outcome.exit_code(result) == 2
+      assert %{labels: [], comments: []} = FakeGithub.writes(context.gh)
+    end
+  end
+
   describe "run/3 after the commits" do
     test "refuses a written tree that differs from the change set, before any ref", context do
       platform(context)
@@ -413,13 +509,6 @@ defmodule RsolvHost.Roles.PublishTest do
       assert run(context) == {:error, {:tree_mismatch, "lib/app.rb"}}
       refute "/git/refs" in posts(context.gh)
       assert FakeGithub.writes(context.gh).pulls == []
-    end
-
-    test "resumes onto a branch that already holds this fix", context do
-      platform(context)
-      :ok = run(context)
-
-      assert run(context) == :ok
     end
 
     test "refuses a branch that holds something else", context do

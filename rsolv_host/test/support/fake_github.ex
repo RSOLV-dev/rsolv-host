@@ -5,6 +5,11 @@ defmodule RsolvHost.FakeGithub do
   SHA (`RsolvCore.ChangeSet.blob_sha/1`); trees are nested and keyed by a SHA-1
   over their sorted entries, as GitHub's are by content. Every request is
   recorded, so a test can assert what was, or wasn't, written.
+
+  As on GitHub, a commit's SHA covers its author date, so writing the same
+  commit twice gives two SHAs; a second open pull request for the same head
+  and base is refused with 422; adding labels is a union. `drop_response/3`
+  commits a write and then loses its response.
   """
 
   alias RsolvCore.ChangeSet
@@ -28,7 +33,9 @@ defmodule RsolvHost.FakeGithub do
           compare: "identical",
           tamper: nil,
           truncated: false,
-          delays: %{}
+          delays: %{},
+          drops: MapSet.new(),
+          clock: 0
         }
       end)
 
@@ -67,7 +74,11 @@ defmodule RsolvHost.FakeGithub do
     do:
       Agent.get(
         agent,
-        &%{pulls: Enum.reverse(&1.pulls), labels: &1.labels, comments: &1.comments}
+        &%{
+          pulls: &1.pulls |> Enum.reverse() |> Enum.map(fn pull -> pull.request end),
+          labels: &1.labels,
+          comments: Enum.map(&1.comments, fn {n, _id, body} -> {n, body} end)
+        }
       )
 
   @doc "Rewrites each tree entry a later `POST /git/trees` writes (to fake a misbehaving GitHub)."
@@ -86,6 +97,19 @@ defmodule RsolvHost.FakeGithub do
   def delay(agent, method, path, ms),
     do: Agent.update(agent, &put_in(&1.delays[{method, path}], ms))
 
+  @doc """
+  The next `method` request to `path` is carried out, then its connection
+  closes before the answer: the client can't tell whether it was written.
+  """
+  @spec drop_response(pid(), String.t(), String.t()) :: :ok
+  def drop_response(agent, method, path),
+    do: Agent.update(agent, &%{&1 | drops: MapSet.put(&1.drops, {method, path})})
+
+  @doc "Opens a pull request directly, as someone else (or an earlier run) would have."
+  @spec put_pull(pid(), map()) :: :ok
+  def put_pull(agent, request),
+    do: Agent.update(agent, fn state -> state |> open_pull(request) |> elem(1) end)
+
   @doc "Makes every tree listing say `truncated: true`."
   @spec truncate(pid()) :: :ok
   def truncate(agent), do: Agent.update(agent, &%{&1 | truncated: true})
@@ -94,6 +118,15 @@ defmodule RsolvHost.FakeGithub do
   @spec put_ref(pid(), String.t(), String.t()) :: :ok
   def put_ref(agent, branch, sha),
     do: Agent.update(agent, &put_in(&1.refs["refs/heads/" <> branch], sha))
+
+  @doc "Writes a commit directly (`tree` from `commit_info/2`), returning its SHA."
+  @spec put_commit(pid(), String.t(), [String.t()], String.t()) :: String.t()
+  def put_commit(agent, tree, parents, message),
+    do:
+      Agent.get_and_update(agent, fn state ->
+        {state, sha} = commit(state, tree, parents, message)
+        {sha, state}
+      end)
 
   @doc "The commit's tree as `%{path => {mode, bytes}}`, for assertions."
   @spec files(pid(), String.t()) :: %{String.t() => {String.t(), binary()}}
@@ -126,9 +159,22 @@ defmodule RsolvHost.FakeGithub do
     body = if raw == "", do: nil, else: JSON.decode!(raw)
     @repo <> path = conn.request_path
     Agent.update(agent, &%{&1 | requests: [{conn.method, path} | &1.requests]})
-    {status, json} = Agent.get_and_update(agent, &route(&1, conn.method, path, body))
+    query = URI.decode_query(conn.query_string)
+
+    {status, json} =
+      Agent.get_and_update(agent, &route(&1, conn.method, path, body || query))
+
     agent |> Agent.get(& &1.delays[{conn.method, path}]) |> then(&Process.sleep(&1 || 0))
-    conn |> Plug.Conn.put_status(status) |> Req.Test.json(json)
+
+    dropped? =
+      Agent.get_and_update(agent, fn state ->
+        {MapSet.member?(state.drops, {conn.method, path}),
+         %{state | drops: MapSet.delete(state.drops, {conn.method, path})}}
+      end)
+
+    if dropped?,
+      do: Req.Test.transport_error(conn, :closed),
+      else: conn |> Plug.Conn.put_status(status) |> Req.Test.json(json)
   end
 
   defp route(state, "POST", "/git/blobs", %{"content" => content, "encoding" => "base64"}) do
@@ -153,7 +199,7 @@ defmodule RsolvHost.FakeGithub do
     {{201, %{sha: sha}}, state}
   end
 
-  defp route(state, "GET", "/git/trees/" <> sha, nil) do
+  defp route(state, "GET", "/git/trees/" <> sha, _query) do
     case state.trees[sha] do
       nil -> {{404, %{message: "Not Found"}}, state}
       entries -> {{200, %{sha: sha, tree: entries, truncated: state.truncated}}, state}
@@ -169,7 +215,7 @@ defmodule RsolvHost.FakeGithub do
     {{201, %{sha: sha}}, state}
   end
 
-  defp route(state, "GET", "/git/commits/" <> sha, nil) do
+  defp route(state, "GET", "/git/commits/" <> sha, _query) do
     case state.commits[sha] do
       nil ->
         {{404, %{}}, state}
@@ -192,7 +238,7 @@ defmodule RsolvHost.FakeGithub do
       else: {{201, %{ref: ref, object: %{sha: sha}}}, put_in(state.refs[ref], sha)}
   end
 
-  defp route(state, "GET", "/git/ref/heads/" <> branch, nil) do
+  defp route(state, "GET", "/git/ref/heads/" <> branch, _query) do
     case state.refs["refs/heads/" <> URI.decode(branch)] do
       nil -> {{404, %{}}, state}
       sha -> {{200, %{ref: "refs/heads/" <> branch, object: %{sha: sha}}}, state}
@@ -200,26 +246,61 @@ defmodule RsolvHost.FakeGithub do
   end
 
   defp route(state, "POST", "/pulls", body) do
-    number = 100 + length(state.pulls)
+    if Enum.any?(state.pulls, &(&1.state == "open" and same_pull?(&1, body))),
+      do: {{422, %{message: "Validation Failed"}}, state},
+      else:
+        state
+        |> open_pull(body)
+        |> then(fn {pull, state} -> {{201, pull_json(state, pull)}, state} end)
+  end
 
-    {{201, %{number: number, html_url: "https://github.com/acme/app/pull/#{number}"}},
-     %{state | pulls: [body | state.pulls]}}
+  defp route(state, "GET", "/pulls", %{"head" => "acme:" <> head, "base" => base}) do
+    pulls =
+      for pull <- Enum.reverse(state.pulls),
+          same_pull?(pull, %{"head" => head, "base" => base}),
+          do: pull_json(state, pull)
+
+    {{200, pulls}, state}
+  end
+
+  defp route(state, "GET", "/issues/" <> rest, %{"page" => page}) do
+    [n, "comments"] = String.split(rest, "/")
+    issue = String.to_integer(n)
+    comments = for {^issue, id, %{"body" => body}} <- state.comments, do: %{id: id, body: body}
+    {{200, comments |> Enum.chunk_every(100) |> Enum.at(String.to_integer(page) - 1, [])}, state}
   end
 
   defp route(state, "POST", "/issues/" <> rest, body) do
     case String.split(rest, "/") do
       [n, "labels"] ->
-        {{200, []}, %{state | labels: state.labels ++ [{String.to_integer(n), body}]}}
+        n = String.to_integer(n)
+        state = %{state | labels: state.labels ++ [{n, body}]}
+
+        {{200, []},
+         %{
+           state
+           | pulls:
+               Enum.map(
+                 state.pulls,
+                 &if(&1.number == n,
+                   do: %{&1 | labels: Enum.uniq(&1.labels ++ body["labels"])},
+                   else: &1
+                 )
+               )
+         }}
 
       [n, "comments"] ->
-        {{201, %{id: 1}}, %{state | comments: state.comments ++ [{String.to_integer(n), body}]}}
+        id = length(state.comments) + 1
+
+        {{201, %{id: id}},
+         %{state | comments: state.comments ++ [{String.to_integer(n), id, body}]}}
     end
   end
 
-  defp route(%{compare: :not_found} = state, "GET", "/compare/" <> _range, nil),
+  defp route(%{compare: :not_found} = state, "GET", "/compare/" <> _range, _query),
     do: {{404, %{message: "Not Found"}}, state}
 
-  defp route(state, "GET", "/compare/" <> _range, nil),
+  defp route(state, "GET", "/compare/" <> _range, _query),
     do: {{200, %{status: state.compare}}, state}
 
   defp load(_state, nil), do: %{}
@@ -280,12 +361,45 @@ defmodule RsolvHost.FakeGithub do
     {put_in(state.trees[sha], entries), sha}
   end
 
+  # The SHA covers a clock that ticks on every commit, as GitHub's author date does.
   defp commit(state, tree, parents, message) do
+    state = %{state | clock: state.clock + 1}
+
     sha =
       :sha
-      |> :crypto.hash(:erlang.term_to_binary({tree, parents, message}))
+      |> :crypto.hash(:erlang.term_to_binary({tree, parents, message, state.clock}))
       |> Base.encode16(case: :lower)
 
     {put_in(state.commits[sha], %{tree: tree, parents: parents, message: message}), sha}
+  end
+
+  defp open_pull(state, request) do
+    number = 100 + length(state.pulls)
+
+    pull = %{
+      number: number,
+      request: request,
+      state: "open",
+      labels: []
+    }
+
+    {pull, %{state | pulls: [pull | state.pulls]}}
+  end
+
+  defp same_pull?(%{request: request}, %{"head" => head, "base" => base}),
+    do: request["head"] == head and request["base"] == base
+
+  # As on GitHub, a pull request's head is wherever its branch points now.
+  defp pull_json(state, pull) do
+    %{
+      number: pull.number,
+      html_url: "https://github.com/acme/app/pull/#{pull.number}",
+      state: pull.state,
+      title: pull.request["title"],
+      body: pull.request["body"],
+      head: %{ref: pull.request["head"], sha: state.refs["refs/heads/" <> pull.request["head"]]},
+      base: %{ref: pull.request["base"]},
+      labels: Enum.map(pull.labels, &%{name: &1})
+    }
   end
 end

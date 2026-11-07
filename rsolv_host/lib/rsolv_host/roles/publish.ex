@@ -90,7 +90,7 @@ defmodule RsolvHost.Roles.Publish do
          {:ok, ctx} <- live(ctx),
          {:ok, commits} <- write_commits(ctx, verified.decision, verified.change_set, images),
          {:ok, ctx} <- live(ctx),
-         :ok <- branch(ctx, verified.decision["branch"], commits) do
+         {:ok, commits} <- branch(ctx, verified.decision, commits) do
       open_pull(ctx, verified.decision, bodies, commits)
     else
       {:ok, _unbound} -> {:error, :run_unbound}
@@ -207,7 +207,8 @@ defmodule RsolvHost.Roles.Publish do
            GitHub.create_commit(ctx.gh, effects["fix_commit_message"], fix_tree, [red_commit]),
          :ok <- GitTree.check_result(ctx.gh, red_commit, red),
          :ok <- GitTree.check_result(ctx.gh, fix_commit, change_set) do
-      {:ok, %{red: red_commit, fix: fix_commit, fix_tree: fix_tree, base: base}}
+      {:ok,
+       %{red: red_commit, fix: fix_commit, red_tree: red_tree, fix_tree: fix_tree, base: base}}
     end
   end
 
@@ -242,36 +243,57 @@ defmodule RsolvHost.Roles.Publish do
       "sha" => entry.new_blob_sha
     }
 
-  # A branch left by an earlier attempt is reused only if it holds exactly this fix.
-  defp branch(ctx, branch, commits) do
+  # Resume (RFC-150 §6.3). A branch left by an earlier attempt is reused only if
+  # it is exactly the two signed commits on `base_sha`: the fix (signed message,
+  # our fix tree) whose only parent is the RED commit (signed message, our RED
+  # tree) whose only parent is the base. The commits reported are the branch's,
+  # since rewriting a commit gives it a new SHA (its date).
+  defp branch(ctx, %{"branch" => branch} = decision, commits) do
     case GitHub.create_ref(ctx.gh, branch, commits.fix) do
-      :ok -> :ok
-      {:error, {:github, 422, _code}} -> existing_branch(ctx, branch, commits)
+      :ok -> {:ok, commits}
+      {:error, {:github, 422, _code}} -> existing_branch(ctx, decision, commits)
       error -> error
     end
   end
 
-  defp existing_branch(ctx, branch, commits) do
-    with {:ok, sha} <- GitHub.get_ref(ctx.gh, branch),
-         {:ok, %{"tree" => %{"sha" => tree}}} <- GitHub.get_commit(ctx.gh, sha) do
-      if tree == commits.fix_tree, do: :ok, else: {:error, :branch_collision}
+  defp existing_branch(ctx, %{"branch" => branch, "effects" => effects}, commits) do
+    with {:ok, fix} <- GitHub.get_ref(ctx.gh, branch),
+         {:ok, fix_commit} <- GitHub.get_commit(ctx.gh, fix),
+         {:ok, red} <- parent(fix_commit, effects["fix_commit_message"], commits.fix_tree),
+         {:ok, red_commit} <- GitHub.get_commit(ctx.gh, red),
+         {:ok, base} <- parent(red_commit, effects["red_commit_message"], commits.red_tree),
+         true <- base == commits.base do
+      {:ok, %{commits | red: red, fix: fix}}
+    else
+      false -> {:error, :branch_collision}
+      error -> error
     end
   end
+
+  defp parent(
+         %{"message" => message, "tree" => %{"sha" => tree}, "parents" => [%{"sha" => parent}]},
+         message,
+         tree
+       )
+       when is_binary(parent),
+       do: {:ok, parent}
+
+  defp parent(_commit, _message, _tree), do: {:error, :branch_collision}
 
   defp open_pull(ctx, decision, bodies, commits) do
     effects = decision["effects"]
 
+    wanted = %{
+      "title" => effects["pr_title"],
+      "body" => bodies.pr_body,
+      "head" => decision["branch"],
+      "base" => decision["target_branch"]
+    }
+
     with {:ok, ctx} <- live(ctx),
-         {:ok, %{"number" => number, "html_url" => url}}
-         when is_integer(number) and is_binary(url) <-
-           GitHub.create_pull(ctx.gh, %{
-             "title" => effects["pr_title"],
-             "body" => bodies.pr_body,
-             "head" => decision["branch"],
-             "base" => decision["target_branch"]
-           }),
+         {:ok, %{"number" => number, "html_url" => url} = pull} <- pull(ctx, wanted, commits),
          {:ok, ctx} <- live(ctx),
-         :ok <- labels(ctx, number, effects["labels"]),
+         :ok <- labels(ctx, pull, effects["labels"]),
          :ok <- comments(ctx, bodies.comments),
          {:ok, ctx} <- live(ctx) do
       Platform.published(ctx.req, ctx.raw, ctx.run, ctx.issue, %{
@@ -282,25 +304,120 @@ defmodule RsolvHost.Roles.Publish do
         red_commit_sha: commits.red,
         fix_commit_sha: commits.fix
       })
-    else
-      {:ok, _malformed} -> {:error, :malformed_response}
-      error -> error
     end
   end
 
-  defp labels(_ctx, _number, []), do: :ok
-  defp labels(ctx, number, labels), do: GitHub.add_labels(ctx.gh, number, labels)
+  # An existing pull request from the branch is reused if it is the signed one;
+  # a 422 from creating one (it exists, an earlier answer was lost) is looked up
+  # again, once.
+  defp pull(ctx, wanted, commits) do
+    with {:ok, nil} <- find_pull(ctx, wanted, commits) do
+      case GitHub.create_pull(ctx.gh, wanted) do
+        {:ok, created} ->
+          checked_pull(created, wanted, commits)
 
+        {:error, {:github, 422, _code}} = refused ->
+          retry_find(find_pull(ctx, wanted, commits), refused)
+
+        error ->
+          error
+      end
+    end
+  end
+
+  defp retry_find({:ok, nil}, refused), do: refused
+  defp retry_find(found, _refused), do: found
+
+  defp find_pull(ctx, %{"head" => head} = wanted, commits) do
+    with {:ok, pulls} <- GitHub.list_pulls(ctx.gh, head, wanted["base"]) do
+      pulls
+      |> Enum.filter(&match?(%{"head" => %{"ref" => ^head}}, &1))
+      |> case do
+        [] -> {:ok, nil}
+        [pull | _older] -> checked_pull(pull, wanted, commits)
+      end
+    end
+  end
+
+  defp checked_pull(
+         %{
+           "number" => number,
+           "html_url" => url,
+           "title" => title,
+           "body" => body,
+           "head" => %{"ref" => head},
+           "base" => %{"ref" => base}
+         } = pull,
+         %{"title" => title, "body" => body, "head" => head, "base" => base},
+         commits
+       )
+       when is_integer(number) and is_binary(url) do
+    if pull["head"]["sha"] == commits.fix, do: {:ok, pull}, else: {:error, :pull_collision}
+  end
+
+  defp checked_pull(%{"number" => number, "html_url" => url}, _wanted, _commits)
+       when is_integer(number) and is_binary(url),
+       do: {:error, :pull_collision}
+
+  defp checked_pull(_malformed, _wanted, _commits), do: {:error, :malformed_response}
+
+  # Adding labels is a union on GitHub; only the missing ones are sent.
+  defp labels(ctx, %{"number" => number} = pull, wanted) do
+    present = for %{"name" => name} <- List.wrap(pull["labels"]), do: name
+
+    case wanted -- present do
+      [] -> :ok
+      missing -> GitHub.add_labels(ctx.gh, number, missing)
+    end
+  end
+
+  # A signed comment already on its issue (same body digest, as often as the
+  # effects list it) isn't posted again.
   defp comments(ctx, comments) do
-    Enum.reduce_while(comments, :ok, fn {issue, body}, :ok ->
-      case comment(ctx, issue, body) do
-        :ok -> {:cont, :ok}
+    with {:ok, posted} <- posted(ctx, comments |> Enum.map(&elem(&1, 0)) |> Enum.uniq()),
+         {:ok, _posted} <- Enum.reduce_while(comments, {:ok, posted}, &comment(ctx, &1, &2)),
+         do: :ok
+  end
+
+  defp comment(ctx, {issue, body}, {:ok, posted}) do
+    key = {issue, sha256(body)}
+
+    case Map.get(posted, key, 0) do
+      0 -> comment(ctx, issue, body, posted)
+      n -> {:cont, {:ok, Map.put(posted, key, n - 1)}}
+    end
+  end
+
+  defp comment(ctx, issue, body, posted) do
+    with {:ok, ctx} <- live(ctx),
+         :ok <- GitHub.comment(ctx.gh, issue, body) do
+      {:cont, {:ok, posted}}
+    else
+      error -> {:halt, error}
+    end
+  end
+
+  # ponytail: reads at most 10 pages (1,000 comments) per issue; past that a
+  # re-run could post a signed comment twice.
+  defp posted(ctx, issues) do
+    Enum.reduce_while(issues, {:ok, %{}}, fn issue, {:ok, acc} ->
+      case posted(ctx, issue, 1, acc) do
+        {:ok, acc} -> {:cont, {:ok, acc}}
         error -> {:halt, error}
       end
     end)
   end
 
-  defp comment(ctx, issue, body) do
-    with {:ok, ctx} <- live(ctx), do: GitHub.comment(ctx.gh, issue, body)
+  defp posted(ctx, issue, page, acc) do
+    with {:ok, comments} <- GitHub.list_comments(ctx.gh, issue, page) do
+      acc =
+        for %{"body" => body} when is_binary(body) <- comments, reduce: acc do
+          acc -> Map.update(acc, {issue, sha256(body)}, 1, &(&1 + 1))
+        end
+
+      if length(comments) == 100 and page < 10,
+        do: posted(ctx, issue, page + 1, acc),
+        else: {:ok, acc}
+    end
   end
 end
