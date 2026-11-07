@@ -23,6 +23,14 @@ defmodule RsolvHost.Egress do
 
   The builds themselves come from `github.com` and `*.githubusercontent.com`,
   and Erlang/Elixir from `builds.hex.pm`, which were already allowed.
+
+  Composer, measured by `composer install` of a one-package project in the
+  sandbox image behind this proxy (2026-11-07), needs only hosts already here:
+  `repo.packagist.org` for metadata and `api.github.com`/`codeload.github.com`
+  for the dist archive (`packagist.org` gets a download-count ping, which may
+  fail). The sandbox image carries a SHA-256-pinned `composer.phar`, so
+  `getcomposer.org` stays out: what reaches for it is mise's PHP plugin
+  fetching the unpinned installer, and the 403 skips that step.
   """
 
   @external_resource squid_conf = Path.join([__DIR__, "..", "..", "priv", "squid.conf"])

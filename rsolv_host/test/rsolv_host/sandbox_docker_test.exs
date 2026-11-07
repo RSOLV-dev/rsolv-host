@@ -9,6 +9,7 @@ defmodule RsolvHost.SandboxDockerTest do
   @moduletag timeout: 600_000
   @probe_image "buildpack-deps:bookworm-curl@sha256:f5c5d07ea24ee91272739fe451c280aa4b7fa5120b9278815db5fcd713d83772"
   @elixir_image "elixir:1.19@sha256:7e27df3e4a684163e4a18e618eede53badb70e97e0c92a1845ab22e2e1d96da2"
+  @composer_image "composer:2.11.1@sha256:8de2184c6de224f4689e8f80ed5f5edaf0030b6b8b7839a22a2bcb6722ac87d0"
   @runner_secrets %{
     "GITHUB_TOKEN" => "ghs_fake",
     "ACTIONS_RUNTIME_TOKEN" => "fake",
@@ -34,7 +35,12 @@ defmodule RsolvHost.SandboxDockerTest do
       )
 
     on_exit(fn -> Sandbox.stop(sbx) end)
-    %{sbx: sbx, copy: copy}
+
+    %{
+      sbx: sbx,
+      copy: copy,
+      allowlist: Path.join([dir, "rsolv", "proxy-" <> name, "allowlist.txt"])
+    }
   end
 
   defp run(sbx, argv, timeout_ms \\ 30_000) do
@@ -129,5 +135,54 @@ defmodule RsolvHost.SandboxDockerTest do
       assert %{status: 0} = run(sbx, ["mix", "deps.get"], 120_000)
       assert File.exists?(Path.join([copy, "deps", "jason", "mix.exs"]))
     end
+  end
+
+  describe "a sandbox with PHP and Composer" do
+    @describetag image: @composer_image
+
+    setup %{copy: copy} do
+      File.write!(Path.join(copy, "composer.json"), ~s({"require": {"psr/log": "3.0.2"}}))
+      :ok
+    end
+
+    test "installs a Packagist dependency through the proxy", %{sbx: sbx, copy: copy} do
+      assert %{status: 0} = run(sbx, ["composer", "install", "--no-interaction"], 120_000)
+      assert File.exists?(Path.join([copy, "vendor", "psr", "log", "src", "LoggerInterface.php"]))
+    end
+
+    test "gets 403 for Packagist's metadata once repo.packagist.org leaves the allowlist", %{
+      sbx: sbx,
+      copy: copy,
+      allowlist: allowlist
+    } do
+      without_metadata =
+        allowlist |> File.read!() |> String.replace("repo.packagist.org\n", "")
+
+      File.write!(allowlist, without_metadata)
+
+      {_out, 0} =
+        System.cmd("docker", ["exec", sbx.proxy, "squid", "-k", "reconfigure"],
+          stderr_to_stdout: true
+        )
+
+      assert eventually_denied(sbx, "https://repo.packagist.org/packages.json")
+
+      assert %{status: status, output: output} =
+               run(sbx, ["composer", "install", "--no-interaction"], 120_000)
+
+      assert status != 0
+      assert output =~ "403"
+      refute File.exists?(Path.join(copy, "vendor"))
+    end
+  end
+
+  defp eventually_denied(sbx, url, tries \\ 20)
+  defp eventually_denied(_sbx, _url, 0), do: false
+
+  defp eventually_denied(sbx, url, tries) do
+    code = run(sbx, ["curl", "-s", "-m", "10", "-o", "/dev/null", "-w", "%{http_connect}", url])
+
+    code.output == "403" or
+      (Process.sleep(500) && eventually_denied(sbx, url, tries - 1))
   end
 end
