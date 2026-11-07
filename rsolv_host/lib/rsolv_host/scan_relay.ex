@@ -265,8 +265,14 @@ defmodule RsolvHost.ScanRelay do
 
   # A zero-width space after `@` keeps the text readable but stops GitHub
   # notifying the user or team. An `@` inside a word, an email or a URL path
-  # isn't a mention and is left alone; links are kept as they are.
-  defp unmention(body), do: String.replace(body, ~r/(?<![\w\/.-])@(?=[A-Za-z0-9])/u, "@\u200B")
+  # isn't a mention and is left alone; links are kept as they are. GitHub finds
+  # mentions in the rendered text, where `&#64;` and its kin are already `@`,
+  # so those, and the wide at-signs, become a plain `@` first.
+  defp unmention(body) do
+    body
+    |> String.replace(~r/&(?:#0*64|#[xX]0*40|commat);?|\x{FF20}|\x{FE6B}/u, "@")
+    |> String.replace(~r/(?<![\w\/.-])@(?=[A-Za-z0-9])/u, "@\u200B")
+  end
 
   defp issue?(title, body, labels)
        when is_binary(title) and is_binary(body) and is_list(labels) do

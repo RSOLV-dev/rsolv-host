@@ -317,6 +317,25 @@ defmodule RsolvHost.ScanRelayTest do
                "cc @\u200Boctocat and @\u200Bacme/security-team, see https://x.example/@y, mail a@b.example"
     end
 
+    test "create_issue breaks mentions spelled as HTML entities or wide at-signs too", context do
+      github(&created/1)
+
+      body = "cc &#64;a &#064;b &#x40;c &#X040;d &commat;e \uFF20f \uFE6Bg"
+
+      serve(context, [
+        %{
+          "call" => "create_issue",
+          "args" => %{"title" => "t", "body" => body, "labels" => ["security"]}
+        },
+        done()
+      ])
+
+      assert_received {:created, %{"body" => posted}}
+
+      assert posted ==
+               "cc @\u200Ba @\u200Bb @\u200Bc @\u200Bd @\u200Be @\u200Bf @\u200Bg"
+    end
+
     test "create_issue refuses an oversized title or body, or a foreign label", context do
       github(fn _conn -> flunk("no GitHub call expected") end)
 
