@@ -85,6 +85,7 @@ defmodule RsolvHost.Outcome do
   def classify({:transport, _reason}), do: :transient
   def classify(:token_expired), do: :transient
   def classify(:token_unavailable), do: :transient
+  def classify(:token_uncertain), do: :transient
   def classify({:session, _data}), do: :transient
   def classify(:stream_exhausted), do: :transient
   def classify(:session_timeout), do: :transient
@@ -230,6 +231,10 @@ defmodule RsolvHost.Outcome do
   defp message({:platform, 409, "already_exchanged"}, :transient),
     do:
       "This job's run token was issued, but the answer was lost on the way. Re-run the workflow."
+
+  defp message(:token_uncertain, :transient),
+    do:
+      "The answer to this job's run-token refresh was lost, and the RSOLV platform no longer accepts the old token. Re-run the workflow."
 
   defp message(reason, :transient),
     do:

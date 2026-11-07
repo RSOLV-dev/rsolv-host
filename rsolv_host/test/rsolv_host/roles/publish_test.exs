@@ -168,31 +168,60 @@ defmodule RsolvHost.Roles.PublishTest do
       })
 
     images = Keyword.get(opts, :images, @post_images)
+    rotated = :atomics.new(1, [])
+    first = "rsolv_rt_" <> String.duplicate("A", 43)
+    second = "rsolv_rt_" <> String.duplicate("B", 43)
 
     Req.Test.stub(Platform, fn conn ->
+      bearer = Plug.Conn.get_req_header(conn, "authorization")
+      rotated? = :atomics.get(rotated, 1) == 1
+
       case {conn.method, conn.request_path} do
         {"POST", "/api/v1/runs/token"} ->
-          Req.Test.json(conn, RsolvHost.PlatformStub.token())
+          ttl_s = Keyword.get(opts, :token_ttl_s, 3_600)
 
-        {"GET", "/api/v1/runs/" <> @run <> "/issues/7/decision"} ->
-          Keyword.get(opts, :decision_response, fn conn ->
-            Plug.Conn.send_resp(conn, 200, JSON.encode!(Map.put(envelope, "bodies", bodies)))
-          end).(conn)
+          json =
+            RsolvHost.PlatformStub.token(first)
+            |> Map.put(
+              :expires_at,
+              DateTime.utc_now() |> DateTime.add(ttl_s) |> DateTime.to_iso8601()
+            )
 
-        {"GET", "/api/v1/runs/" <> @run <> "/issues/7/post-images"} ->
-          Process.sleep(Keyword.get(opts, :images_delay_ms, 0))
+          Req.Test.json(conn, json)
 
-          Req.Test.json(conn, %{
-            files: Map.new(images, fn {path, bytes} -> {path, Base.encode64(bytes)} end)
-          })
+        {"POST", "/api/v1/runs/token/refresh"} ->
+          :atomics.put(rotated, 1, 1)
+          Req.Test.json(conn, RsolvHost.PlatformStub.token(second))
 
-        {"POST", "/api/v1/runs/" <> @run <> "/issues/7/published"} ->
-          {body, conn} = RsolvHost.PlatformStub.body(conn)
-          send(test, {:published, body})
-          {status, json} = Keyword.get(opts, :published, {200, %{}})
-          conn |> Plug.Conn.put_status(status) |> Req.Test.json(json)
+        {_method, _path} when bearer == ["Bearer " <> first] and rotated? ->
+          conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{error: "invalid_token"})
+
+        _route ->
+          platform_route(conn, test, opts, envelope, bodies, images)
       end
     end)
+  end
+
+  defp platform_route(conn, test, opts, envelope, bodies, images) do
+    case {conn.method, conn.request_path} do
+      {"GET", "/api/v1/runs/" <> @run <> "/issues/7/decision"} ->
+        Keyword.get(opts, :decision_response, fn conn ->
+          Plug.Conn.send_resp(conn, 200, JSON.encode!(Map.put(envelope, "bodies", bodies)))
+        end).(conn)
+
+      {"GET", "/api/v1/runs/" <> @run <> "/issues/7/post-images"} ->
+        Process.sleep(Keyword.get(opts, :images_delay_ms, 0))
+
+        Req.Test.json(conn, %{
+          files: Map.new(images, fn {path, bytes} -> {path, Base.encode64(bytes)} end)
+        })
+
+      {"POST", "/api/v1/runs/" <> @run <> "/issues/7/published"} ->
+        {body, conn} = RsolvHost.PlatformStub.body(conn)
+        send(test, {:published, body})
+        {status, json} = Keyword.get(opts, :published, {200, %{}})
+        conn |> Plug.Conn.put_status(status) |> Req.Test.json(json)
+    end
   end
 
   defp run(context), do: Publish.run(%{issue: 7}, context.env, io: context.io)
@@ -464,6 +493,16 @@ defmodule RsolvHost.Roles.PublishTest do
 
       assert run(context) == {:error, :expired}
       assert FakeGithub.writes(context.gh).comments == []
+    end
+  end
+
+  describe "run/3 while the run token is refreshed" do
+    test "reports with the current token, not the one the refresh rotated away", context do
+      # Refresh is due 300 s before expiry: here, about a second in.
+      platform(context, token_ttl_s: 301, images_delay_ms: 1_500)
+
+      assert run(context) == :ok
+      assert_received {:published, %{"decision_id" => "d_1"}}
     end
   end
 

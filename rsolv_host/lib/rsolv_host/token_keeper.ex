@@ -15,6 +15,16 @@ defmodule RsolvHost.TokenKeeper do
   (`ERL_CRASH_DUMP_SECONDS=0`), a packaging requirement (plan Task 27) that
   `rel/vm.args.eex` sets.
 
+  Rotation: a refresh rotates the token on the platform (`Rsolv.Runners`), which
+  refuses the old one from the moment it commits, with no grace period. So
+  while a refresh is in flight, `token/1` waits for it (at most
+  `:refresh_timeout_ms`, 10 s, after which the refresh is killed) and answers
+  with the new token, never the one about to die. A refresh that failed
+  without a definite refusal (lost answer, 5xx, timeout) may still have
+  rotated the token: until a refresh succeeds, the keeper serves its request
+  marked uncertain, and `RsolvHost.Platform` reports a 401 on it as
+  `{:error, :token_uncertain}` (transient, exit 3), not as configuration.
+
   Retry hand-off: the work workflow retries once on exit 3, and the platform
   allows one exchange per run attempt, issue and role. So after every exchange and
   refresh the keeper writes the token to a `0600` file under `$RUNNER_TEMP/rsolv`,
@@ -22,6 +32,12 @@ defmodule RsolvHost.TokenKeeper do
   path) instead of exchanging. Without a hand-off file (the first exchange's
   answer was lost), the resume exchanges: if the lost exchange did happen, the
   platform refuses with `409 already_exchanged`, a transient failure.
+
+  A lost refresh answer isn't recoverable within the job: the platform has
+  rotated the token and the host never learned the new one. The next platform
+  call gets 401 and exits 3; the retry refreshes the hand-off token (the old
+  one), gets 401, and exits 3 too (`:token_uncertain`). Re-running the
+  workflow starts over with a fresh exchange.
   """
 
   use GenServer
@@ -30,6 +46,8 @@ defmodule RsolvHost.TokenKeeper do
 
   @default_margin_s 300
   @default_retry_ms 30_000
+  @default_refresh_timeout_ms 10_000
+  # Longer than a refresh may take, so a waiting caller gets its answer.
   @call_timeout_ms 15_000
   @oidc_env ~w(ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN)
 
@@ -44,7 +62,8 @@ defmodule RsolvHost.TokenKeeper do
   @doc """
   Exchanges (or, with `resume: true`, refreshes the hand-off token) and starts
   the keeper. Options: `:role`, `:issue` (`nil` for scan), `:env`, `:resume`,
-  `:refresh_margin_s` (default 300), `:retry_ms` (default 30 s) and `:io`.
+  `:refresh_margin_s` (default 300), `:retry_ms` (default 30 s),
+  `:refresh_timeout_ms` (default 10 s) and `:io`.
 
   The keeper isn't linked to the caller: it monitors it and stops when it ends,
   and a keeper that has died is `{:error, :token_unavailable}` from `token/1`
@@ -61,7 +80,10 @@ defmodule RsolvHost.TokenKeeper do
       io: Keyword.get(opts, :io, :stdio),
       margin_s: Keyword.get(opts, :refresh_margin_s, @default_margin_s),
       retry_ms: Keyword.get(opts, :retry_ms, @default_retry_ms),
-      refreshing: nil
+      refresh_timeout_ms: Keyword.get(opts, :refresh_timeout_ms, @default_refresh_timeout_ms),
+      refreshing: nil,
+      waiting: [],
+      uncertain: false
     }
 
     with {:ok, req} <- Platform.req(env),
@@ -75,8 +97,8 @@ defmodule RsolvHost.TokenKeeper do
 
   @doc """
   The current run token with its binding and the platform request to use it with.
-  It answers at once, also while a refresh is in flight. `{:error,
-  :token_expired}` once it has expired unrefreshed; `{:error,
+  While a refresh is in flight, it waits for the refresh (see "Rotation").
+  `{:error, :token_expired}` once it has expired unrefreshed; `{:error,
   :token_unavailable}` if the keeper is gone or doesn't answer within 15 s.
   """
   @spec token(GenServer.server()) ::
@@ -120,16 +142,26 @@ defmodule RsolvHost.TokenKeeper do
   end
 
   @impl true
-  def handle_call(:token, _from, state) do
-    reply =
-      if DateTime.compare(DateTime.utc_now(), state.expires_at) == :lt,
-        do: {:ok, Map.take(state, [:raw, :binding, :expires_at, :req])},
-        else: {:error, :token_expired}
+  def handle_call(:token, from, %{refreshing: %Task{}} = state),
+    do: {:noreply, %{state | waiting: [from | state.waiting]}}
 
-    {:reply, reply, state}
+  def handle_call(:token, _from, state), do: {:reply, served(state), state}
+
+  defp served(state) do
+    if DateTime.compare(DateTime.utc_now(), state.expires_at) == :lt do
+      req =
+        if state.uncertain,
+          do: Req.Request.put_private(state.req, :token_uncertain, true),
+          else: state.req
+
+      {:ok, state |> Map.take([:raw, :binding, :expires_at]) |> Map.put(:req, req)}
+    else
+      {:error, :token_expired}
+    end
   end
 
-  # The refresh runs in a monitored task, so the keeper keeps answering `token/1`.
+  # The refresh runs in a monitored task, bounded by `refresh_timeout_ms`, so
+  # the keeper stays responsive and callers wait a bounded time.
   @impl true
   def handle_info(:refresh, %{refreshing: nil} = state) do
     request = Map.take(state, [:oidc, :io, :req, :raw])
@@ -139,6 +171,7 @@ defmodule RsolvHost.TokenKeeper do
         refresh(request, request.raw)
       end)
 
+    Process.send_after(self(), {:refresh_timeout, task.ref}, state.refresh_timeout_ms)
     {:noreply, %{state | refreshing: task}}
   end
 
@@ -150,6 +183,11 @@ defmodule RsolvHost.TokenKeeper do
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{refreshing: %Task{ref: ref}} = state),
     do: refreshed({:error, :refresh_crashed}, %{state | refreshing: nil})
 
+  def handle_info({:refresh_timeout, ref}, %{refreshing: %Task{ref: ref} = task} = state) do
+    Task.shutdown(task, :brutal_kill)
+    refreshed({:error, :refresh_timeout}, %{state | refreshing: nil})
+  end
+
   def handle_info({:DOWN, ref, :process, _owner, _reason}, %{owner: ref} = state),
     do: {:stop, :normal, state}
 
@@ -159,12 +197,27 @@ defmodule RsolvHost.TokenKeeper do
   # A hand-off file that can't be written leaves the retry the older token; the
   # role goes on with the new one.
   defp refreshed({:ok, token}, state) do
-    state = Map.merge(state, token)
+    state = Map.merge(%{state | uncertain: false}, token)
     _kept_or_not = keep(state)
-    {:noreply, schedule(state, refresh_delay_ms(state))}
+    {:noreply, state |> release() |> schedule(refresh_delay_ms(state))}
   end
 
-  defp refreshed({:error, _reason}, state), do: {:noreply, schedule(state, state.retry_ms)}
+  defp refreshed({:error, reason}, state) do
+    state = %{state | uncertain: state.uncertain or uncertain?(reason)}
+    {:noreply, state |> release() |> schedule(state.retry_ms)}
+  end
+
+  defp release(state) do
+    Enum.each(state.waiting, &GenServer.reply(&1, served(state)))
+    %{state | waiting: []}
+  end
+
+  # Only a definite refusal (4xx), or a failure before the platform was asked,
+  # proves the token wasn't rotated.
+  defp uncertain?({:platform, status, _code}) when status in 400..499, do: false
+  defp uncertain?({:oidc_http, _status}), do: false
+  defp uncertain?(:oidc_unavailable), do: false
+  defp uncertain?(_lost_or_unknown), do: true
 
   @impl true
   def terminate(_reason, %{refreshing: %Task{} = task}) do
@@ -200,14 +253,17 @@ defmodule RsolvHost.TokenKeeper do
          {:ok, %{"raw" => raw}} <- RsolvCore.StrictJson.decode(json),
          true <- Platform.run_token?(raw) do
       ActionsLog.mask(raw, state.io)
-      refresh(state, raw)
+      state |> refresh(raw) |> resumed()
     else
       {:error, :enoent} -> first_token(state, false)
-      {:error, {:platform, _status, _code}} = refused -> refused
-      {:error, {:transport, _reason}} = transient -> transient
       _unreadable -> {:error, :resume_unavailable}
     end
   end
+
+  # The first attempt's last refresh may have rotated the hand-off token with
+  # its answer lost: a 401 on it is transient, not configuration.
+  defp resumed({:error, {:platform, 401, _code}}), do: {:error, :token_uncertain}
+  defp resumed(result), do: result
 
   defp refresh(state, raw) do
     with {:ok, jwt} <- Oidc.fetch(state.oidc, io: state.io),

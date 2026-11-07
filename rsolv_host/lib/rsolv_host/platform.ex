@@ -171,7 +171,7 @@ defmodule RsolvHost.Platform do
            into: into
          ) do
       {:ok, %Req.Response{status: 200} = resp} -> {:ok, resp}
-      {:ok, %Req.Response{status: status}} -> {:error, {:platform, status, nil}}
+      {:ok, %Req.Response{status: status}} -> {:error, refusal(req, status, nil)}
       {:error, exception} -> {:error, Http.failure(exception)}
     end
   end
@@ -285,12 +285,17 @@ defmodule RsolvHost.Platform do
         {:ok, resp}
 
       {:ok, %Req.Response{status: status, body: body}} ->
-        {:error, {:platform, status, error_code(body)}}
+        {:error, refusal(req, status, error_code(body))}
 
       error ->
         error
     end
   end
+
+  # A 401 on a token whose refresh answer was lost (`RsolvHost.TokenKeeper`,
+  # "Rotation") most likely means it was rotated: transient, not configuration.
+  defp refusal(%{private: %{token_uncertain: true}}, 401, _code), do: :token_uncertain
+  defp refusal(_req, status, code), do: {:platform, status, code}
 
   defp error_code(body) do
     case StrictJson.decode(body) do

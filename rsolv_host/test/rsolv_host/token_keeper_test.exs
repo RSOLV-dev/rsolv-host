@@ -181,11 +181,10 @@ defmodule RsolvHost.TokenKeeperTest do
     end
   end
 
-  describe "while a refresh is slow" do
-    test "token/1 keeps answering with the current token at once", context do
-      test = self()
-      first = "rsolv_rt_" <> String.duplicate("F", 43)
-
+  describe "while a refresh is in flight" do
+    # The platform rotates on refresh: the old token is refused from the moment
+    # it commits, so a caller must not be handed it while the answer is due.
+    defp slow_refresh(test, first, refreshed) do
       Req.Test.stub(Platform, fn conn ->
         case conn.request_path do
           "/api/v1/runs/token" ->
@@ -194,20 +193,72 @@ defmodule RsolvHost.TokenKeeperTest do
           "/api/v1/runs/token/refresh" ->
             send(test, {:refreshing, self()})
             assert_receive :release, 5_000
-            Req.Test.json(conn, token_json("rsolv_rt_" <> String.duplicate("S", 43), 3_600))
+            refreshed.(conn)
         end
       end)
+    end
+
+    test "token/1 waits for it and gets the new token", context do
+      first = "rsolv_rt_" <> String.duplicate("F", 43)
+      second = "rsolv_rt_" <> String.duplicate("S", 43)
+      slow_refresh(self(), first, &Req.Test.json(&1, token_json(second, 3_600)))
 
       {:ok, keeper} = start(context, refresh_margin_s: 3_599)
       assert_receive {:refreshing, refresher}, 2_000
 
+      caller = Task.async(fn -> TokenKeeper.token(keeper) end)
+      assert Task.yield(caller, 200) == nil
+
+      send(refresher, :release)
+      assert {:ok, %{raw: ^second}} = Task.await(caller)
+    end
+
+    test "a refresh that doesn't answer releases waiting callers at its bound", context do
+      first = "rsolv_rt_" <> String.duplicate("F", 43)
+      slow_refresh(self(), first, &Req.Test.json(&1, %{}))
+
+      {:ok, keeper} = start(context, refresh_margin_s: 3_599, refresh_timeout_ms: 300)
+      assert_receive {:refreshing, _never_released}, 2_000
+
       {micros, reply} = :timer.tc(fn -> TokenKeeper.token(keeper) end)
 
       assert {:ok, %{raw: ^first}} = reply
-      assert micros < 500_000
+      assert micros < 1_000_000
+    end
+  end
 
-      send(refresher, :release)
-      eventually(fn -> match?({:ok, %{raw: "rsolv_rt_SSS" <> _}}, TokenKeeper.token(keeper)) end)
+  describe "after a refresh whose answer was lost" do
+    setup context do
+      first = "rsolv_rt_" <> String.duplicate("F", 43)
+
+      Req.Test.stub(Platform, fn conn ->
+        case conn.request_path do
+          "/api/v1/runs/token" ->
+            Req.Test.json(conn, token_json(first, 3_600))
+
+          "/api/v1/runs/token/refresh" ->
+            Req.Test.transport_error(conn, :closed)
+
+          _rotated ->
+            conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{error: "invalid_token"})
+        end
+      end)
+
+      {:ok, keeper} = start(context, refresh_margin_s: 3_599, retry_ms: 60_000)
+      %{keeper: keeper}
+    end
+
+    test "a 401 is transient (exit 3): the platform may have rotated the token", %{keeper: keeper} do
+      eventually(fn ->
+        match?({:ok, %{req: %{private: %{token_uncertain: true}}}}, TokenKeeper.token(keeper))
+      end)
+
+      {:ok, %{req: req, raw: raw}} = TokenKeeper.token(keeper)
+
+      result = Platform.session_status(req, raw, :validation, "s1")
+
+      assert result == {:error, :token_uncertain}
+      assert RsolvHost.Outcome.exit_code(result) == 3
     end
   end
 
@@ -390,6 +441,26 @@ defmodule RsolvHost.TokenKeeperTest do
 
       assert {:ok, keeper} = start(context, resume: true)
       assert {:ok, %{raw: ^raw}} = TokenKeeper.token(keeper)
+    end
+
+    test "when the hand-off token was rotated by a refresh whose answer was lost, the refusal is transient",
+         context do
+      path = TokenKeeper.handoff_path(context.env, :work, 7)
+      File.mkdir_p!(Path.dirname(path))
+
+      File.write!(
+        path,
+        JSON.encode!(%{raw: "rsolv_rt_" <> String.duplicate("F", 43), binding: %{}})
+      )
+
+      Req.Test.stub(Platform, fn conn ->
+        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{error: "invalid_token"})
+      end)
+
+      result = start(context, resume: true)
+
+      assert result == {:error, :token_uncertain}
+      assert RsolvHost.Outcome.exit_code(result) == 3
     end
 
     test "when the lost first exchange did happen, the refusal is transient", context do

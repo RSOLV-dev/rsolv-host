@@ -106,11 +106,16 @@ defmodule RsolvHost.Roles.Publish do
       System.monotonic_time(:millisecond) +
         DateTime.diff(expires_at, DateTime.utc_now(), :millisecond)
 
-    %{
-      ctx
-      | gh: %{ctx.gh | req: Http.deadline(ctx.gh.req, deadline, :expired)},
-        req: Http.deadline(ctx.req, deadline, :expired)
-    }
+    ctx
+    |> Map.put(:deadline, deadline)
+    |> Map.put(:gh, %{ctx.gh | req: Http.deadline(ctx.gh.req, deadline, :expired)})
+  end
+
+  # The keeper's current token for each platform call: a refresh during the
+  # role rotates the one it started with.
+  defp platform(ctx) do
+    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(ctx.keeper),
+         do: {:ok, Http.deadline(req, ctx.deadline, :expired), raw}
   end
 
   defp decision(ctx) do
@@ -163,8 +168,8 @@ defmodule RsolvHost.Roles.Publish do
     wanted =
       for %{op: op} = e <- change_set, op != :delete, into: %{}, do: {e.path, e.new_blob_sha}
 
-    with {:ok, %{"files" => %{} = files}} <-
-           Platform.post_images(ctx.req, ctx.raw, ctx.run, ctx.issue),
+    with {:ok, req, raw} <- platform(ctx),
+         {:ok, %{"files" => %{} = files}} <- Platform.post_images(req, raw, ctx.run, ctx.issue),
          true <- files |> Map.keys() |> Enum.sort() == wanted |> Map.keys() |> Enum.sort(),
          {:ok, images} <- decode_images(files, wanted) do
       {:ok, images}
@@ -355,8 +360,9 @@ defmodule RsolvHost.Roles.Publish do
 
   defp effects(ctx, decision, bodies, commits, %{"number" => number, "html_url" => url} = pull) do
     with :ok <- labels(ctx, pull, decision["effects"]["labels"]),
-         :ok <- comments(ctx, bodies.comments) do
-      Platform.published(ctx.req, ctx.raw, ctx.run, ctx.issue, %{
+         :ok <- comments(ctx, bodies.comments),
+         {:ok, req, raw} <- platform(ctx) do
+      Platform.published(req, raw, ctx.run, ctx.issue, %{
         decision_id: decision["decision_id"],
         pr_number: number,
         pr_url: url,
