@@ -82,5 +82,14 @@ defmodule RsolvHost.ExecTest do
       assert System.monotonic_time(:millisecond) - deadline < 1_000
       Port.close(port)
     end
+
+    test "when the deadline has passed, refuses without writing, even to a ready program" do
+      {:ok, port} = Exec.open("head", ["-c", "4"], [])
+      expired = System.monotonic_time(:millisecond) - 1
+
+      assert {:error, :timeout} = Exec.command(port, "ping", expired)
+      refute_receive {^port, {:data, _written}}, 300
+      Port.close(port)
+    end
   end
 end

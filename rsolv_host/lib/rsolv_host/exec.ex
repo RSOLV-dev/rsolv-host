@@ -66,15 +66,16 @@ defmodule RsolvHost.Exec do
   end
 
   @doc """
-  Writes `data` to the program's stdin. While the port is busy (the program
-  isn't reading), it waits, but only until `deadline` (monotonic milliseconds):
-  then `{:error, :timeout}`. `{:error, :closed}` once the program has exited.
+  Writes `data` to the program's stdin, but only before `deadline` (monotonic
+  milliseconds): past it, nothing is written and the answer is `{:error,
+  :timeout}`. While the port is busy (the program isn't reading), it waits until
+  the deadline. `{:error, :closed}` once the program has exited.
   """
   @spec command(port(), iodata(), integer()) :: :ok | {:error, :timeout | :closed}
   def command(port, data, deadline) do
     cond do
-      Port.command(port, data, [:nosuspend]) -> :ok
       System.monotonic_time(:millisecond) >= deadline -> {:error, :timeout}
+      Port.command(port, data, [:nosuspend]) -> :ok
       true -> wait_and_command(port, data, deadline)
     end
   rescue
