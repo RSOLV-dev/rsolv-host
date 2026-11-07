@@ -81,6 +81,42 @@ defmodule RsolvHost.CLITest do
     end
   end
 
+  describe "main/4 and the retry hand-off token" do
+    @describetag :tmp_dir
+
+    setup %{tmp_dir: dir} do
+      env = %{"RUNNER_TEMP" => dir, "RSOLV_HOST_INSTALL_DIR" => Path.join(dir, "rsolv-host")}
+      path = RsolvHost.TokenKeeper.handoff_path(env, :work, 7)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "{}")
+      %{env: env, root: Path.join([dir, "rsolv-host", ".burrito", "r"]), path: path}
+    end
+
+    test "is kept for the retry after a transient failure", %{env: env, root: root, path: path} do
+      commands = %{
+        "work" => {fn _opts, _env -> {:error, :stream_exhausted} end, [issue: :integer], [:issue]}
+      }
+
+      capture_io(fn ->
+        assert CLI.main(["work", "--issue", "7"], env, root, commands: commands) == 3
+      end)
+
+      assert File.exists?(path)
+    end
+
+    test "is deleted after any other ending", %{env: env, root: root, path: path} do
+      commands = %{
+        "work" => {fn _opts, _env -> {:error, :oidc_unavailable} end, [issue: :integer], [:issue]}
+      }
+
+      capture_io(fn ->
+        assert CLI.main(["work", "--issue", "7"], env, root, commands: commands) == 2
+      end)
+
+      refute File.exists?(path)
+    end
+  end
+
   describe "commands/0" do
     test "is exactly the five roles and leaves maintenance to Burrito" do
       assert CLI.commands() == ~w(publish scan selftest version work)

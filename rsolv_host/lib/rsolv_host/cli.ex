@@ -5,7 +5,7 @@ defmodule RsolvHost.CLI do
   first, for every command, because the first invocation extracts the release.
   """
 
-  alias RsolvHost.{Outcome, Preflight}
+  alias RsolvHost.{Outcome, Preflight, TokenKeeper}
 
   @usage "usage: rsolv-host scan [--max-issues N] | work --issue N [--resume] | publish --issue N | version | selftest"
 
@@ -17,6 +17,8 @@ defmodule RsolvHost.CLI do
     "version" => {{__MODULE__, :version}, [], []},
     "work" => {{RsolvHost.Roles.Work, :run}, [issue: :integer, resume: :boolean], [:issue]}
   }
+
+  @roles %{"publish" => :publish, "scan" => :scan, "work" => :work}
 
   @doc "The command names, sorted. Burrito's wrapper owns `maintenance`, so it isn't one."
   @spec commands() :: [String.t()]
@@ -41,7 +43,7 @@ defmodule RsolvHost.CLI do
          {opts, [], []} <- OptionParser.parse(args, strict: spec),
          opts = Map.new(opts),
          true <- Enum.all?(required, &Map.has_key?(opts, &1)) do
-      {:ok, fun, opts}
+      {:ok, name, fun, opts}
     else
       _unknown_or_invalid -> {:error, :usage}
     end
@@ -49,12 +51,21 @@ defmodule RsolvHost.CLI do
 
   defp parse([], _commands), do: {:error, :usage}
 
-  defp run({:ok, fun, opts}, env), do: fun |> call(opts, env) |> finish(opts, env)
+  defp run({:ok, name, fun, opts}, env) do
+    code = fun |> call(opts, env) |> finish(opts, env)
+    discard(code, Map.get(@roles, name), env, opts)
+    code
+  end
 
   defp run({:error, :usage} = error, env) do
     IO.puts(@usage)
     finish(error, %{}, env)
   end
+
+  # A transient failure (3) is retried with --resume, which needs the hand-off token.
+  defp discard(3, _role, _env, _opts), do: :ok
+  defp discard(_code, nil, _env, _opts), do: :ok
+  defp discard(_code, role, env, opts), do: TokenKeeper.discard(env, role, opts[:issue])
 
   defp call(fun, opts, env) do
     case fun do
