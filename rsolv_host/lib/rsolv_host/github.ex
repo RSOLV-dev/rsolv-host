@@ -91,6 +91,107 @@ defmodule RsolvHost.GitHub do
   @spec create_issue(t(), map()) :: {:ok, map()} | {:error, error()}
   def create_issue(gh, issue), do: object(call(gh, :post, "/issues", json: issue))
 
+  @doc "Stores `bytes` as a blob and returns its SHA."
+  @spec create_blob(t(), binary()) :: {:ok, String.t()} | {:error, term()}
+  def create_blob(gh, bytes),
+    do:
+      sha(
+        call(gh, :post, "/git/blobs", json: %{content: Base.encode64(bytes), encoding: "base64"})
+      )
+
+  @doc """
+  Creates a tree on `base_tree` from entries (`%{"path", "mode", "type", "sha"}`;
+  a `nil` SHA deletes the path) and returns its SHA.
+  """
+  @spec create_tree(t(), String.t(), [map()]) :: {:ok, String.t()} | {:error, term()}
+  def create_tree(gh, base_tree, entries),
+    do: sha(call(gh, :post, "/git/trees", json: %{base_tree: base_tree, tree: entries}))
+
+  @doc "Creates a commit and returns its SHA."
+  @spec create_commit(t(), String.t(), String.t(), [String.t()]) ::
+          {:ok, String.t()} | {:error, term()}
+  def create_commit(gh, message, tree, parents),
+    do:
+      sha(
+        call(gh, :post, "/git/commits", json: %{message: message, tree: tree, parents: parents})
+      )
+
+  @doc "Reads a commit."
+  @spec get_commit(t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def get_commit(gh, sha), do: object(call(gh, :get, "/git/commits/" <> hex!(sha)))
+
+  @doc "Reads one tree, non-recursively."
+  @spec get_tree(t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def get_tree(gh, sha), do: object(call(gh, :get, "/git/trees/" <> hex!(sha)))
+
+  @doc "Creates `refs/heads/<branch>` at `sha` (422 if it exists)."
+  @spec create_ref(t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def create_ref(gh, branch, sha) do
+    with {:ok, _ref} <-
+           call(gh, :post, "/git/refs", json: %{ref: "refs/heads/" <> branch, sha: sha}),
+         do: :ok
+  end
+
+  @doc "The commit SHA `refs/heads/<branch>` points at."
+  @spec get_ref(t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def get_ref(gh, branch) do
+    case call(
+           gh,
+           :get,
+           "/git/ref/heads/" <> URI.encode(branch, &(URI.char_unreserved?(&1) or &1 == ?/))
+         ) do
+      {:ok, %{"object" => %{"sha" => sha}}} when is_binary(sha) -> {:ok, sha}
+      {:ok, _other} -> {:error, :malformed_response}
+      error -> error
+    end
+  end
+
+  @doc "Opens a pull request."
+  @spec create_pull(t(), map()) :: {:ok, map()} | {:error, term()}
+  def create_pull(gh, pull), do: object(call(gh, :post, "/pulls", json: pull))
+
+  @doc "Adds labels to an issue or pull request."
+  @spec add_labels(t(), pos_integer(), [String.t()]) :: :ok | {:error, term()}
+  def add_labels(gh, number, labels) do
+    with {:ok, _labels} <- call(gh, :post, "/issues/#{number}/labels", json: %{labels: labels}),
+         do: :ok
+  end
+
+  @doc "Comments on an issue or pull request."
+  @spec comment(t(), pos_integer(), String.t()) :: :ok | {:error, term()}
+  def comment(gh, number, body) do
+    with {:ok, _comment} <- call(gh, :post, "/issues/#{number}/comments", json: %{body: body}),
+         do: :ok
+  end
+
+  @doc "How `head` relates to `base`: `ahead`, `behind`, `diverged` or `identical`."
+  @spec compare(t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def compare(gh, base, head) do
+    segment =
+      URI.encode(base, &URI.char_unreserved?/1) <>
+        "..." <> URI.encode(head, &URI.char_unreserved?/1)
+
+    case call(gh, :get, "/compare/" <> segment, max_bytes: 64 * 1024 * 1024) do
+      {:ok, %{"status" => status}} when status in ~w(ahead behind diverged identical) ->
+        {:ok, status}
+
+      {:ok, _other} ->
+        {:error, :malformed_response}
+
+      error ->
+        error
+    end
+  end
+
+  defp sha({:ok, %{"sha" => sha}}) when is_binary(sha), do: {:ok, hex!(sha)}
+  defp sha({:ok, _other}), do: {:error, :malformed_response}
+  defp sha(error), do: error
+
+  defp hex!(sha) do
+    true = sha =~ ~r/\A[0-9a-f]{40}\z/
+    sha
+  end
+
   @doc """
   Sends a request under `/repos/{owner}/{name}` and decodes the JSON answer
   (at most 32 MiB, or `opts[:max_bytes]`).
