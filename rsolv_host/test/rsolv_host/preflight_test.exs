@@ -13,12 +13,17 @@ defmodule RsolvHost.PreflightTest do
       assert Preflight.check(@env, @root) == :ok
     end
 
-    for name <- ~w(ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS ERL_LIBS) do
+    for name <- ~w(ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS ERL_OTP29_FLAGS ERL_OTP30_FLAGS ERL_LIBS
+                   ERL_COMPILER_OPTIONS EMU) do
       test "when #{name} is set (it can re-enable crash dumps or change the VM's code and config), names it" do
         env = Map.put(@env, unquote(name), "-env ERL_CRASH_DUMP_SECONDS 10")
 
         assert Preflight.check(env, @root) == {:error, {:vm_env, unquote(name)}}
       end
+    end
+
+    test "when an ERL_ variable erlexec doesn't read is set, accepts it" do
+      assert Preflight.check(Map.put(@env, "ERL_EPMD_PORT", "4369"), @root) == :ok
     end
 
     test "when an ERL_* variable is set but empty, accepts it" do

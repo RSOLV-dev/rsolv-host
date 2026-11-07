@@ -32,6 +32,47 @@ defmodule RsolvHost.Release do
     end
   end
 
+  defmodule PatchLauncher do
+    @moduledoc """
+    A Burrito `build` pre-step: applies `patches/burrito-launcher-env.patch` to
+    Burrito 1.6.0's `src/erlang_launcher.zig` before the wrapper is built. The
+    patched launcher refuses `ERL_*FLAGS`, `ERL_LIBS` and `ERL_COMPILER_OPTIONS`
+    (exit 2) and removes every `LD_*` variable and `EMU` before it starts
+    `erlexec`. The launcher must hash to Burrito 1.6.0's (then it's patched) or
+    to the patched result; anything else stops the build.
+    """
+
+    @behaviour Burrito.Builder.Step
+
+    @patch Path.expand("../../patches/burrito-launcher-env.patch", __DIR__)
+    @external_resource @patch
+    @upstream "22ad426844e788dada6f8e4be250af1dba98e7c43363a71c461971bed5770f01"
+    @patched "2d0e8aa845e8ae2d4f2e5e935ef5ba01ae851e0c17edd0cc9801dd22db2eb070"
+
+    @impl true
+    @doc "Patches the launcher in Burrito's `self_dir`; raises `Mix.Error` unless it ends patched."
+    @spec execute(Burrito.Builder.Context.t()) :: Burrito.Builder.Context.t()
+    def execute(%Burrito.Builder.Context{self_dir: dir} = context) do
+      launcher = Path.join([dir, "src", "erlang_launcher.zig"])
+
+      case RsolvHost.Release.sha256_file(launcher) do
+        @patched -> :ok
+        @upstream -> patch(dir, launcher)
+        _other -> Mix.raise("#{launcher} is not Burrito 1.6.0's launcher; refusing to patch it")
+      end
+
+      context
+    end
+
+    defp patch(dir, launcher) do
+      {out, status} =
+        System.cmd("patch", ["--batch", "--forward", "-p1", "-d", dir, "-i", @patch])
+
+      unless status == 0 and RsolvHost.Release.sha256_file(launcher) == @patched,
+        do: Mix.raise("patching #{launcher} failed: #{out}")
+    end
+  end
+
   @doc """
   Returns `release` unchanged when the ERTS tarball of every target being built
   (all of them, or only `BURRITO_TARGET` when that's set) exists and matches the
@@ -71,7 +112,9 @@ defmodule RsolvHost.Release do
     end
   end
 
-  defp sha256_file(path) do
+  @doc false
+  @spec sha256_file(Path.t()) :: String.t()
+  def sha256_file(path) do
     path
     |> File.stream!(64 * 1024)
     |> Enum.reduce(:crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))

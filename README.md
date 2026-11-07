@@ -103,6 +103,13 @@ pins each architecture's ERTS tarball by SHA-256, and the release refuses any ta
 doesn't match (`RsolvHost.Release.verify_erts/2`). Each architecture builds natively on its
 own machine; nothing runs under emulation.
 
+Burrito's launcher is patched at build time (`rsolv_host/patches/burrito-launcher-env.patch`,
+applied and hash-checked by `RsolvHost.Release.PatchLauncher`). Before it starts `erlexec`,
+the patched launcher refuses any `ERL_*FLAGS`, `ERL_LIBS` or `ERL_COMPILER_OPTIONS` (exit 2,
+configuration), and removes every `LD_*` variable and `EMU`, so the caller's environment can't
+add VM flags, load a library into the VM or pick another emulator. `scripts/smoke.sh` tries
+each of these against the real binary.
+
 ```bash
 cd rsolv_host
 scripts/install-zig.sh "$HOME/zig-0.16.0" && export PATH="$HOME/zig-0.16.0:$PATH"  # Burrito 1.6.0 needs exactly 0.16.0

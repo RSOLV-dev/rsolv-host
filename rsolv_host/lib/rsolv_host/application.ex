@@ -9,8 +9,14 @@ defmodule RsolvHost.Application do
 
   use Application
 
-  alias Burrito.Util.Args
-  alias RsolvHost.{CLI, Outcome}
+  alias RsolvHost.Outcome
+
+  # Compile-time, so no VM flag (`-rsolv_host run_cli false`) can skip the CLI.
+  @run_cli Application.compile_env(:rsolv_host, :run_cli, false)
+
+  @doc "Whether the release runs the command line; fixed when the host is compiled."
+  @spec cli?() :: boolean()
+  def cli?, do: @run_cli
 
   @impl true
   def start(_type, _args) do
@@ -20,14 +26,24 @@ defmodule RsolvHost.Application do
         name: RsolvHost.Supervisor
       )
 
-    if Application.get_env(:rsolv_host, :run_cli, false),
+    start_cli()
+    {:ok, sup}
+  end
+
+  if @run_cli do
+    alias Burrito.Util.Args
+    alias RsolvHost.CLI
+
+    defp start_cli,
       do:
         run_cli(
-          fn -> CLI.main(Args.argv(), System.get_env(), :code.root_dir()) end,
+          fn ->
+            CLI.main(Args.argv(), System.get_env(), :code.root_dir())
+          end,
           &System.halt/1
         )
-
-    {:ok, sup}
+  else
+    defp start_cli, do: :ok
   end
 
   @doc """

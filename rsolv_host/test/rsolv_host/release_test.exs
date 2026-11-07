@@ -167,4 +167,55 @@ defmodule RsolvHost.ReleaseTest do
       refute File.exists?(Path.join([tmp_dir, "src", "musl-runtime.so"]))
     end
   end
+
+  describe "PatchLauncher.execute/1" do
+    @patched_sha "2d0e8aa845e8ae2d4f2e5e935ef5ba01ae851e0c17edd0cc9801dd22db2eb070"
+
+    # Burrito 1.6.0's own launcher, in a copy of its src/ under tmp_dir.
+    defp burrito_copy(tmp_dir) do
+      src = Path.join(tmp_dir, "src")
+      File.mkdir_p!(src)
+      launcher = Path.join(src, "erlang_launcher.zig")
+      File.cp!(Path.join(Mix.Project.deps_paths()[:burrito], "src/erlang_launcher.zig"), launcher)
+
+      if File.read!(launcher) =~ "rsolvhostScrubEnv" do
+        patch = Path.expand("../../patches/burrito-launcher-env.patch", __DIR__)
+        {_out, 0} = System.cmd("patch", ["--batch", "-R", "-p1", "-d", tmp_dir, "-i", patch])
+      end
+
+      {struct(Burrito.Builder.Context, self_dir: tmp_dir, extra_build_env: [], halted: false),
+       launcher}
+    end
+
+    defp sha256_of(path), do: path |> File.read!() |> sha256()
+
+    test "when the launcher is Burrito 1.6.0's, patches it to scrub the VM's environment",
+         %{tmp_dir: tmp_dir} do
+      {context, launcher} = burrito_copy(tmp_dir)
+
+      assert Release.PatchLauncher.execute(context) == context
+      assert sha256_of(launcher) == @patched_sha
+      assert File.read!(launcher) =~ "rsolvhostScrubEnv(env_map);"
+    end
+
+    test "when the launcher is already patched, leaves it as it is", %{tmp_dir: tmp_dir} do
+      {context, launcher} = burrito_copy(tmp_dir)
+      Release.PatchLauncher.execute(context)
+
+      assert Release.PatchLauncher.execute(context) == context
+      assert sha256_of(launcher) == @patched_sha
+    end
+
+    test "when the launcher is neither (another Burrito), raises and leaves it",
+         %{tmp_dir: tmp_dir} do
+      {context, launcher} = burrito_copy(tmp_dir)
+      File.write!(launcher, "pub fn launch() void {}\n")
+
+      assert_raise Mix.Error, ~r/erlang_launcher.zig/, fn ->
+        Release.PatchLauncher.execute(context)
+      end
+
+      assert File.read!(launcher) == "pub fn launch() void {}\n"
+    end
+  end
 end

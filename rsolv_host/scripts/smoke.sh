@@ -77,11 +77,24 @@ if [ "$online" = --online ]; then
   ok "selftest --online (https://api.rsolv.dev, no trailing dot): exit 2"
 fi
 
+# erlexec <args...>: starts the extracted release's erlexec directly, bypassing
+# Burrito's wrapper, with the arguments and environment its launcher passes;
+# prints the exit code. Extra VM arguments go before `-extra <command>`.
+erlexec() {
+  local rel; rel=$(echo "$erts_root"/releases/*/vm.args); rel=${rel%/vm.args}
+  (cd "$work" && env ROOTDIR="$erts_root" BINDIR="$(echo "$erts_root"/erts-*/bin)" \
+    RELEASE_ROOT="$erts_root" __BURRITO=1 RSOLV_HOST_INSTALL_DIR="$install" \
+    "$erts_root"/erts-*/bin/erlexec -elixir ansi_enabled true -noshell -s elixir start_cli \
+    -mode embedded -setcookie smoke -boot "$rel/start" -boot_var RELEASE_LIB "$erts_root/lib" \
+    -args_file "$rel/vm.args" -config "$rel/sys.config" "$@" >"$work/out" 2>&1) && echo 0 || echo $?
+}
+
 # 5. Crash dumps. A bad kernel parameter makes the VM halt with "Kernel pid
 #    terminated", which writes erl_crash.dump unless ERL_CRASH_DUMP_SECONDS=0
-#    (rel/vm.args.eex, passed by Burrito's launcher as -args_file).
+#    (rel/vm.args.eex, passed by Burrito's launcher as -args_file). The wrapper
+#    refuses ERL_FLAGS, so the trigger goes to erlexec directly.
 marker="$work/marker"; touch "$marker"
-rc=$(ERL_FLAGS='-kernel logger_level bogus' run "$install" version)
+rc=$(erlexec -kernel logger_level bogus -extra version)
 [ "$rc" != 0 ] || fail "the crash trigger didn't crash"
 # On CI the whole root filesystem is searched; elsewhere, everywhere a dump could
 # land: the cwd and RUNNER_TEMP (both under $work), /tmp and $HOME.
@@ -90,14 +103,51 @@ dumps=$(find "${roots[@]}" "${depth[@]}" -xdev -name 'erl_crash.dump' -newer "$m
 [ -z "$dumps" ] || fail "crash dump written: $dumps"
 grep -q 'Kernel pid terminated' "$work/out" || fail "the VM didn't report the crash"
 ok "VM crash (exit $rc, 'Kernel pid terminated'): no erl_crash.dump anywhere"
-# Control: the same trigger with crash dumps re-enabled does write one.
-rc=$(ERL_FLAGS='-env ERL_CRASH_DUMP_SECONDS 10 -kernel logger_level bogus' run "$install" version)
-if [ -s "$work/erl_crash.dump" ]; then
-  ok "control (ERL_CRASH_DUMP_SECONDS=10 via ERL_FLAGS): erl_crash.dump written ($(stat -c %s "$work/erl_crash.dump") bytes)"
-  rm -f "$work/erl_crash.dump"
-else
-  echo "note: control wrote no dump (exit $rc); vm.args may override ERL_FLAGS -env"
-fi
+# Control: the same trigger with crash dumps re-enabled after vm.args does write one.
+rc=$(erlexec -env ERL_CRASH_DUMP_SECONDS 10 -kernel logger_level bogus -extra version)
+[ -s "$work/erl_crash.dump" ] || fail "control: no erl_crash.dump with ERL_CRASH_DUMP_SECONDS=10 (exit $rc)"
+ok "control (-env ERL_CRASH_DUMP_SECONDS 10): erl_crash.dump written ($(stat -c %s "$work/erl_crash.dump") bytes)"
+rm -f "$work/erl_crash.dump"
+
+# 5b. Startup injection. The patched wrapper refuses VM flag variables (exit 2,
+#     the configuration code) before erlexec starts, so -s/-eval never run. The
+#     bad kernel parameter in a flag variable would halt a VM at boot (exit 1),
+#     so exit 2 there comes from the wrapper, not from the CLI's preflight.
+inject='-rsolv_host run_cli false -s erlang display pwned -eval erlang:display(pwned) -s erlang halt'
+for var in ERL_AFLAGS ERL_FLAGS ERL_ZFLAGS ERL_OTP29_FLAGS ERL_OTP30_FLAGS ERL_LIBS ERL_COMPILER_OPTIONS; do
+  rc=$(export "$var=$inject -kernel logger_level bogus"; run "$install" version)
+  grep -q pwned "$work/out" && fail "$var: injected code ran"
+  [ "$rc" = 2 ] || { cat "$work/out"; fail "$var: exit $rc, not 2"; }
+  grep -q "::error title=RSOLV configuration::Unset $var:" "$work/out" || fail "$var: no refusal annotation"
+  ok "$var=<run_cli false, -s, -eval>: refused by the wrapper, exit 2, nothing injected ran"
+done
+#     With the wrapper bypassed, run_cli is fixed at compile time, so the CLI
+#     still runs and its preflight refuses the same variables.
+for var in ERL_AFLAGS ERL_OTP29_FLAGS; do
+  rc=$(export "$var=$inject"; erlexec -extra version)
+  grep -q pwned "$work/out" && fail "$var (wrapper bypassed): injected code ran"
+  [ "$rc" = 2 ] || { cat "$work/out"; fail "$var (wrapper bypassed): exit $rc, not 2"; }
+  ok "$var=<run_cli false, -s, -eval> to erlexec directly: the CLI's preflight refused it, exit 2, nothing injected ran"
+done
+#     The wrapper removes LD_* and EMU, so the loader and erlexec never see them.
+#     pwn.so prints "pwned" when loaded (and is a valid LD_AUDIT module).
+printf '%s\n' '#include <unistd.h>' \
+  '__attribute__((constructor)) static void pwn(void) { write(2, "pwned\n", 6); }' \
+  'unsigned int la_version(unsigned int v) { return v; }' >"$work/pwn.c"
+mkdir -p "$work/evil"
+cc -shared -fPIC -o "$work/pwn.so" "$work/pwn.c"
+cc -shared -fPIC -Wl,-soname,libtinfo.so.6 -o "$work/evil/libtinfo.so.6" "$work/pwn.c"
+[ "$(LD_PRELOAD=$work/pwn.so /bin/true 2>&1)" = pwned ] || fail "control: pwn.so doesn't load under LD_PRELOAD"
+[ "$(LD_AUDIT=$work/pwn.so /bin/true 2>&1)" = pwned ] || fail "control: pwn.so doesn't load under LD_AUDIT"
+LD_LIBRARY_PATH=$work/evil ldd "$erts_root"/erts-*/bin/beam.smp 2>/dev/null | grep -q "$work/evil/libtinfo.so.6" ||
+  fail "control: LD_LIBRARY_PATH doesn't redirect beam.smp's libtinfo"
+ok "controls: pwn.so loads under LD_PRELOAD and LD_AUDIT; LD_LIBRARY_PATH would give beam.smp a fake libtinfo"
+for assignment in "LD_PRELOAD=$work/pwn.so" "LD_AUDIT=$work/pwn.so" "LD_LIBRARY_PATH=$work/evil" EMU=pwned; do
+  rc=$(export "${assignment?}"; run "$install" version)
+  grep -q pwned "$work/out" && fail "${assignment%%=*}: loaded"
+  [ "$rc" = 0 ] || { cat "$work/out"; fail "${assignment%%=*}: exit $rc"; }
+  ok "${assignment%%=*} set: removed by the wrapper; version exits 0, nothing injected loaded"
+done
 
 # 6. Concurrent first runs. The reusable workflow serializes the first run;
 #    this records what an unserialized race does, and checks it can't leave a

@@ -23,7 +23,9 @@ defmodule RsolvHost.MixProject do
           steps: [&RsolvHost.Release.verify_erts/1, :assemble, &Burrito.wrap/1],
           burrito: [
             targets: targets(),
-            extra_steps: [build: [pre: [RsolvHost.Release.NoMuslLoader]]]
+            extra_steps: [
+              build: [pre: [RsolvHost.Release.NoMuslLoader, RsolvHost.Release.PatchLauncher]]
+            ]
           ]
         ]
       ]
