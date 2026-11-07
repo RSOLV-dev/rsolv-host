@@ -139,8 +139,9 @@ cc -shared -fPIC -o "$work/pwn.so" "$work/pwn.c"
 cc -shared -fPIC -Wl,-soname,libtinfo.so.6 -o "$work/evil/libtinfo.so.6" "$work/pwn.c"
 [ "$(LD_PRELOAD=$work/pwn.so /bin/true 2>&1)" = pwned ] || fail "control: pwn.so doesn't load under LD_PRELOAD"
 [ "$(LD_AUDIT=$work/pwn.so /bin/true 2>&1)" = pwned ] || fail "control: pwn.so doesn't load under LD_AUDIT"
-LD_LIBRARY_PATH=$work/evil ldd "$erts_root"/erts-*/bin/beam.smp 2>/dev/null | grep -q "$work/evil/libtinfo.so.6" ||
-  fail "control: LD_LIBRARY_PATH doesn't redirect beam.smp's libtinfo"
+# (Ubuntu's ldd is a bash script, and bash would load the fake libtinfo itself.)
+libs=$(LD_LIBRARY_PATH=$work/evil "$interp" --list "$erts_root"/erts-*/bin/beam.smp 2>/dev/null || true)
+grep -qF "$work/evil/libtinfo.so.6" <<<"$libs" || fail "control: LD_LIBRARY_PATH doesn't redirect beam.smp's libtinfo"
 ok "controls: pwn.so loads under LD_PRELOAD and LD_AUDIT; LD_LIBRARY_PATH would give beam.smp a fake libtinfo"
 for assignment in "LD_PRELOAD=$work/pwn.so" "LD_AUDIT=$work/pwn.so" "LD_LIBRARY_PATH=$work/evil" EMU=pwned; do
   rc=$(export "${assignment?}"; run "$install" version)
