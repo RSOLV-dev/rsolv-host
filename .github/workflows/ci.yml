@@ -16,6 +16,19 @@ jobs:
           docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo"
           ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
           git --redact --config /repo/.gitleaks.toml /repo
+  workflow-lint:
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+      - name: zizmor
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo
+          ghcr.io/zizmorcore/zizmor@sha256:3014cc8f68f663935f69b3c3e0e41f5ce102b268d97db13db0f62208747f860d
+          --offline --min-severity medium .github/workflows/
   core:
     strategy:
       matrix: { runner: [ubuntu-24.04, ubuntu-24.04-arm] }
@@ -124,7 +137,7 @@ jobs:
   ci-success:
     name: CI Success
     if: always()
-    needs: [gitleaks, core, host, package, viewer]
+    needs: [gitleaks, workflow-lint, core, host, package, viewer]
     runs-on: ubuntu-24.04
     permissions: {}
     steps:

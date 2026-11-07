@@ -35,7 +35,9 @@ attested binaries) is the design those changes must meet, not something you can 
 - **How you know what runs.** RSOLV's workflows will pin each release binary by SHA-256, and the
   platform only accepts workflow commits on its allowlist. Every release will be built in this
   repository by GitHub-hosted runners and carry a build-provenance attestation:
-  `gh attestation verify <binary> --repo RSOLV-dev/rsolv-host`.
+  `gh attestation verify <binary> --repo RSOLV-dev/rsolv-host`, plus the flags in
+  [docs/RELEASE-RUNBOOK.md](docs/RELEASE-RUNBOOK.md#verifying-a-release-anyone) that pin the
+  workflow, tag and commit.
 
 ## Protocol
 
