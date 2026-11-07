@@ -68,8 +68,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
-        with: { otp-version: "29.0.4", elixir-version: "1.20.2", version-type: strict }
       - name: Install Zig 0.16.0 (pinned tarball, SHA-256 checked)
         run: |
           scripts/install-zig.sh "$RUNNER_TEMP/zig"
@@ -79,11 +77,18 @@ jobs:
           start=$(date +%s)
           scripts/build-erts.sh "$ARCH" erts
           echo "ERTS build: $(( $(date +%s) - start )) s"
+      - name: Install OTP (the ERTS tarball, checked against erts.lock), Elixir, Hex and rebar3 (SHA-256 checked)
+        run: |
+          tc="$RUNNER_TEMP/toolchain"
+          scripts/install-toolchain.sh erts "$tc"
+          { echo "$tc/otp/bin"; echo "$tc/elixir/bin"; } >>"$GITHUB_PATH"
+          echo "MIX_HOME=$tc/mix" >>"$GITHUB_ENV"
       - name: Build the binary (verify_erts checks the ERTS against erts.lock)
         run: |
           export XDG_CACHE_HOME="$RUNNER_TEMP/cache"
+          echo "erl: $(command -v erl), elixir: $(command -v elixir), mix: $(command -v mix)"
           start=$(date +%s)
-          mix deps.get
+          mix deps.get --check-locked
           mix release
           echo "binary build: $(( $(date +%s) - start )) s"
           downloads=$(find "$XDG_CACHE_HOME" -path '*burrito*' -type f | wc -l)

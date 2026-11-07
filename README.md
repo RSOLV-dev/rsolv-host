@@ -102,7 +102,11 @@ The binary wraps a glibc ERTS that we build ourselves from pinned sources
 pins each architecture's ERTS tarball by SHA-256, and the release refuses any tarball that
 doesn't match (`RsolvHost.Release.verify_erts/2`). It checks a copy in a new private
 directory, and Burrito unpacks that copy, so the tarball can't change between check and use. Each architecture builds natively on its
-own machine; nothing runs under emulation.
+own machine; nothing runs under emulation. The ERTS build's apt packages all come from a
+fixed Ubuntu archive snapshot. The release is compiled with that same OTP (the ERTS tarball is
+a full OTP release, checked against `erts.lock` before use), plus Elixir, Hex and rebar3 files
+pinned by SHA-256 in `scripts/install-toolchain.sh`, so every `.beam` in the binary comes from
+a pinned input.
 
 Burrito's launcher is patched at build time (`rsolv_host/patches/burrito-launcher-env.patch`,
 applied and hash-checked by `RsolvHost.Release.PatchLauncher`). Before it starts `erlexec`,
@@ -115,7 +119,10 @@ each of these against the real binary.
 cd rsolv_host
 scripts/install-zig.sh "$HOME/zig-0.16.0" && export PATH="$HOME/zig-0.16.0:$PATH"  # Burrito 1.6.0 needs exactly 0.16.0
 scripts/build-erts.sh "$(uname -m)" erts                # needs Docker; prints the tarball's SHA-256
-MIX_ENV=prod BURRITO_TARGET="linux_$(uname -m)" mix do deps.get, release
+tc="$HOME/rsolv-toolchain"                                # OTP from the ERTS tarball, Elixir, Hex, rebar3
+scripts/install-toolchain.sh erts "$tc" && export PATH="$tc/otp/bin:$tc/elixir/bin:$PATH" MIX_HOME="$tc/mix"
+MIX_ENV=prod BURRITO_TARGET="linux_$(uname -m)" mix deps.get --check-locked
+MIX_ENV=prod BURRITO_TARGET="linux_$(uname -m)" mix release
 scripts/smoke.sh "burrito_out/rsolv_host_linux_$(uname -m)" --online
 ```
 
