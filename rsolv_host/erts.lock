@@ -1,1 +1,1 @@
-{"otp": "29.0.4", "targets": {"linux_x86_64": {"cpu": "x86_64", "sha256": "a7aa3572a09addc0aa28feecb05caec802eca025cbaffeef9cf9da93439903b6"}, "linux_aarch64": {"cpu": "aarch64", "sha256": ""}}}
+{"otp": "29.0.4", "targets": {"linux_x86_64": {"cpu": "x86_64", "sha256": "a7aa3572a09addc0aa28feecb05caec802eca025cbaffeef9cf9da93439903b6"}, "linux_aarch64": {"cpu": "aarch64", "sha256": "f9e1090a1decf7a74ba4dc855b0c27a09350cfe6e30f697b8e7c64a3126f1839"}}}
