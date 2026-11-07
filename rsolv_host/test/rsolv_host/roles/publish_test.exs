@@ -427,6 +427,44 @@ defmodule RsolvHost.Roles.PublishTest do
       assert %{pulls: [], labels: [], comments: []} = FakeGithub.writes(context.gh)
       refute_received {:published, _}
     end
+
+    test "when the PR lookup returns after it, opens no pull request", context do
+      {decision, wait_ms} = short_lived(context)
+      platform(context, decision: decision)
+      FakeGithub.delay(context.gh, "GET", "/pulls", wait_ms)
+
+      assert run(context) == {:error, :expired}
+      refute "/pulls" in posts(context.gh)
+      refute_received {:published, _}
+    end
+
+    test "when retries of a failing PR lookup outlast it, opens no pull request", context do
+      {decision, wait_ms} = short_lived(context)
+      platform(context, decision: decision)
+      FakeGithub.fail(context.gh, "GET", "/pulls", 3)
+      FakeGithub.delay(context.gh, "GET", "/pulls", div(wait_ms, 3) + 1)
+
+      assert run(context) == {:error, :expired}
+      refute "/pulls" in posts(context.gh)
+    end
+
+    test "when the PR is opened after it, adds no label and posts no comment", context do
+      {decision, wait_ms} = short_lived(context)
+      platform(context, decision: decision)
+      FakeGithub.delay(context.gh, "POST", "/pulls", wait_ms)
+
+      assert run(context) == {:error, :expired}
+      assert %{pulls: [_opened], labels: [], comments: []} = FakeGithub.writes(context.gh)
+    end
+
+    test "when the comment scan returns after it, posts no comment", context do
+      {decision, wait_ms} = short_lived(context)
+      platform(context, decision: decision)
+      FakeGithub.delay(context.gh, "GET", "/issues/7/comments", wait_ms)
+
+      assert run(context) == {:error, :expired}
+      assert FakeGithub.writes(context.gh).comments == []
+    end
   end
 
   describe "run/3 re-run after an earlier attempt (resume)" do

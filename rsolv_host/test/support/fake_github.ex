@@ -34,6 +34,7 @@ defmodule RsolvHost.FakeGithub do
           tamper: nil,
           truncated: false,
           delays: %{},
+          failures: %{},
           drops: MapSet.new(),
           clock: 0
         }
@@ -96,6 +97,11 @@ defmodule RsolvHost.FakeGithub do
   @spec delay(pid(), String.t(), String.t(), non_neg_integer()) :: :ok
   def delay(agent, method, path, ms),
     do: Agent.update(agent, &put_in(&1.delays[{method, path}], ms))
+
+  @doc "Answers the next `count` `method` requests to `path` with 503, writing nothing."
+  @spec fail(pid(), String.t(), String.t(), pos_integer()) :: :ok
+  def fail(agent, method, path, count),
+    do: Agent.update(agent, &put_in(&1.failures[{method, path}], count))
 
   @doc """
   The next `method` request to `path` is carried out, then its connection
@@ -162,7 +168,12 @@ defmodule RsolvHost.FakeGithub do
     query = URI.decode_query(conn.query_string)
 
     {status, json} =
-      Agent.get_and_update(agent, &route(&1, conn.method, path, body || query))
+      Agent.get_and_update(agent, fn state ->
+        case Map.get(state.failures, {conn.method, path}, 0) do
+          0 -> route(state, conn.method, path, body || query)
+          n -> {{503, %{}}, put_in(state.failures[{conn.method, path}], n - 1)}
+        end
+      end)
 
     agent |> Agent.get(& &1.delays[{conn.method, path}]) |> then(&Process.sleep(&1 || 0))
 

@@ -137,6 +137,35 @@ defmodule RsolvHost.GitHubTest do
       end
     end
 
+    test "past the deadline, sends nothing and answers the deadline's reason" do
+      answer([{201, %{number: 1}}])
+      gh = gh()
+
+      gh = %{
+        gh
+        | req: RsolvHost.Http.deadline(gh.req, System.monotonic_time(:millisecond), :expired)
+      }
+
+      assert GitHub.comment(gh, 7, "b") == {:error, :expired}
+      assert attempts() == 0
+    end
+
+    test "a server's Retry-After is cut to the deadline, and the retry is then refused" do
+      Req.Test.stub(GitHub, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "60")
+        |> Plug.Conn.put_status(503)
+        |> Req.Test.json(%{})
+      end)
+
+      gh = gh()
+      deadline = System.monotonic_time(:millisecond) + 200
+      gh = %{gh | req: RsolvHost.Http.deadline(gh.req, deadline, :expired)}
+
+      assert GitHub.get_commit(gh, @sha) == {:error, :expired}
+      assert System.monotonic_time(:millisecond) - deadline < 500
+    end
+
     test "never follows a redirect" do
       Req.Test.stub(GitHub, fn conn ->
         conn

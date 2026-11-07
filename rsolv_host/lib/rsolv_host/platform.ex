@@ -8,7 +8,7 @@ defmodule RsolvHost.Platform do
   `RsolvCore.StrictJson`. A refusal is `{:platform, status, error_code}`, where
   the code is the platform's `error` identifier or `nil`; error bodies are never
   logged. Redirects are never followed (a 3xx is a refusal), and only
-  repeatable requests are retried (`retry?/2`).
+  repeatable requests are retried (`retry/2`).
   """
 
   alias RsolvCore.{Relay, StrictJson}
@@ -52,7 +52,7 @@ defmodule RsolvHost.Platform do
          Req.new(
            [
              base_url: url,
-             retry: &retry?/2,
+             retry: &retry/2,
              redirect: false,
              receive_timeout: 120_000,
              raw: true,
@@ -69,16 +69,17 @@ defmodule RsolvHost.Platform do
   end
 
   @doc """
-  Req's retry policy: a read, a tool response (the platform accepts a repeat)
+  Req's retry policy (`RsolvHost.Http.retry/3`): a read, a tool response (the platform accepts a repeat)
   or a result upload (write-once; a repeat is `409 already_uploaded`) is
   repeated after a transient failure. The token exchange, a refresh (it
   rotates the token), registration, a session start, validation, the scan plan
   and the published report may have happened when the answer was lost, and
   are never repeated blind.
   """
-  @spec retry?(Req.Request.t(), Req.Response.t() | Exception.t()) :: boolean()
-  def retry?(%Req.Request{method: method, url: %URI{path: path}}, result),
-    do: repeatable?(method, path || "") and Http.transient?(result)
+  @spec retry(Req.Request.t(), Req.Response.t() | Exception.t()) ::
+          false | {:delay, non_neg_integer()}
+  def retry(%Req.Request{method: method, url: %URI{path: path}} = req, result),
+    do: Http.retry(req, result, repeatable?(method, path || ""))
 
   defp repeatable?(method, _path) when method in [:get, :head], do: true
 
@@ -171,8 +172,7 @@ defmodule RsolvHost.Platform do
          ) do
       {:ok, %Req.Response{status: 200} = resp} -> {:ok, resp}
       {:ok, %Req.Response{status: status}} -> {:error, {:platform, status, nil}}
-      {:error, %Req.TransportError{reason: reason}} -> {:error, {:transport, reason}}
-      {:error, _exception} -> {:error, {:transport, :request_failed}}
+      {:error, exception} -> {:error, Http.failure(exception)}
     end
   end
 

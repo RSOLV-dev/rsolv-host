@@ -15,7 +15,7 @@ defmodule RsolvHost.Roles.Publish do
   """
 
   alias RsolvCore.{ChangeSet, Decision}
-  alias RsolvHost.{GitHub, GitTree, Oidc, Platform, TokenKeeper}
+  alias RsolvHost.{GitHub, GitTree, Http, Oidc, Platform, TokenKeeper}
 
   @doc "Runs the role. `deps`: `:io`."
   @spec run(map(), map(), keyword()) :: :ok | {:error, term()}
@@ -80,17 +80,14 @@ defmodule RsolvHost.Roles.Publish do
            TokenKeeper.token(ctx.keeper),
          ctx = Map.merge(ctx, %{req: req, raw: raw, run: run}),
          {:ok, verified} <- decision(ctx),
-         {:ok, deadline, 0} <- DateTime.from_iso8601(verified.decision["expires_at"]),
-         ctx = Map.put(ctx, :deadline, deadline),
+         {:ok, expires_at, 0} <- DateTime.from_iso8601(verified.decision["expires_at"]),
+         ctx = until(ctx, expires_at),
          :ok <- no_workflow_paths(verified.change_set),
          {:ok, bodies} <- bodies(verified),
-         {:ok, ctx} <- live(ctx),
          {:ok, images} <- post_images(ctx, verified.change_set),
          :ok <- GitTree.check_base(ctx.gh, verified.decision["base_sha"], verified.change_set),
          :ok <- on_target(ctx, verified.decision),
-         {:ok, ctx} <- live(ctx),
          {:ok, commits} <- write_commits(ctx, verified.decision, verified.change_set, images),
-         {:ok, ctx} <- live(ctx),
          {:ok, commits} <- branch(ctx, verified.decision, commits) do
       open_pull(ctx, verified.decision, bodies, commits)
     else
@@ -99,22 +96,21 @@ defmodule RsolvHost.Roles.Publish do
     end
   end
 
-  # The decision authorizes writes only until its `expires_at` (RFC-150 §6.1):
-  # this is checked before each step that writes, and every request's wait is
-  # bounded by the time left.
-  defp live(%{deadline: deadline} = ctx) do
-    case DateTime.diff(deadline, DateTime.utc_now(), :millisecond) do
-      left when left > 0 ->
-        {:ok,
-         %{
-           ctx
-           | gh: %{ctx.gh | req: Req.merge(ctx.gh.req, receive_timeout: min(left, 60_000))},
-             req: Req.merge(ctx.req, receive_timeout: min(left, 120_000))
-         }}
+  # The decision authorizes writes only until its `expires_at` (RFC-150 §6.1).
+  # From here on, every GitHub and platform request carries that deadline
+  # (`Http.deadline/3`): each attempt, retries included, is refused once it has
+  # passed, before anything is sent, and its waits are cut to the time left. No
+  # call site can skip the check, and a slow read can't lead into a late write.
+  defp until(ctx, expires_at) do
+    deadline =
+      System.monotonic_time(:millisecond) +
+        DateTime.diff(expires_at, DateTime.utc_now(), :millisecond)
 
-      _expired ->
-        {:error, :expired}
-    end
+    %{
+      ctx
+      | gh: %{ctx.gh | req: Http.deadline(ctx.gh.req, deadline, :expired)},
+        req: Http.deadline(ctx.req, deadline, :expired)
+    }
   end
 
   defp decision(ctx) do
@@ -299,12 +295,9 @@ defmodule RsolvHost.Roles.Publish do
       "base" => decision["target_branch"]
     }
 
-    with {:ok, ctx} <- live(ctx),
-         {:ok, %{"number" => number, "html_url" => url} = pull} <- pull(ctx, wanted, commits),
-         {:ok, ctx} <- live(ctx),
+    with {:ok, %{"number" => number, "html_url" => url} = pull} <- pull(ctx, wanted, commits),
          :ok <- labels(ctx, pull, effects["labels"]),
-         :ok <- comments(ctx, bodies.comments),
-         {:ok, ctx} <- live(ctx) do
+         :ok <- comments(ctx, bodies.comments) do
       Platform.published(ctx.req, ctx.raw, ctx.run, ctx.issue, %{
         decision_id: decision["decision_id"],
         pr_number: number,
@@ -398,10 +391,8 @@ defmodule RsolvHost.Roles.Publish do
   end
 
   defp comment(ctx, issue, body, posted) do
-    with {:ok, ctx} <- live(ctx),
-         :ok <- GitHub.comment(ctx.gh, issue, body) do
-      {:cont, {:ok, posted}}
-    else
+    case GitHub.comment(ctx.gh, issue, body) do
+      :ok -> {:cont, {:ok, posted}}
       error -> {:halt, error}
     end
   end

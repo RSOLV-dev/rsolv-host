@@ -6,7 +6,7 @@ defmodule RsolvHost.GitHub do
   Bodies are read through `RsolvHost.Http` (raw, capped). A refusal is
   `{:github, status, code}`, where `code` is a fixed atom for the status, never
   GitHub's message text. Redirects are never followed (a 3xx is a refusal), and
-  only repeatable requests are retried (`retry?/2`).
+  only repeatable requests are retried (`retry/2`).
   """
 
   alias RsolvCore.StrictJson
@@ -44,7 +44,7 @@ defmodule RsolvHost.GitHub do
             base_url: env["GITHUB_API_URL"] || "https://api.github.com",
             auth: {:bearer, token},
             headers: [accept: "application/vnd.github+json", x_github_api_version: "2022-11-28"],
-            retry: &retry?/2,
+            retry: &retry/2,
             redirect: false,
             receive_timeout: 60_000
           ] ++ extra
@@ -58,14 +58,15 @@ defmodule RsolvHost.GitHub do
   end
 
   @doc """
-  Req's retry policy: only a read, or a blob or tree (content-addressed, so
-  writing it twice gives the same object), is repeated after a transient
-  failure. An issue, comment, label, pull request, commit or ref may have been
+  Req's retry policy (`RsolvHost.Http.retry/3`): only a read, or a blob or tree
+  (content-addressed, so writing it twice gives the same object), is repeated
+  after a transient failure. An issue, comment, label, pull request, commit or ref may have been
   written when the answer was lost; it is never repeated blind.
   """
-  @spec retry?(Req.Request.t(), Req.Response.t() | Exception.t()) :: boolean()
-  def retry?(%Req.Request{method: method, url: %URI{path: path}}, result),
-    do: repeatable?(method, path || "") and Http.transient?(result)
+  @spec retry(Req.Request.t(), Req.Response.t() | Exception.t()) ::
+          false | {:delay, non_neg_integer()}
+  def retry(%Req.Request{method: method, url: %URI{path: path}} = req, result),
+    do: Http.retry(req, result, repeatable?(method, path || ""))
 
   defp repeatable?(method, _path) when method in [:get, :head], do: true
   defp repeatable?(:post, path), do: String.ends_with?(path, ["/git/blobs", "/git/trees"])
