@@ -112,7 +112,8 @@ defmodule RsolvHost.TokenKeeper do
 
   defp first_token(state, true) do
     with {:ok, json} <- File.read(handoff_path(state.env, state.role, state.issue)),
-         {:ok, %{"raw" => "rsolv_rt_" <> _ = raw}} <- RsolvCore.StrictJson.decode(json) do
+         {:ok, %{"raw" => raw}} <- RsolvCore.StrictJson.decode(json),
+         true <- Platform.run_token?(raw) do
       ActionsLog.mask(raw, state.io)
       refresh(state, raw)
     else

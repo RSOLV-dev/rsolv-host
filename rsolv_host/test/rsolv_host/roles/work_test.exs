@@ -16,7 +16,7 @@ defmodule RsolvHost.Roles.WorkTest do
     workspace = Path.join(dir, "checkout")
     File.mkdir_p!(workspace)
     {:ok, io} = StringIO.open("")
-    Req.Test.stub(Oidc, &Req.Test.json(&1, %{value: "jwt"}))
+    Req.Test.stub(Oidc, &Req.Test.json(&1, %{value: "e30.e30.sig"}))
 
     env = %{
       "RUNNER_TEMP" => dir,
@@ -44,7 +44,7 @@ defmodule RsolvHost.Roles.WorkTest do
 
         {"POST", "/api/v1/runs/token/refresh"} ->
           send(test, :refreshed)
-          Req.Test.json(conn, token("rsolv_rt_resumed"))
+          Req.Test.json(conn, token("rsolv_rt_resumedAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
 
         {"POST", "/api/v1/" <> phase_start} ->
           handle_post(conn, phase_start, upload, test)
@@ -319,7 +319,11 @@ defmodule RsolvHost.Roles.WorkTest do
 
       File.write!(
         path,
-        JSON.encode!(%{raw: "rsolv_rt_first", expires_at: "2026-11-06T12:00:00Z", binding: %{}})
+        JSON.encode!(%{
+          raw: "rsolv_rt_firstAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          expires_at: "2026-11-06T12:00:00Z",
+          binding: %{}
+        })
       )
 
       platform(upload: {409, %{error: "already_uploaded"}})

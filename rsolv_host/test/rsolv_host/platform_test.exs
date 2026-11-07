@@ -3,7 +3,7 @@ defmodule RsolvHost.PlatformTest do
 
   alias RsolvHost.Platform
 
-  @token "rsolv_rt_test"
+  @token "rsolv_rt_testAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   @run "0b0e5f7c-7d3c-4d8e-9a55-3f6f1b0c2a11"
 
   defp req do
@@ -122,6 +122,40 @@ defmodule RsolvHost.PlatformTest do
       assert Platform.exchange(req(), "jwt", 7) == {:error, :malformed_response}
     end
 
+    test "refuses a run token that isn't rsolv_rt_ and 43 base64url characters" do
+      valid = "rsolv_rt_" <> String.duplicate("A", 43)
+
+      for raw <- [
+            "rsolv_rt_x\n::error::injected-command",
+            "rsolv_rt_" <> String.duplicate("A", 42) <> "\r",
+            "rsolv_rt_" <> String.duplicate("A", 42) <> "%",
+            "rsolv_rt_" <> String.duplicate("A", 42),
+            valid <> "A",
+            "rsolv_rt_" <> String.duplicate("A", 42) <> "=",
+            String.replace(valid, "rsolv_rt_", "rsolv_xx_")
+          ] do
+        stub(
+          &Req.Test.json(&1, %{
+            token: raw,
+            expires_at: "2099-01-01T00:00:00Z",
+            protocol_version: 1
+          })
+        )
+
+        assert Platform.exchange(req(), "jwt", nil) == {:error, :malformed_response}, inspect(raw)
+      end
+
+      stub(
+        &Req.Test.json(&1, %{
+          token: valid,
+          expires_at: "2099-01-01T00:00:00Z",
+          protocol_version: 1
+        })
+      )
+
+      assert {:ok, %{raw: ^valid}} = Platform.exchange(req(), "jwt", nil)
+    end
+
     test "a refusal is the status and the platform's error code" do
       stub(fn conn ->
         conn
@@ -155,13 +189,14 @@ defmodule RsolvHost.PlatformTest do
         assert body(conn) == %{"oidc_token" => "jwt2", "protocol_version" => 1}
 
         Req.Test.json(conn, %{
-          token: "rsolv_rt_new",
+          token: "rsolv_rt_newAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           expires_at: "2026-11-06T13:00:00Z",
           protocol_version: 1
         })
       end)
 
-      assert {:ok, %{raw: "rsolv_rt_new"}} = Platform.refresh(req(), @token, "jwt2")
+      assert {:ok, %{raw: "rsolv_rt_newAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}} =
+               Platform.refresh(req(), @token, "jwt2")
     end
   end
 

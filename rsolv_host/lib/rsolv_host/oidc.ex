@@ -9,6 +9,7 @@ defmodule RsolvHost.Oidc do
   alias RsolvHost.{ActionsLog, Http}
 
   @max_body_bytes 64 * 1024
+  @max_jwt_bytes 8 * 1024
 
   @doc """
   Requests an OIDC token for the configured audience and masks it in the log.
@@ -50,7 +51,14 @@ defmodule RsolvHost.Oidc do
     end
   end
 
-  defp value({:ok, %{"value" => jwt}}) when is_binary(jwt) and jwt != "", do: {:ok, jwt}
+  # Three unpadded base64url segments, checked before the token is masked.
+  defp value({:ok, %{"value" => jwt}})
+       when is_binary(jwt) and byte_size(jwt) <= @max_jwt_bytes do
+    if jwt =~ ~r/\A[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\z/,
+      do: {:ok, jwt},
+      else: {:error, :oidc_unavailable}
+  end
+
   defp value(_other), do: {:error, :oidc_unavailable}
 
   @doc "Decodes a JWT's payload without verifying it: the job's own token, read for its claims."

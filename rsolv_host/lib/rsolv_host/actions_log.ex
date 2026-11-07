@@ -18,9 +18,12 @@ defmodule RsolvHost.ActionsLog do
     if String.contains?(text, token), do: token(text), else: token
   end
 
-  @doc "Masks `secret` in the rest of the job's log."
+  @doc """
+  Masks `secret` in the rest of the job's log. The secret is escaped as command
+  data (`%`, CR, LF), so whatever its bytes it stays one `::add-mask::` line.
+  """
   @spec mask(String.t(), IO.device()) :: :ok
-  def mask(secret, io \\ :stdio), do: IO.binwrite(io, ["::add-mask::", secret, "\n"])
+  def mask(secret, io \\ :stdio), do: IO.binwrite(io, ["::add-mask::", data(secret), "\n"])
 
   @doc "Writes one `::error::` annotation with workflow-command escaping."
   @spec error(String.t(), String.t(), IO.device()) :: :ok

@@ -9,7 +9,7 @@ defmodule RsolvHost.ScanRelayTest do
 
   setup %{tmp_dir: dir} do
     {:ok, io} = StringIO.open("")
-    Req.Test.stub(Oidc, &Req.Test.json(&1, %{value: "jwt"}))
+    Req.Test.stub(Oidc, &Req.Test.json(&1, %{value: "e30.e30.sig"}))
 
     env = %{
       "RUNNER_TEMP" => dir,
@@ -29,7 +29,7 @@ defmodule RsolvHost.ScanRelayTest do
       case conn.request_path do
         "/api/v1/runs/token" ->
           Req.Test.json(conn, %{
-            token: "rsolv_rt_scan",
+            token: "rsolv_rt_scanAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             expires_at: "2099-01-01T00:00:00Z",
             protocol_version: 1
           })

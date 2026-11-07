@@ -11,7 +11,7 @@ defmodule RsolvHost.RelayTest do
 
   setup %{tmp_dir: dir} do
     {:ok, io} = StringIO.open("")
-    Req.Test.stub(Oidc, &Req.Test.json(&1, %{value: "jwt"}))
+    Req.Test.stub(Oidc, &Req.Test.json(&1, %{value: "e30.e30.sig"}))
 
     %{
       env: %{

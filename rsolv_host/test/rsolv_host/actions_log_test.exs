@@ -30,7 +30,24 @@ defmodule RsolvHost.ActionsLogTest do
 
   describe "mask/2" do
     test "writes an add-mask command for the secret" do
-      assert capture(&ActionsLog.mask("rsolv_rt_secret", &1)) == "::add-mask::rsolv_rt_secret\n"
+      assert capture(&ActionsLog.mask("rsolv_rt_secretAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", &1)) ==
+               "::add-mask::rsolv_rt_secretAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+    end
+  end
+
+  describe "mask/2 with hostile bytes" do
+    test "escapes a line break or percent sign, so the secret can't start another command" do
+      for {secret, escaped} <- [
+            {"x\n::error::injected", "x%0A::error::injected"},
+            {"x\r::stop-commands::marker", "x%0D::stop-commands::marker"},
+            {"x\r\n::add-mask::y", "x%0D%0A::add-mask::y"},
+            {"x%0A::error::injected", "x%250A::error::injected"}
+          ] do
+        out = capture(&ActionsLog.mask(secret, &1))
+
+        assert out == "::add-mask::" <> escaped <> "\n"
+        assert [_one_line] = String.split(out, ["\n", "\r"], trim: true)
+      end
     end
   end
 

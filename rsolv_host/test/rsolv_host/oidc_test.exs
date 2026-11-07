@@ -38,7 +38,7 @@ defmodule RsolvHost.OidcTest do
     test "never derives the audience from the platform URL" do
       Req.Test.stub(Oidc, fn conn ->
         assert %{"audience" => "https://api.rsolv.dev"} = URI.decode_query(conn.query_string)
-        Req.Test.json(conn, %{value: "jwt"})
+        Req.Test.json(conn, %{value: "e30.e30.sig"})
       end)
 
       for url <- [
@@ -46,7 +46,7 @@ defmodule RsolvHost.OidcTest do
             "https://api.rsolv.dev.",
             "https://api.rsolv-staging.com."
           ] do
-        assert {:ok, "jwt"} = Oidc.fetch(Map.put(@env, "RSOLV_API_URL", url), io: io())
+        assert {:ok, "e30.e30.sig"} = Oidc.fetch(Map.put(@env, "RSOLV_API_URL", url), io: io())
       end
     end
 
@@ -61,6 +61,25 @@ defmodule RsolvHost.OidcTest do
       Req.Test.stub(Oidc, &Plug.Conn.send_resp(&1, 403, "no"))
 
       assert Oidc.fetch(@env, io: io()) == {:error, {:oidc_http, 403}}
+    end
+
+    test "refuses, without masking or logging it, a token that isn't three base64url segments" do
+      for value <- [
+            "e30.e30.sig\n::error::injected",
+            "e30.e30.sig\r",
+            "e30.e30.sig%0A",
+            "e30.e30",
+            "e30.e30.sig.extra",
+            "e30..sig",
+            "e30.e30.s=g",
+            "e30.e30." <> String.duplicate("a", 16 * 1024)
+          ] do
+        Req.Test.stub(Oidc, &Req.Test.json(&1, %{value: value}))
+        io = io()
+
+        assert Oidc.fetch(@env, io: io) == {:error, :oidc_unavailable}, inspect(value)
+        assert output(io) == ""
+      end
     end
 
     test "a response without a token is refused" do

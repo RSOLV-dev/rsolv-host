@@ -8,7 +8,7 @@ defmodule RsolvHost.PlatformStub do
 
   @doc "A token-exchange response for an issue-bound role."
   @spec token(String.t()) :: map()
-  def token(raw \\ "rsolv_rt_test") do
+  def token(raw \\ "rsolv_rt_testAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") do
     %{
       token: raw,
       expires_at:

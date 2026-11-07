@@ -30,6 +30,15 @@ defmodule RsolvHost.Platform do
   @type error :: {:platform, pos_integer(), String.t() | nil} | {:transport, term()}
   @type phase :: :validation | :mitigation
 
+  @doc """
+  Whether `raw` is a run token as the platform issues it: `rsolv_rt_` and 32
+  random bytes in unpadded base64url (`Rsolv.Runners`). Checked before a token is
+  masked, stored or sent, so a response can't smuggle line breaks into the log.
+  """
+  @spec run_token?(term()) :: boolean()
+  def run_token?(raw) when is_binary(raw), do: raw =~ ~r/\Arsolv_rt_[A-Za-z0-9_-]{43}\z/
+  def run_token?(_raw), do: false
+
   @doc "A `Req` request for the platform URL in `RSOLV_API_URL`, or the default; any other URL is refused."
   @spec req(map()) :: {:ok, Req.Request.t()} | {:error, :api_url_not_allowed}
   def req(env) do
@@ -274,8 +283,8 @@ defmodule RsolvHost.Platform do
 
   defp token({:ok, %{"protocol_version" => version} = json}) do
     with :ok <- Relay.check_version(version),
-         %{"token" => "rsolv_rt_" <> _ = raw, "expires_at" => expires} when is_binary(expires) <-
-           json,
+         %{"token" => raw, "expires_at" => expires} when is_binary(expires) <- json,
+         true <- run_token?(raw),
          {:ok, expires_at, 0} <- DateTime.from_iso8601(expires),
          {:ok, binding} <- run_binding(json) do
       {:ok, %{raw: raw, expires_at: expires_at, binding: binding}}
