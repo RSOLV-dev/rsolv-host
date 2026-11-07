@@ -92,5 +92,42 @@ an error response never reaches them.
 - `rsolv_core/`: what the platform and the host must agree on byte for byte: the relay
   protocol types, canonical JSON (RFC 8785, for the subset RSOLV signs, which has no floats),
   the change set and the signed decision envelope. It depends on nothing in the platform.
-- `rsolv_host/`: the host client, to be packaged with Burrito as a self-contained Linux binary
+- `rsolv_host/`: the host client, packaged with Burrito as a self-contained Linux binary
   (not yet released).
+
+## Building the binary
+
+The binary wraps a glibc ERTS that we build ourselves from pinned sources
+(`rsolv_host/scripts/erts-inputs.env`), never Burrito's downloaded musl ERTS. `erts.lock`
+pins each architecture's ERTS tarball by SHA-256, and the release refuses any tarball that
+doesn't match (`RsolvHost.Release.verify_erts/2`). It checks a copy in a new private
+directory, and Burrito unpacks that copy, so the tarball can't change between check and use. Each architecture builds natively on its
+own machine; nothing runs under emulation. The ERTS build's apt packages all come from a
+fixed Ubuntu archive snapshot. The release is compiled with that same OTP (the ERTS tarball is
+a full OTP release, checked against `erts.lock` before use), plus Elixir, Hex and rebar3 files
+pinned by SHA-256 in `scripts/install-toolchain.sh`, so every `.beam` in the binary comes from
+a pinned input.
+
+Burrito's launcher is patched at build time (`rsolv_host/patches/burrito-launcher-env.patch`,
+applied and hash-checked by `RsolvHost.Release.PatchLauncher`). Before it starts `erlexec`,
+the patched launcher refuses any `ERL_*FLAGS`, `ERL_LIBS` or `ERL_COMPILER_OPTIONS` (exit 2,
+configuration), and removes every `LD_*` variable and `EMU`, so the caller's environment can't
+add VM flags, load a library into the VM or pick another emulator. `scripts/smoke.sh` tries
+each of these against the real binary.
+
+```bash
+cd rsolv_host
+scripts/install-zig.sh "$HOME/zig-0.16.0" && export PATH="$HOME/zig-0.16.0:$PATH"  # Burrito 1.6.0 needs exactly 0.16.0
+scripts/build-erts.sh "$(uname -m)" erts                # needs Docker; prints the tarball's SHA-256
+tc="$HOME/rsolv-toolchain"                                # OTP from the ERTS tarball, Elixir, Hex, rebar3
+scripts/install-toolchain.sh erts "$tc" && export PATH="$tc/otp/bin:$tc/elixir/bin:$PATH" MIX_HOME="$tc/mix"
+MIX_ENV=prod BURRITO_TARGET="linux_$(uname -m)" mix deps.get --check-locked
+MIX_ENV=prod BURRITO_TARGET="linux_$(uname -m)" mix release
+scripts/smoke.sh "burrito_out/rsolv_host_linux_$(uname -m)" --online
+```
+
+The ERTS build is reproducible: the same inputs give the same tarball, byte for byte, so a
+rebuild can be checked against `erts.lock`. The first run of the binary extracts it into
+`$RSOLV_HOST_INSTALL_DIR`, which must be under `$RUNNER_TEMP`. Two first runs against the same
+directory race (the loser exits 1, and the extracted tree stays intact), so the workflows must run
+the binary once, serially, before anything else.

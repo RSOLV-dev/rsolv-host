@@ -1,0 +1,52 @@
+--- a/src/erlang_launcher.zig
++++ b/src/erlang_launcher.zig
+@@ -21,6 +21,9 @@
+     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+     const allocator = arena.allocator();
+ 
++    // rsolv-host patch: nothing from the caller's environment chooses how the VM starts.
++    rsolvhostScrubEnv(env_map);
++
+     // Computer directories we care about
+     const release_cookie_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "releases", "COOKIE" });
+     const release_lib_path = try std.fs.path.join(allocator, &[_][]const u8{ install_dir, "lib" });
+@@ -159,3 +162,39 @@
+         }
+     }
+ }
++
++// rsolv-host patch (rsolv_host/patches/burrito-launcher-env.patch). Before
++// erlexec starts: refuses, with the host's configuration exit code (2), any
++// ERL_*FLAGS (-s/-eval/-env/-<app> flags), ERL_LIBS or ERL_COMPILER_OPTIONS
++// that is set and not empty; and removes every LD_* variable (LD_PRELOAD,
++// LD_AUDIT, LD_LIBRARY_PATH, ...) and EMU, so the dynamic loader and erlexec
++// see only what this launcher sets. The wrapper itself is static, so these
++// never reach it.
++fn rsolvhostScrubEnv(env_map: *std.process.Environ.Map) void {
++    for (env_map.keys(), env_map.values()) |key, value| {
++        if (value.len != 0 and rsolvhostRefused(key)) {
++            rsolvhostWrite("::error title=RSOLV configuration::Unset ");
++            rsolvhostWrite(key);
++            rsolvhostWrite(": it changes how rsolv-host's VM runs (crash dumps, configuration, code). Call RSOLV through its reusable workflows.\n");
++            std.process.exit(2);
++        }
++    }
++    var i: usize = 0;
++    while (i < env_map.count()) {
++        const key = env_map.keys()[i];
++        if (std.mem.startsWith(u8, key, "LD_") or std.mem.eql(u8, key, "EMU")) {
++            _ = env_map.orderedRemove(key);
++        } else {
++            i += 1;
++        }
++    }
++}
++
++fn rsolvhostRefused(key: []const u8) bool {
++    if (std.mem.eql(u8, key, "ERL_LIBS") or std.mem.eql(u8, key, "ERL_COMPILER_OPTIONS")) return true;
++    return std.mem.startsWith(u8, key, "ERL_") and std.mem.endsWith(u8, key, "FLAGS");
++}
++
++fn rsolvhostWrite(text: []const u8) void {
++    _ = std.c.write(1, text.ptr, text.len);
++}

@@ -1,36 +1,49 @@
 defmodule RsolvHost.Application do
   @moduledoc """
-  Starts the host. In a release (`run_cli`), it runs the command line once and
-  halts with its exit code; Burrito runs the release embedded, so this is the
-  entry point. `RsolvHost.TaskSupervisor` runs the token keeper's refreshes.
+  Starts the host. In a release (`run_cli`), `start/2` runs the command line to
+  the end and halts with its exit code, before it returns: Burrito boots the
+  release with `-s elixir start_cli`, which, once boot finishes, would run the
+  first argument as an Elixir script file. `RsolvHost.TaskSupervisor` (started
+  first) runs the token keeper's refreshes.
   """
 
   use Application
 
-  alias Burrito.Util.Args
-  alias RsolvHost.{CLI, Outcome}
+  alias RsolvHost.Outcome
+
+  # Compile-time, so no VM flag (`-rsolv_host run_cli false`) can skip the CLI.
+  @run_cli Application.compile_env(:rsolv_host, :run_cli, false)
+
+  @doc "Whether the release runs the command line; fixed when the host is compiled."
+  @spec cli?() :: boolean()
+  def cli?, do: @run_cli
 
   @impl true
   def start(_type, _args) do
-    Supervisor.start_link(children(Application.get_env(:rsolv_host, :run_cli, false)),
-      strategy: :one_for_one,
-      name: RsolvHost.Supervisor
-    )
+    {:ok, sup} =
+      Supervisor.start_link([{Task.Supervisor, name: RsolvHost.TaskSupervisor}],
+        strategy: :one_for_one,
+        name: RsolvHost.Supervisor
+      )
+
+    start_cli()
+    {:ok, sup}
   end
 
-  defp children(false), do: [{Task.Supervisor, name: RsolvHost.TaskSupervisor}]
+  if @run_cli do
+    alias Burrito.Util.Args
+    alias RsolvHost.CLI
 
-  defp children(true) do
-    children(false) ++
-      [
-        {Task,
-         fn ->
-           run_cli(
-             fn -> CLI.main(Args.argv(), System.get_env(), :code.root_dir()) end,
-             &System.halt/1
-           )
-         end}
-      ]
+    defp start_cli,
+      do:
+        run_cli(
+          fn ->
+            CLI.main(Args.argv(), System.get_env(), :code.root_dir())
+          end,
+          &System.halt/1
+        )
+  else
+    defp start_cli, do: :ok
   end
 
   @doc """
