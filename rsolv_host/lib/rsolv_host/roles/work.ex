@@ -14,7 +14,17 @@ defmodule RsolvHost.Roles.Work do
   run token and uses a fresh copy and fresh container names.
   """
 
-  alias RsolvHost.{ActionsLog, Frame, Outcome, Platform, Relay, Sandbox, TokenKeeper, Workspace}
+  alias RsolvHost.{
+    ActionsLog,
+    Frame,
+    Http,
+    Outcome,
+    Platform,
+    Relay,
+    Sandbox,
+    TokenKeeper,
+    Workspace
+  }
 
   @max_patch_bytes 5 * 1024 * 1024
   @bootstrap_timeout_ms 900_000
@@ -183,6 +193,7 @@ defmodule RsolvHost.Roles.Work do
   defp upload({:ok, bytes}, ctx) do
     with :ok <- in_budget(ctx),
          {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(ctx.keeper),
+         req = Http.deadline(req, ctx.deadline, :session_timeout),
          :ok <- Platform.upload_result(req, raw, ctx.run, ctx.issue, bytes) do
       {:outcome, :mitigated, true}
     else

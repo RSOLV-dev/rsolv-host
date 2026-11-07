@@ -373,4 +373,107 @@ defmodule RsolvHost.RelayTest do
       assert String.to_integer(seconds) <= 60
     end
   end
+
+  describe "run_session/5 budgets, against a server that answers over time" do
+    alias RsolvHost.{DripServer, StaticKeeper}
+
+    @routes %{
+      {"POST", "/api/v1/validation/start"} =>
+        {:json, 200, %{session_id: "s1", stream_url: "/api/v1/validation/stream/s1"}},
+      {"GET", "/api/v1/validation/status/s1"} => {:json, 200, %{status: "streaming"}},
+      {"POST", "/api/v1/validation/tool_response/s1"} => {:json, 200, %{success: true}}
+    }
+
+    # The platform's routes on a real server; `overrides` replaces any of them.
+    defp drip_platform(overrides) do
+      routes = Map.merge(@routes, overrides)
+      port = DripServer.start(fn method, path -> Map.fetch!(routes, {method, path}) end)
+      {:ok, keeper} = StaticKeeper.start_link(DripServer.req(port))
+      keeper
+    end
+
+    defp timed_run(keeper, budget_ms) do
+      started = System.monotonic_time(:millisecond)
+
+      result =
+        run(keeper,
+          backoff_ms: List.duplicate(20, 500),
+          deadline: System.monotonic_time(:millisecond) + budget_ms
+        )
+
+      {result, System.monotonic_time(:millisecond) - started}
+    end
+
+    @stream {"GET", "/api/v1/validation/stream/s1"}
+
+    for {name, chunk} <- [
+          {"keepalive comments", ": keepalive\n\n"},
+          {"events of an unknown type", "event: unrecognized\ndata: {}\n\n"},
+          {"a frame that never ends", "a"}
+        ] do
+      test "a stream of #{name}, every 100 ms, ends at the deadline" do
+        keeper = drip_platform(%{@stream => {:drip, unquote(chunk), 100, 40}})
+
+        assert {{:error, :session_timeout}, elapsed} = timed_run(keeper, 300)
+        assert elapsed < 1_000
+      end
+    end
+
+    test "a session ends at its deadline even while a tool runs over it" do
+      keeper =
+        drip_platform(%{
+          @stream => {:drip, sse([{:tool_request, tool_request("r1", "bash", %{})}]), 100, 1}
+        })
+
+      FakeExec.script([
+        {fn {"docker", ["exec" | _], _} -> true end,
+         fn _call ->
+           Process.sleep(3_000)
+           {:ok, %{status: 0, output: "{}"}}
+         end}
+      ])
+
+      assert {{:error, :session_timeout}, elapsed} = timed_run(keeper, 300)
+      assert elapsed < 1_000
+    end
+
+    test "a start, status or tool response that doesn't answer ends at the deadline" do
+      tool_stream = {:drip, sse([{:tool_request, tool_request("r1", "bash", %{})}]), 100, 1}
+      sandbox_answers({:ok, %{status: 0, output: "{}"}})
+
+      for overrides <- [
+            %{{"POST", "/api/v1/validation/start"} => {:hang, 3_000}},
+            %{
+              @stream => {:drip, "", 100, 0},
+              {"GET", "/api/v1/validation/status/s1"} => {:hang, 3_000}
+            },
+            %{
+              @stream => tool_stream,
+              {"POST", "/api/v1/validation/tool_response/s1"} => {:hang, 3_000}
+            }
+          ] do
+        keeper = drip_platform(overrides)
+
+        # A start isn't repeatable, so its timeout says so; either way, exit 3.
+        assert {{:error, reason} = result, elapsed} = timed_run(keeper, 300)
+        assert reason in [:session_timeout, {:transport, :timeout}]
+        assert RsolvHost.Outcome.exit_code(result) == 3
+        assert elapsed < 1_000, inspect(Map.keys(overrides))
+      end
+    end
+
+    test "a retry's wait is cut to what's left of the session" do
+      keeper =
+        drip_platform(%{
+          @stream => {:drip, sse([{:tool_request, tool_request("r1", "bash", %{})}]), 100, 1},
+          {"POST", "/api/v1/validation/tool_response/s1"} =>
+            {:json, 503, %{}, [{"retry-after", "60"}]}
+        })
+
+      sandbox_answers({:ok, %{status: 0, output: "{}"}})
+
+      assert {{:error, :session_timeout}, elapsed} = timed_run(keeper, 300)
+      assert elapsed < 1_000
+    end
+  end
 end

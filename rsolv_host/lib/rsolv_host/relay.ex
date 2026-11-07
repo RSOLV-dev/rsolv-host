@@ -20,15 +20,18 @@ defmodule RsolvHost.Relay do
   ## Time budget
 
   A session has one monotonic deadline (`:deadline`; the work role shares one
-  across both its sessions and the upload). It's checked before every event,
-  buffered or not, heartbeats included, and before every reconnect; it caps
-  each tool's time and each wait on the stream. Past it: `{:error,
-  :session_timeout}`.
+  across both its sessions and the upload). It bounds every platform request
+  (start, status, tool response, stream) and its retries (`RsolvHost.Http.deadline/3`),
+  each tool's time and each reconnect wait; it's checked on every chunk the
+  stream delivers, events or not (keepalive comments, unknown events and
+  unfinished frames included), and before every event. The stream itself runs
+  in a task that is killed at the deadline, whatever the server sends or
+  doesn't. Past it: `{:error, :session_timeout}`.
   """
 
   alias RsolvCore.Relay.{SSE, ToolRequest, ToolResponse}
   alias RsolvCore.StrictJson
-  alias RsolvHost.{Frame, Platform, Sandbox, TokenKeeper}
+  alias RsolvHost.{Frame, Http, Platform, Sandbox, TokenKeeper}
 
   @max_tool_ms 900_000
   @max_output_bytes 8 * 1024 * 1024
@@ -36,7 +39,6 @@ defmodule RsolvHost.Relay do
   @backoff_ms [2_000, 4_000, 8_000, 16_000, 32_000]
   @timed_out 124
   @max_session_ms 2 * 60 * 60 * 1_000
-  @max_stream_wait_ms 120_000
   @request_id ~r/\A[A-Za-z0-9_-]{1,128}\z/
 
   @doc """
@@ -49,31 +51,37 @@ defmodule RsolvHost.Relay do
   @spec run_session(GenServer.server(), Sandbox.t(), Platform.phase(), map(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def run_session(keeper, sbx, phase, body, opts \\ []) do
-    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(keeper) do
+    session = %{
+      keeper: keeper,
+      sbx: sbx,
+      phase: phase,
+      io: Keyword.get(opts, :io, :stdio),
+      deadline:
+        Keyword.get_lazy(opts, :deadline, fn ->
+          System.monotonic_time(:millisecond) + @max_session_ms
+        end)
+    }
+
+    with {:ok, req, raw} <- token(session) do
       case Platform.start_session(req, raw, phase, body) do
         {:cached, result} -> {:ok, result}
-        {:ok, %{"session_id" => id}} -> relay(keeper, sbx, phase, id, opts)
+        {:ok, %{"session_id" => id}} -> relay(session, id, opts)
         error -> error
       end
     end
   end
 
-  defp relay(keeper, sbx, phase, session_id, opts) do
-    if session_id =~ ~r/\A[A-Za-z0-9_-]{1,128}\z/ do
-      seen = :ets.new(__MODULE__, [:set, :private])
+  # The token's request, bounded by the session's deadline.
+  defp token(session) do
+    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(session.keeper),
+         do: {:ok, Http.deadline(req, session.deadline, :session_timeout), raw}
+  end
 
-      session = %{
-        keeper: keeper,
-        sbx: sbx,
-        phase: phase,
-        id: session_id,
-        seen: seen,
-        io: Keyword.get(opts, :io, :stdio),
-        deadline:
-          Keyword.get_lazy(opts, :deadline, fn ->
-            System.monotonic_time(:millisecond) + @max_session_ms
-          end)
-      }
+  defp relay(session, session_id, opts) do
+    if session_id =~ ~r/\A[A-Za-z0-9_-]{1,128}\z/ do
+      # Public: the stream task (stream_once/1) records ids in it.
+      seen = :ets.new(__MODULE__, [:set, :public])
+      session = Map.merge(session, %{id: session_id, seen: seen})
 
       try do
         connect(session, Keyword.get(opts, :backoff_ms, @backoff_ms))
@@ -117,14 +125,24 @@ defmodule RsolvHost.Relay do
   defp left_ms(session), do: session.deadline - System.monotonic_time(:millisecond)
 
   defp status(session) do
-    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(session.keeper),
+    with {:ok, req, raw} <- token(session),
          do: Platform.session_status(req, raw, session.phase, session.id)
   end
 
+  # The stream (and the tools its requests run) runs in a task that the session
+  # kills at its deadline: a server that keeps the connection open, with or
+  # without traffic, can't hold the session past it.
   defp stream_once(session) do
-    with {:ok, wait_ms} <- wait_ms(session),
-         {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(session.keeper),
-         req = Req.merge(req, receive_timeout: wait_ms),
+    task = Task.async(fn -> stream(session) end)
+
+    case Task.yield(task, max(left_ms(session), 0)) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      nil -> {:done, {:error, :session_timeout}}
+    end
+  end
+
+  defp stream(session) do
+    with {:ok, req, raw} <- token(session),
          {:ok, resp} <-
            Platform.stream(req, raw, session.phase, session.id, &chunk(&1, &2, session)) do
       case resp.private[:relay] do
@@ -139,18 +157,14 @@ defmodule RsolvHost.Relay do
     end
   end
 
-  defp wait_ms(session) do
-    case left_ms(session) do
-      left when left > 0 -> {:ok, min(left, @max_stream_wait_ms)}
-      _spent -> {:error, :session_timeout}
-    end
-  end
-
   defp chunk({:data, data}, {req, resp}, session) do
     state = resp.private[:relay] || %{parser: SSE.new(), outcome: nil}
 
-    case SSE.parse(state.parser, data) do
-      {:ok, events, parser} -> events(events, %{state | parser: parser}, session, {req, resp})
+    with true <- left_ms(session) > 0,
+         {:ok, events, parser} <- SSE.parse(state.parser, data) do
+      events(events, %{state | parser: parser}, session, {req, resp})
+    else
+      false -> halt({req, resp}, state, {:error, :session_timeout})
       {:error, reason} -> halt({req, resp}, state, {:error, {:stream, reason}})
     end
   end
@@ -254,7 +268,7 @@ defmodule RsolvHost.Relay do
   end
 
   defp respond(session, id, result) do
-    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(session.keeper) do
+    with {:ok, req, raw} <- token(session) do
       wire = ToolResponse.to_wire(%ToolResponse{request_id: id, result: result})
       Platform.tool_response(req, raw, session.phase, session.id, wire)
     end
