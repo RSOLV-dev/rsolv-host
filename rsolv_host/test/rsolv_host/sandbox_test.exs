@@ -173,6 +173,28 @@ defmodule RsolvHost.SandboxTest do
       assert "HTTPS_PROXY=http://172.18.0.2:3128" in run_rest
     end
 
+    test "refuses to run the sandbox as root, before any docker call", %{tmp_dir: dir} do
+      FakeExec.script([])
+
+      for {uid, gid} <- [{0, 0}, {0, 118}, {1001, 0}] do
+        stat = fn _path -> %{uid: uid, gid: gid} end
+
+        assert Sandbox.start(start_opts(dir, stat: stat, name: "r#{uid}-#{gid}")) ==
+                 {:error, {:sandbox_setup, :root_user}}
+      end
+
+      assert docker_args() |> Enum.filter(&match?(["run" | _], &1)) == []
+    end
+
+    test "refuses a copy the host's own user doesn't own", %{tmp_dir: dir} do
+      FakeExec.script([])
+      %{uid: me, gid: gid} = File.stat!(dir)
+      stat = fn _path -> %{uid: me + 1, gid: gid} end
+
+      assert Sandbox.start(start_opts(dir, stat: stat)) == {:error, {:sandbox_setup, :copy_owner}}
+      assert docker_args() |> Enum.filter(&match?(["run" | _], &1)) == []
+    end
+
     test "with no egress, starts only the sandbox, with no network", %{tmp_dir: dir} do
       FakeExec.script([])
 

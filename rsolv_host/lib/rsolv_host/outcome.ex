@@ -201,6 +201,10 @@ defmodule RsolvHost.Outcome do
     do:
       "Couldn't write the run-token hand-off file under $RUNNER_TEMP. Check the runner's temp disk."
 
+  defp message({:sandbox_setup, :root_user}, :sandbox),
+    do:
+      "rsolv-host won't run the sandbox as root. Run the job as a non-root user (GitHub-hosted runners do)."
+
   defp message({:sandbox_setup, step}, :sandbox),
     do:
       "Sandbox setup failed at step `#{kind(step)}`. Check that Docker on this runner can create internal networks and run containers."

@@ -4,7 +4,8 @@ defmodule RsolvHost.Sandbox do
   §2.1, §9, ADR-076). It mirrors the step-1 spike's `sandbox.sh` with every
   `sh -c` replaced by argv.
 
-  The sandbox runs as the copy's owner with no capabilities, no new privileges,
+  The sandbox runs as the copy's owner, which must be the host's own user and
+  isn't root (UID and GID 0 are refused), with no capabilities, no new privileges,
   no runner variables (every `-e` sets an explicit value) and only the copy
   mounted. With `egress: :proxy` (the default) its only network is an internal
   one whose sole other member is a squid proxy; with `egress: :none` it has no
@@ -78,7 +79,8 @@ defmodule RsolvHost.Sandbox do
 
   @doc """
   Starts the sandbox. Options: `:name` (the container), `:network`, `:copy_dir`
-  (the copy to mount; its owner becomes the sandbox user), `:runner_temp`,
+  (the copy to mount; its owner, the host's own non-root user, becomes the
+  sandbox user), `:runner_temp`,
   `:egress` (`:proxy` or `:none`), `:image` (default: the pinned sandbox
   image), `:probe` (the proxy readiness check, `fn ip -> :ok | :error end`),
   `:stat` (how the copy is stat'ed, default `File.stat!/1`) and `:exec`.
@@ -101,9 +103,12 @@ defmodule RsolvHost.Sandbox do
     }
 
     with :ok <- pinned(image),
-         %{uid: uid, gid: gid} =
-           Keyword.get(opts, :stat, &File.stat!/1).(Keyword.fetch!(opts, :copy_dir)),
          home_dir = home(opts),
+         {:ok, uid, gid} <-
+           user(
+             Keyword.get(opts, :stat, &File.stat!/1).(Keyword.fetch!(opts, :copy_dir)),
+             File.stat!(home_dir)
+           ),
          {:ok, proxy_ip} <- start_proxy(sbx, opts),
          :ok <-
            step(
@@ -132,6 +137,15 @@ defmodule RsolvHost.Sandbox do
         error
     end
   end
+
+  # The sandbox user is the copy's owner, which must be the host's own user (the
+  # owner of the HOME directory it just made) and never root, user or group.
+  # A fixed UID would need the copy chowned, which a non-root runner can't do.
+  defp user(%{uid: uid, gid: gid}, _host) when uid == 0 or gid == 0,
+    do: {:error, {:sandbox_setup, :root_user}}
+
+  defp user(%{uid: uid, gid: gid}, %{uid: uid}), do: {:ok, uid, gid}
+  defp user(_copy, _host), do: {:error, {:sandbox_setup, :copy_owner}}
 
   defp pinned(image) do
     case String.split(image, "@sha256:") do
