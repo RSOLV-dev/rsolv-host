@@ -255,7 +255,11 @@ defmodule RsolvHost.Sandbox do
     )
   end
 
-  @doc "Starts `argv` in the sandbox as `exec/3` does, returning the open channel."
+  @doc """
+  Starts `argv` in the sandbox as `exec/3` does, returning the open channel.
+  Its stdout and stderr arrive merged (`RsolvHost.Exec.open/3`), so a program
+  that frames its output must keep stderr empty (see `RsolvHost.ScanRelay`).
+  """
   @spec open(t(), [String.t()], pos_integer()) :: {:ok, port() | pid()} | {:error, :enoent}
   def open(sbx, argv, timeout_ms) do
     seconds = timeout_ms |> div(1_000) |> max(1) |> Integer.to_string()

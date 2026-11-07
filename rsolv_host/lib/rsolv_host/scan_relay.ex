@@ -14,6 +14,12 @@ defmodule RsolvHost.ScanRelay do
   with that error. `list_issues` answers with each issue's `number`, `title`,
   `state`, `html_url` and label names only.
 
+  The frame channel is the scanner's stdout and stderr merged (a Port can't
+  read stderr apart, and an inherited stderr would be the Actions log), so the
+  Sandbox CLI contract is that `rsolv-sandbox scan` writes nothing to fd 2: it
+  points fd 2 at `/dev/null` (or a file) before it runs anything. Any other
+  byte breaks the framing and ends the scan as a sandbox failure (exit 4).
+
   Limits: 2,000 frames, 30 minutes for the whole conversation (checked before
   each frame and bounding every write to the scanner), 16 MiB per frame.
   """
@@ -95,8 +101,8 @@ defmodule RsolvHost.ScanRelay do
       :more ->
         serve(state)
 
-      {:error, _reason} ->
-        {:error, :bad_frame}
+      {:error, reason} ->
+        {:error, reason}
 
       {:ok, _frame, _rest} when state.frames >= @max_frames ->
         {:error, :frame_limit}

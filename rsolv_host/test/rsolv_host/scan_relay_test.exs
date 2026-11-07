@@ -369,6 +369,55 @@ defmodule RsolvHost.ScanRelayTest do
       assert ScanRelay.serve(state) == {:error, :bad_frame}
     end
 
+    test "a stray line on the channel (the scanner wrote to stderr) is a sandbox failure, exit 4",
+         context do
+      platform()
+      {:ok, keeper} = TokenKeeper.start(role: :scan, env: context.env, io: context.io)
+      {:ok, gh} = GitHub.new(context.env)
+
+      send(
+        self(),
+        {self(), {:data, "npm warn deprecated\n" <> Frame.encode(%{"call" => "done"})}}
+      )
+
+      result =
+        [
+          channel: self(),
+          exec: FakeExec,
+          keeper: keeper,
+          github: gh,
+          repository: "acme/app",
+          max_issues: 3
+        ]
+        |> ScanRelay.new()
+        |> ScanRelay.serve()
+
+      assert {:error, _reason} = result
+      assert RsolvHost.Outcome.exit_code(result) == 4
+    end
+
+    test "a frame over 16 MiB is refused as too large, before it is buffered", context do
+      platform()
+      {:ok, keeper} = TokenKeeper.start(role: :scan, env: context.env, io: context.io)
+      {:ok, gh} = GitHub.new(context.env)
+      send(self(), {self(), {:data, "#{16 * 1024 * 1024 + 1}\n{"}})
+
+      result =
+        [
+          channel: self(),
+          exec: FakeExec,
+          keeper: keeper,
+          github: gh,
+          repository: "acme/app",
+          max_issues: 3
+        ]
+        |> ScanRelay.new()
+        |> ScanRelay.serve()
+
+      assert result == {:error, :frame_too_large}
+      assert RsolvHost.Outcome.exit_code(result) == 4
+    end
+
     test "done naming an issue the relay never saw is refused", context do
       {result, _replies} = serve(context, [done([%{"number" => 7}])])
 

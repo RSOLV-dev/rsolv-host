@@ -57,6 +57,23 @@ breaking change. `rsolv-work.yml` retries once on 3.
 | 3 | Transient platform or network failure | `::error title=RSOLV transient failure::` | `rsolv-work.yml` retries once, only on 3 |
 | 4 | Sandbox or runner infrastructure | `::error title=RSOLV sandbox setup::` naming the failed step | none |
 
+What falls in each class:
+
+- **1, host bug:** an exception, exit or throw inside `rsolv-host`, or a process it depends on
+  ending abnormally. The release always exits; it never hangs until the job timeout.
+- **2, configuration:** missing permissions or variables, a platform or GitHub refusal (4xx, or
+  any redirect, which is never followed), a signed decision refused or expired, a target branch
+  that no longer contains the scanned commit, a fix branch or pull request that already holds
+  something else, a fix touching `.github/`.
+- **3, transient:** network failures, 429 and 5xx, a run token that expired or a token keeper
+  that stopped answering, the platform or GitHub breaking the protocol (a malformed answer or
+  event stream), a session past its time budget, and a token exchange whose answer was lost
+  (`409 already_exchanged` on the retry).
+- **4, sandbox:** Docker or a sandbox setup step failing, the run-token hand-off file not
+  writable, the sandbox breaking its CLI contract: a malformed or oversized frame, more frames or
+  issues than allowed, an issue it didn't file, a malformed patch. The scanner's stdout and stderr
+  share the frame channel, so `rsolv-sandbox scan` must write nothing to stderr.
+
 The `work` role writes the step outputs `outcome` and `has_patch` (`true` or `false`), and a
 job-summary row. `outcome` is one of:
 

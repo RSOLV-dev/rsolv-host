@@ -87,6 +87,48 @@ defmodule RsolvHost.OutcomeTest do
       assert Outcome.classify({:sandbox_setup, :network_create}) == :sandbox
       assert Outcome.classify({:sandbox, :enoent}) == :sandbox
     end
+
+    test "the platform or GitHub breaking the protocol is transient, not a host bug" do
+      for reason <- [
+            {:stream, :line_too_long},
+            {:stream, :malformed_event},
+            :too_many_tool_requests,
+            :malformed_tool_request,
+            :malformed_response,
+            :token_unavailable,
+            :session_timeout,
+            {:platform, 409, "already_exchanged"}
+          ] do
+        assert Outcome.classify(reason) == :transient, inspect(reason)
+      end
+    end
+
+    test "the sandbox breaking its CLI contract is a sandbox failure, not a host bug" do
+      for reason <- [
+            :bad_frame,
+            :frame_too_large,
+            :frame_limit,
+            :unknown_issue,
+            :too_many_issues,
+            :malformed_patch,
+            {:handoff, :enospc}
+          ] do
+        assert Outcome.classify(reason) == :sandbox, inspect(reason)
+      end
+    end
+
+    test "what a re-run can't fix but the repository's owner can is configuration" do
+      for reason <- [
+            :run_unbound,
+            :truncated,
+            :base_not_on_target,
+            :pull_collision,
+            :workflow_path,
+            {:github, 307, :refused}
+          ] do
+        assert Outcome.classify(reason) == :configuration, inspect(reason)
+      end
+    end
   end
 
   describe "exit_code/1" do

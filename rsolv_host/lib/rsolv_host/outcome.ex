@@ -76,6 +76,10 @@ defmodule RsolvHost.Outcome do
       when api in [:platform, :github] and (status == 429 or status >= 500),
       do: :transient
 
+  def classify(:run_unbound), do: :configuration
+  def classify(:truncated), do: :configuration
+  def classify(:workflow_path), do: :configuration
+
   def classify({:transport, _reason}), do: :transient
   def classify(:token_expired), do: :transient
   def classify(:token_unavailable), do: :transient
@@ -83,6 +87,20 @@ defmodule RsolvHost.Outcome do
   def classify(:stream_exhausted), do: :transient
   def classify(:session_timeout), do: :transient
   def classify({:handoff, _posix}), do: :sandbox
+  # The platform or GitHub broke the protocol: not the host's bug, and not the
+  # customer's to fix; a later run may pass.
+  def classify({:stream, _reason}), do: :transient
+  def classify(:too_many_tool_requests), do: :transient
+  def classify(:malformed_tool_request), do: :transient
+  def classify(:malformed_response), do: :transient
+
+  # The sandbox broke its CLI contract (plan, "Sandbox CLI contract"), for
+  # example a byte on the scanner's stderr, which shares the frame channel.
+  def classify(reason)
+      when reason in [:bad_frame, :frame_too_large, :frame_limit, :unknown_issue] or
+             reason in [:too_many_issues, :malformed_patch],
+      do: :sandbox
+
   def classify({:sandbox_setup, _step}), do: :sandbox
   def classify({:sandbox, _reason}), do: :sandbox
   def classify(_unexpected), do: :host_bug
@@ -143,6 +161,18 @@ defmodule RsolvHost.Outcome do
     do:
       "A pull request from the fix branch already exists and isn't the one RSOLV signed. Close it, delete the branch and re-run the issue's workflow."
 
+  defp message(:run_unbound, _class),
+    do:
+      "The RSOLV platform issued this job's run token without its run (base and target). Re-run the scan, then this issue's workflow."
+
+  defp message(:truncated, _class),
+    do:
+      "A directory this fix touches has more entries than GitHub's tree API lists, so RSOLV can't check the fix against it and won't publish it."
+
+  defp message(:workflow_path, _class),
+    do:
+      "The fix touches .github/, which RSOLV never publishes. Apply that part of the fix by hand."
+
   defp message(:base_not_on_target, _class),
     do:
       "The target branch no longer contains the commit this run was scanned at (it was rewritten). Run a new scan."
@@ -174,6 +204,12 @@ defmodule RsolvHost.Outcome do
   defp message({:sandbox_setup, step}, :sandbox),
     do:
       "Sandbox setup failed at step `#{kind(step)}`. Check that Docker on this runner can create internal networks and run containers."
+
+  defp message(reason, :sandbox)
+       when reason in [:bad_frame, :frame_too_large, :frame_limit, :unknown_issue] or
+              reason in [:too_many_issues, :malformed_patch],
+       do:
+         "The sandbox broke rsolv-host's protocol (#{kind(reason)}), for example by writing to stderr during a scan. Use the sandbox image the RSOLV workflow pins."
 
   defp message(reason, :sandbox), do: "The sandbox failed (#{kind(reason)})."
 
