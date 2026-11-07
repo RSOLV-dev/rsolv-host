@@ -16,6 +16,16 @@ on:
       - rsolv_host/scripts/install-toolchain.sh
       - rsolv_host/scripts/install-zig.sh
       - rsolv_host/scripts/smoke.sh
+      - rsolv_host/scripts/build-erts.sh
+      - rsolv_host/scripts/build-erts-inside.sh
+      - rsolv_host/scripts/erts-inputs.env
+      - rsolv_host/erts.lock
+      - rsolv_host/mix.exs
+      - rsolv_host/mix.lock
+      - rsolv_host/config/**
+      - rsolv_host/rel/**
+      - rsolv_host/patches/**
+      - rsolv_core/**
 permissions: {}
 # A tag runs once; a pull request's newer push replaces its older dry run.
 concurrency:
@@ -43,10 +53,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false, fetch-depth: 0 }
-      - name: The tag matches the app version, its commit is on main, and the sandbox image is pinned
+      - name: The tag matches the app version, its commit is a first-parent commit of main, and the sandbox image is pinned
         if: github.event_name == 'push'
         run: |
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          # A first-parent commit of main: a merge (or direct) commit main itself passed through,
+          # never a commit from inside a merged branch. fetch-depth: 0 gives all of main. Not
+          # grep -q: it exits at the match and, under pipefail, git's SIGPIPE fails the check.
+          git rev-list --first-parent origin/main | grep -xF "$GITHUB_SHA" >/dev/null ||
+            { echo "::error::$GITHUB_SHA is not a first-parent commit of main"; exit 1; }
           grep -qF "version: \"${GITHUB_REF_NAME#host-v}\"," mix.exs
           grep -qE 'rsolv-sandbox@sha256:[0-9a-f]{64}"' config/config.exs
           if grep -qE 'rsolv-sandbox@sha256:0{64}' config/config.exs; then exit 1; fi
@@ -59,6 +73,7 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           otp=$(jq -er .otp erts.lock)
+          printf '%s\n' 2.102.0 "$(gh --version | awk 'NR==1{print $3}')" | sort -V -C
           gh release download "erts-otp-$otp" --repo "$GITHUB_REPOSITORY" --dir erts --pattern "linux_$ARCH.tar.gz"
           gh attestation verify "erts/linux_$ARCH.tar.gz" --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/host-erts.yml" \
@@ -96,7 +111,7 @@ jobs:
             dist/rsolv-host-linux-${{ matrix.arch }}
             dist/rsolv-host-linux-${{ matrix.arch }}.sha256
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
   attest:
     needs: build
     # Fork pull requests get no OIDC token, so they stop after build.
@@ -120,13 +135,14 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}", BUNDLE: "${{ steps.attest.outputs.bundle-path }}" }
         run: |
           cp "$BUNDLE" dist/provenance.sigstore.jsonl
+          printf '%s\n' 2.102.0 "$(gh --version | awk 'NR==1{print $3}')" | sort -V -C
           for f in dist/rsolv-host-linux-x86_64 dist/rsolv-host-linux-aarch64; do
             gh attestation verify "$f" --bundle dist/provenance.sigstore.jsonl --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/host-release.yml" \
               --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with: { name: release, path: dist/, if-no-files-found: error, retention-days: 7 }
+        with: { name: release, path: dist/, if-no-files-found: error, retention-days: 30 }
   publish:
     needs: attest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/host-v')
@@ -137,10 +153,16 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: release, path: dist }
-      - name: Draft, attach, then publish (immutable release)
+      - name: Re-verify the attestation, then draft, attach, publish (immutable release)
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           (cd dist && sha256sum -c SHA256SUMS)
+          printf '%s\n' 2.102.0 "$(gh --version | awk 'NR==1{print $3}')" | sort -V -C
+          for f in dist/rsolv-host-linux-x86_64 dist/rsolv-host-linux-aarch64; do
+            gh attestation verify "$f" --bundle dist/provenance.sigstore.jsonl --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/host-release.yml" \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+          done
           tag=$GITHUB_REF_NAME
           {
             echo "RSOLV host client ${tag#host-v} for x86_64 and aarch64 Linux, each built and smoke-tested natively on GitHub-hosted runners by \`host-release.yml\` at $GITHUB_SHA."
