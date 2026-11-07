@@ -41,7 +41,7 @@ defmodule RsolvHost.FakeExec do
 
   @impl true
   @doc false
-  def command(pid, data) when is_pid(pid) do
+  def command(pid, data, _deadline) when is_pid(pid) do
     send(pid, {:command, IO.iodata_to_binary(data)})
     :ok
   end

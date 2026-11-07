@@ -66,7 +66,7 @@ defmodule RsolvHost.RelayTest do
       @sbx,
       :validation,
       @body,
-      [backoff_ms: [0, 0, 0, 0, 0], io: :stdio] ++ opts
+      Keyword.merge([backoff_ms: [0, 0, 0, 0, 0], io: :stdio], opts)
     )
   end
 
@@ -284,6 +284,93 @@ defmodule RsolvHost.RelayTest do
       assert {:error, {:session, _}} = run(keeper)
       assert_received :connected
       refute_received :connected
+    end
+  end
+
+  describe "run_session/5 budgets" do
+    test "refuses a request id that isn't 1 to 128 of [A-Za-z0-9_-], before remembering it",
+         context do
+      sandbox_answers({:ok, %{status: 0, output: "{}"}})
+
+      for id <- [String.duplicate("a", 129), "a b", "a\n", "ä", ""] do
+        keeper =
+          platform(context, [
+            sse([{:tool_request, tool_request(id, "read_file", %{})}, {:complete, %{}}])
+          ])
+
+        assert run(keeper) == {:error, :malformed_tool_request}, inspect(id)
+        assert tool_calls() == []
+        refute_received {:tool_response, _}
+      end
+    end
+
+    test "a stream of heartbeats ends at the session's deadline", context do
+      keeper = platform(context, [sse([{:heartbeat, nil}, {:heartbeat, nil}])])
+      started = System.monotonic_time(:millisecond)
+
+      result =
+        run(keeper,
+          backoff_ms: List.duplicate(20, 500),
+          deadline: System.monotonic_time(:millisecond) + 300
+        )
+
+      assert result == {:error, :session_timeout}
+      assert System.monotonic_time(:millisecond) - started < 2_000
+    end
+
+    test "a stream that keeps dropping stops reconnecting at the deadline", context do
+      keeper = platform(context, [""])
+      started = System.monotonic_time(:millisecond)
+
+      result =
+        run(keeper,
+          backoff_ms: List.duplicate(20, 500),
+          deadline: System.monotonic_time(:millisecond) + 300
+        )
+
+      assert result == {:error, :session_timeout}
+      assert System.monotonic_time(:millisecond) - started < 2_000
+    end
+
+    test "requests already received aren't run past the deadline", context do
+      keeper =
+        platform(context, [
+          sse([
+            {:tool_request, tool_request("r1", "bash", %{})},
+            {:tool_request, tool_request("r2", "bash", %{})},
+            {:complete, %{}}
+          ])
+        ])
+
+      deadline = System.monotonic_time(:millisecond) + 200
+
+      FakeExec.script([
+        {fn {"docker", ["exec" | _], _} -> true end,
+         fn _call ->
+           Process.sleep(300)
+           {:ok, %{status: 0, output: "{}"}}
+         end}
+      ])
+
+      assert run(keeper, deadline: deadline) == {:error, :session_timeout}
+      assert [_only_r1] = tool_calls()
+    end
+
+    test "a tool's time is capped by what's left of the session", context do
+      keeper =
+        platform(context, [
+          sse([
+            {:tool_request, tool_request("r1", "bash", %{}, timeout_ms: 600_000)},
+            {:complete, %{}}
+          ])
+        ])
+
+      sandbox_answers({:ok, %{status: 0, output: "{}"}})
+
+      run(keeper, deadline: System.monotonic_time(:millisecond) + 60_000)
+
+      assert [{["exec", "-i", _, "timeout", "-k", "10", seconds | _], _}] = tool_calls()
+      assert String.to_integer(seconds) <= 60
     end
   end
 end

@@ -56,10 +56,10 @@ defmodule RsolvHost.ExecTest do
     end
   end
 
-  describe "open/3 and command/2" do
+  describe "open/3 and command/3" do
     test "talks to a long-running program both ways" do
       {:ok, port} = Exec.open("head", ["-c", "4"], [])
-      :ok = Exec.command(port, "ping")
+      :ok = Exec.command(port, "ping", System.monotonic_time(:millisecond) + 5_000)
 
       assert_receive {^port, {:data, "ping"}}, 1_000
       assert_receive {^port, {:exit_status, 0}}, 1_000
@@ -67,6 +67,20 @@ defmodule RsolvHost.ExecTest do
 
     test "a missing executable is an error" do
       assert {:error, :enoent} = Exec.open("rsolv-no-such-binary", [], [])
+    end
+  end
+
+  describe "command/3" do
+    test "when the program doesn't read its input, gives up at the deadline instead of blocking" do
+      {:ok, port} = Exec.open("sleep", ["5"], [])
+      deadline = System.monotonic_time(:millisecond) + 300
+      chunk = :binary.copy("x", 1024 * 1024)
+
+      results = for _ <- 1..4, do: Exec.command(port, chunk, deadline)
+
+      assert {:error, :timeout} in results
+      assert System.monotonic_time(:millisecond) - deadline < 1_000
+      Port.close(port)
     end
   end
 end

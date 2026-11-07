@@ -93,18 +93,28 @@ defmodule RsolvHost.Roles.Scan do
       "issue_label" => "rsolv:detected"
     }
 
-    :ok = sbx.exec.command(channel, Frame.encode(config))
+    deadline = System.monotonic_time(:millisecond) + @scan_timeout_ms
 
-    [
-      channel: channel,
-      exec: sbx.exec,
-      keeper: ctx.keeper,
-      github: ctx.github,
-      repository: ctx.github.repository,
-      max_issues: ctx.max_issues
-    ]
-    |> ScanRelay.new()
-    |> ScanRelay.serve()
+    case sbx.exec.command(channel, Frame.encode(config), deadline) do
+      :ok ->
+        [
+          channel: channel,
+          exec: sbx.exec,
+          keeper: ctx.keeper,
+          github: ctx.github,
+          repository: ctx.github.repository,
+          max_issues: ctx.max_issues,
+          deadline: deadline
+        ]
+        |> ScanRelay.new()
+        |> ScanRelay.serve()
+
+      {:error, :timeout} ->
+        {:error, {:sandbox, :scan_timeout}}
+
+      {:error, :closed} ->
+        {:error, {:sandbox, :scanner_exited}}
+    end
   end
 
   defp register(ctx, %{"issues" => []}), do: output(ctx, "issues", "[]")

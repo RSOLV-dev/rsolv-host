@@ -67,7 +67,8 @@ defmodule RsolvHost.ScanRelayTest do
         keeper: keeper,
         github: gh,
         repository: "acme/app",
-        max_issues: Keyword.get(opts, :max_issues, 3)
+        max_issues: Keyword.get(opts, :max_issues, 3),
+        deadline: Keyword.get(opts, :deadline, System.monotonic_time(:millisecond) + 60_000)
       )
 
     result = ScanRelay.serve(state)
@@ -420,6 +421,21 @@ defmodule RsolvHost.ScanRelayTest do
           ] do
         refute ScanRelay.allowed_label?(label), inspect(label)
       end
+    end
+  end
+
+  describe "serve/1 and its deadline" do
+    test "a busy scanner's buffered frames aren't served past the deadline", context do
+      frames =
+        List.duplicate(%{"call" => "severity_tiers"}, 50) ++
+          [%{"call" => "done", "args" => %{"issues" => []}}]
+
+      {result, replies} =
+        serve(context, frames, deadline: System.monotonic_time(:millisecond) - 1)
+
+      assert result == {:error, {:sandbox, :scan_timeout}}
+      assert replies == []
+      refute_received {:platform, _, _, _}
     end
   end
 end

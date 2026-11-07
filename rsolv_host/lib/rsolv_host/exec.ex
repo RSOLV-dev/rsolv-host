@@ -13,7 +13,7 @@ defmodule RsolvHost.Exec do
 
   @callback run(String.t(), [String.t()], keyword()) :: result()
   @callback open(String.t(), [String.t()], keyword()) :: {:ok, port()} | {:error, :enoent}
-  @callback command(port(), iodata()) :: :ok
+  @callback command(port(), iodata(), integer()) :: :ok | {:error, :timeout | :closed}
 
   @default_timeout_ms 60_000
   @default_max_bytes 1_048_576
@@ -30,19 +30,23 @@ defmodule RsolvHost.Exec do
   """
   @spec run(String.t(), [String.t()], keyword()) :: result()
   def run(executable, args, opts \\ []) do
+    deadline =
+      System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, @default_timeout_ms)
+
     with {:ok, port} <- open(executable, args, opts) do
-      if input = opts[:input], do: Port.command(port, input)
+      max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)
 
-      deadline =
-        System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, @default_timeout_ms)
-
-      collect(port, [], 0, Keyword.get(opts, :max_bytes, @default_max_bytes), deadline)
+      # A program that exits without reading its input still reports its output.
+      case command(port, opts[:input] || "", deadline) do
+        {:error, :timeout} -> kill(port, :timeout)
+        _written_or_closed -> collect(port, [], 0, max_bytes, deadline)
+      end
     end
   end
 
   @doc """
   Starts `executable` with `args` and returns its Port, owned by the caller, for
-  a conversation in both directions (`command/2` writes; the owner receives
+  a conversation in both directions (`command/3` writes; the owner receives
   `{port, {:data, bytes}}` and `{port, {:exit_status, status}}`). stderr is
   merged, as for `run/3`.
   """
@@ -61,11 +65,25 @@ defmodule RsolvHost.Exec do
     end
   end
 
-  @doc "Writes `data` to the program's stdin."
-  @spec command(port(), iodata()) :: :ok
-  def command(port, data) do
-    true = Port.command(port, data)
-    :ok
+  @doc """
+  Writes `data` to the program's stdin. While the port is busy (the program
+  isn't reading), it waits, but only until `deadline` (monotonic milliseconds):
+  then `{:error, :timeout}`. `{:error, :closed}` once the program has exited.
+  """
+  @spec command(port(), iodata(), integer()) :: :ok | {:error, :timeout | :closed}
+  def command(port, data, deadline) do
+    cond do
+      Port.command(port, data, [:nosuspend]) -> :ok
+      System.monotonic_time(:millisecond) >= deadline -> {:error, :timeout}
+      true -> wait_and_command(port, data, deadline)
+    end
+  rescue
+    ArgumentError -> {:error, :closed}
+  end
+
+  defp wait_and_command(port, data, deadline) do
+    Process.sleep(10)
+    command(port, data, deadline)
   end
 
   defp collect(port, acc, size, max, deadline) do

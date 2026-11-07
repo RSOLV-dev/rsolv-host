@@ -21,11 +21,17 @@ defmodule RsolvHost.Roles.Work do
   @bootstrap_max_bytes 1024 * 1024
   @patch_timeout_ms 300_000
   @patch_max_bytes 8 * 1024 * 1024
+  # Both attempts (the workflow retries once) fit GitHub's 6-hour job limit.
+  @budget_ms 150 * 60 * 1_000
 
   @doc """
   Runs the role. `deps` replaces collaborators in tests: `:io`, `:probe`,
-  `:stat` (passed to `RsolvHost.Sandbox.start/1`) and `:backoff_ms` (passed to
-  `RsolvHost.Relay.run_session/5`).
+  `:stat` (passed to `RsolvHost.Sandbox.start/1`), `:backoff_ms` (passed to
+  `RsolvHost.Relay.run_session/5`) and `:budget_ms`.
+
+  The role has one time budget (2.5 hours by default), from its start to the
+  upload: both sessions share its deadline, and a patch ready after it isn't
+  uploaded (`{:error, :session_timeout, :validated}`).
   """
   @spec run(map(), map(), keyword()) :: Outcome.result()
   def run(%{issue: issue} = opts, env, deps \\ []) do
@@ -44,6 +50,7 @@ defmodule RsolvHost.Roles.Work do
         keeper: keeper,
         workspace: workspace,
         suffix: if(resume?, do: "-2", else: ""),
+        deadline: System.monotonic_time(:millisecond) + Keyword.get(deps, :budget_ms, @budget_ms),
         names: "rsolv-#{run_id}-#{issue}"
       }
 
@@ -120,7 +127,7 @@ defmodule RsolvHost.Roles.Work do
   end
 
   defp session(ctx, phase) do
-    relay_opts = [io: ctx.io] ++ Keyword.take(ctx.deps, [:backoff_ms])
+    relay_opts = [io: ctx.io, deadline: ctx.deadline] ++ Keyword.take(ctx.deps, [:backoff_ms])
     body = %{"pipeline_run_id" => ctx.run, "issue_number" => ctx.issue}
     Relay.run_session(ctx.keeper, ctx.sbx, phase, body, relay_opts)
   end
@@ -174,14 +181,21 @@ defmodule RsolvHost.Roles.Work do
   end
 
   defp upload({:ok, bytes}, ctx) do
-    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(ctx.keeper) do
-      case Platform.upload_result(req, raw, ctx.run, ctx.issue, bytes) do
-        :ok -> {:outcome, :mitigated, true}
-        {:error, {:platform, 409, "already_uploaded"}} -> {:outcome, :mitigated, true}
-        {:error, reason} -> {:error, reason, :validated}
-      end
+    with :ok <- in_budget(ctx),
+         {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(ctx.keeper),
+         :ok <- Platform.upload_result(req, raw, ctx.run, ctx.issue, bytes) do
+      {:outcome, :mitigated, true}
+    else
+      {:error, {:platform, 409, "already_uploaded"}} -> {:outcome, :mitigated, true}
+      {:error, reason} -> {:error, reason, :validated}
     end
   end
 
   defp upload({:error, reason}, _ctx), do: {:error, reason, :validated}
+
+  defp in_budget(ctx) do
+    if System.monotonic_time(:millisecond) < ctx.deadline,
+      do: :ok,
+      else: {:error, :session_timeout}
+  end
 end

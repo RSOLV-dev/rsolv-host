@@ -31,14 +31,14 @@ defmodule RsolvHost.FakeExecTest do
     end
   end
 
-  describe "open/3 and command/2" do
+  describe "open/3 and command/3" do
     test "hands the opened channel to a scripted process that receives every command" do
       test = self()
       sandbox = spawn_link(fn -> receive do: ({:command, data} -> send(test, {:got, data})) end)
       FakeExec.script([{fn {"docker", ["exec" | _], _} -> true end, {:ok, sandbox}}])
 
       assert {:ok, ^sandbox} = FakeExec.open("docker", ["exec"], [])
-      assert FakeExec.command(sandbox, ["pi", "ng"]) == :ok
+      assert FakeExec.command(sandbox, ["pi", "ng"], 0) == :ok
       assert_receive {:got, "ping"}
     end
   end

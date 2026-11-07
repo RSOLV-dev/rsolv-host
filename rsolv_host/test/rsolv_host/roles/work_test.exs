@@ -341,4 +341,22 @@ defmodule RsolvHost.Roles.WorkTest do
                List.last(docker_runs())
     end
   end
+
+  describe "run/3 and its time budget" do
+    test "a patch ready after the role's deadline isn't uploaded", context do
+      platform()
+
+      sandbox(
+        patch: fn _call ->
+          Process.sleep(400)
+          {:ok, %{status: 0, output: ~s({"patch":"#{Base.encode64(@patch)}"})}}
+        end
+      )
+
+      result = Work.run(%{issue: 7}, context.env, deps(context, budget_ms: 300))
+
+      assert result == {:error, :session_timeout, :validated}
+      refute_received {:uploaded, _, _}
+    end
+  end
 end

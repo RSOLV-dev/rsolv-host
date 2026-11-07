@@ -13,7 +13,17 @@ defmodule RsolvHost.Relay do
   On reconnect the platform replays every request still pending, and a stream may
   repeat one. The relay records each request id before running it, in a table
   that lives for the whole session (across reconnects and transport errors), and
-  ignores any id it has already seen, so a replay never runs `bash` twice.
+  ignores any id it has already seen, so a replay never runs `bash` twice. An id
+  is 1 to 128 of `[A-Za-z0-9_-]`, checked before it is remembered, so the table
+  holds at most 2,000 × 128 bytes of ids.
+
+  ## Time budget
+
+  A session has one monotonic deadline (`:deadline`; the work role shares one
+  across both its sessions and the upload). It's checked before every event,
+  buffered or not, heartbeats included, and before every reconnect; it caps
+  each tool's time and each wait on the stream. Past it: `{:error,
+  :session_timeout}`.
   """
 
   alias RsolvCore.Relay.{SSE, ToolRequest, ToolResponse}
@@ -25,11 +35,16 @@ defmodule RsolvHost.Relay do
   @max_requests 2_000
   @backoff_ms [2_000, 4_000, 8_000, 16_000, 32_000]
   @timed_out 124
+  @max_session_ms 2 * 60 * 60 * 1_000
+  @max_stream_wait_ms 120_000
+  @request_id ~r/\A[A-Za-z0-9_-]{1,128}\z/
 
   @doc """
   Runs a session to its end: `{:ok, data}` on `complete` (or a cached result),
   `{:error, {:session, data}}` on `error`, `{:error, :stream_exhausted}` after
-  five failed reconnects. Options: `:backoff_ms` (the reconnect delays) and `:io`.
+  five failed reconnects, `{:error, :session_timeout}` past the deadline.
+  Options: `:backoff_ms` (the reconnect delays), `:deadline` (monotonic
+  milliseconds; default two hours from now) and `:io`.
   """
   @spec run_session(GenServer.server(), Sandbox.t(), Platform.phase(), map(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -53,7 +68,11 @@ defmodule RsolvHost.Relay do
         phase: phase,
         id: session_id,
         seen: seen,
-        io: Keyword.get(opts, :io, :stdio)
+        io: Keyword.get(opts, :io, :stdio),
+        deadline:
+          Keyword.get_lazy(opts, :deadline, fn ->
+            System.monotonic_time(:millisecond) + @max_session_ms
+          end)
       }
 
       try do
@@ -85,9 +104,17 @@ defmodule RsolvHost.Relay do
   defp reconnect(_session, []), do: {:error, :stream_exhausted}
 
   defp reconnect(session, [delay | rest]) do
-    Process.sleep(delay)
-    connect(session, rest)
+    case left_ms(session) do
+      left when left > 0 ->
+        Process.sleep(min(delay, left))
+        connect(session, rest)
+
+      _spent ->
+        {:error, :session_timeout}
+    end
   end
+
+  defp left_ms(session), do: session.deadline - System.monotonic_time(:millisecond)
 
   defp status(session) do
     with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(session.keeper),
@@ -95,7 +122,9 @@ defmodule RsolvHost.Relay do
   end
 
   defp stream_once(session) do
-    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(session.keeper),
+    with {:ok, wait_ms} <- wait_ms(session),
+         {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(session.keeper),
+         req = Req.merge(req, receive_timeout: wait_ms),
          {:ok, resp} <-
            Platform.stream(req, raw, session.phase, session.id, &chunk(&1, &2, session)) do
       case resp.private[:relay] do
@@ -107,6 +136,13 @@ defmodule RsolvHost.Relay do
       {:error, {:transport, _reason}} -> :dropped
       {:error, {:platform, status, _code}} when status >= 500 -> :dropped
       error -> {:done, error}
+    end
+  end
+
+  defp wait_ms(session) do
+    case left_ms(session) do
+      left when left > 0 -> {:ok, min(left, @max_stream_wait_ms)}
+      _spent -> {:error, :session_timeout}
     end
   end
 
@@ -122,20 +158,26 @@ defmodule RsolvHost.Relay do
   defp events([], state, _session, {req, resp}),
     do: {:cont, {req, Req.Response.put_private(resp, :relay, state)}}
 
-  defp events([%{type: :complete, data: data} | _rest], state, _session, acc),
+  defp events([event | rest], state, session, acc) do
+    if left_ms(session) > 0,
+      do: event(event, rest, state, session, acc),
+      else: halt(acc, state, {:error, :session_timeout})
+  end
+
+  defp event(%{type: :complete, data: data}, _rest, state, _session, acc),
     do: halt(acc, state, {:ok, data})
 
-  defp events([%{type: :error, data: data} | _rest], state, _session, acc),
+  defp event(%{type: :error, data: data}, _rest, state, _session, acc),
     do: halt(acc, state, {:error, {:session, data}})
 
-  defp events([%{type: :tool_request, data: data} | rest], state, session, acc) do
+  defp event(%{type: :tool_request, data: data}, rest, state, session, acc) do
     case answer(session, data) do
       :ok -> events(rest, state, session, acc)
       {:error, _reason} = error -> halt(acc, state, error)
     end
   end
 
-  defp events([_progress_or_heartbeat | rest], state, session, acc),
+  defp event(_progress_or_heartbeat, rest, state, session, acc),
     do: events(rest, state, session, acc)
 
   defp halt({req, resp}, state, outcome),
@@ -143,6 +185,7 @@ defmodule RsolvHost.Relay do
 
   defp answer(session, %{"id" => id} = data) when is_binary(id) do
     cond do
+      not (id =~ @request_id) -> {:error, :malformed_tool_request}
       :ets.member(session.seen, id) -> :ok
       :ets.info(session.seen, :size) >= @max_requests -> {:error, :too_many_tool_requests}
       true -> run_request(session, id, data)
@@ -171,7 +214,7 @@ defmodule RsolvHost.Relay do
     outcome =
       Sandbox.exec(session.sbx, ["rsolv-sandbox", "tool"],
         input: Frame.encode(%{"tool" => tool, "input" => request.input}),
-        timeout_ms: min(request.timeout_ms, @max_tool_ms),
+        timeout_ms: Enum.min([request.timeout_ms, @max_tool_ms, max(left_ms(session), 1)]),
         max_bytes: @max_output_bytes
       )
 

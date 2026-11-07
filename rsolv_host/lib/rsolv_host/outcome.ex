@@ -81,6 +81,7 @@ defmodule RsolvHost.Outcome do
   def classify(:token_unavailable), do: :transient
   def classify({:session, _data}), do: :transient
   def classify(:stream_exhausted), do: :transient
+  def classify(:session_timeout), do: :transient
   def classify({:handoff, _posix}), do: :sandbox
   def classify({:sandbox_setup, _step}), do: :sandbox
   def classify({:sandbox, _reason}), do: :sandbox

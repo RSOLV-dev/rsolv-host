@@ -14,7 +14,8 @@ defmodule RsolvHost.ScanRelay do
   with that error. `list_issues` answers with each issue's `number`, `title`,
   `state`, `html_url` and label names only.
 
-  Limits: 2,000 frames, 30 minutes, 16 MiB per frame.
+  Limits: 2,000 frames, 30 minutes for the whole conversation (checked before
+  each frame and bounding every write to the scanner), 16 MiB per frame.
   """
 
   alias RsolvCore.Text
@@ -37,8 +38,9 @@ defmodule RsolvHost.ScanRelay do
 
   @doc """
   The relay's state. Options: `:channel` (the scanner's Port), `:exec` (its
-  `RsolvHost.Exec` module), `:keeper`, `:github`, `:repository` and
-  `:max_issues`.
+  `RsolvHost.Exec` module), `:keeper`, `:github`, `:repository`,
+  `:max_issues` and `:deadline` (monotonic milliseconds; default 30 minutes
+  from now).
   """
   @spec new(keyword()) :: map()
   def new(opts) do
@@ -49,7 +51,10 @@ defmodule RsolvHost.ScanRelay do
       github: Keyword.fetch!(opts, :github),
       repository: Keyword.fetch!(opts, :repository),
       max_issues: Keyword.fetch!(opts, :max_issues),
-      deadline: System.monotonic_time(:millisecond) + @max_duration_ms,
+      deadline:
+        Keyword.get_lazy(opts, :deadline, fn ->
+          System.monotonic_time(:millisecond) + @max_duration_ms
+        end),
       buffer: "",
       frames: 0,
       validate_calls: 0,
@@ -77,7 +82,15 @@ defmodule RsolvHost.ScanRelay do
     end
   end
 
+  # The deadline is checked before each buffered frame too: a scanner that keeps
+  # the mailbox full never reaches `serve/1`'s `after`.
   defp frames(state) do
+    if System.monotonic_time(:millisecond) >= state.deadline,
+      do: {:error, {:sandbox, :scan_timeout}},
+      else: frame(state)
+  end
+
+  defp frame(state) do
     case Frame.decode(state.buffer, @max_frame_bytes) do
       :more ->
         serve(state)
@@ -94,8 +107,11 @@ defmodule RsolvHost.ScanRelay do
   end
 
   defp next({:reply, reply, state}) do
-    :ok = state.exec.command(state.channel, Frame.encode(reply))
-    frames(state)
+    case state.exec.command(state.channel, Frame.encode(reply), state.deadline) do
+      :ok -> frames(state)
+      {:error, :timeout} -> {:error, {:sandbox, :scan_timeout}}
+      {:error, :closed} -> {:error, {:sandbox, :scanner_exited}}
+    end
   end
 
   defp next({:done, args}), do: {:ok, args}
