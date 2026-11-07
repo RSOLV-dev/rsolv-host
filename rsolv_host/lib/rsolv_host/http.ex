@@ -28,6 +28,21 @@ defmodule RsolvHost.Http do
     end
   end
 
+  @doc """
+  Whether a failed attempt is worth repeating: a timeout, or a refused or
+  closed connection, or 408, 429, 500, 502, 503 or 504. Each client decides
+  which requests may be repeated at all (`RsolvHost.GitHub.retry?/2`,
+  `RsolvHost.Platform.retry?/2`): a closed connection can hide a write that
+  happened.
+  """
+  @spec transient?(Req.Response.t() | Exception.t()) :: boolean()
+  def transient?(%Req.Response{status: status}), do: status in [408, 429, 500, 502, 503, 504]
+
+  def transient?(%Req.TransportError{reason: reason}),
+    do: reason in [:timeout, :econnrefused, :closed]
+
+  def transient?(_other), do: false
+
   defp capped(max_bytes) do
     fn {:data, data}, {req, resp} ->
       body = (resp.body || "") <> data

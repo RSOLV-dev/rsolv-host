@@ -319,4 +319,85 @@ defmodule RsolvHost.PlatformTest do
       assert Platform.severity_tiers(req(), @token) == {:error, {:transport, :response_too_large}}
     end
   end
+
+  describe "retries" do
+    # Answers each request with the next of `answers` (:closed is a connection
+    # that closes after the platform acted), recording every attempt.
+    defp answer(answers) do
+      test = self()
+      counter = :counters.new(1, [])
+
+      stub(fn conn ->
+        :counters.add(counter, 1, 1)
+        send(test, {:attempt, conn.method, conn.request_path})
+
+        case Enum.at(answers, :counters.get(counter, 1) - 1, List.last(answers)) do
+          :closed -> Req.Test.transport_error(conn, :closed)
+          status when is_integer(status) -> Plug.Conn.send_resp(conn, status, "{}")
+        end
+      end)
+    end
+
+    defp attempts(path), do: attempts(path, 0)
+
+    defp attempts(path, n) do
+      receive do
+        {:attempt, _method, ^path} -> attempts(path, n + 1)
+      after
+        0 -> n
+      end
+    end
+
+    test "a request that may have been carried out is never repeated" do
+      answer([:closed, 200])
+
+      calls = [
+        {"/api/v1/runs/token", fn -> Platform.exchange(req(), "jwt", 7) end},
+        {"/api/v1/runs/token/refresh", fn -> Platform.refresh(req(), @token, "jwt") end},
+        {"/api/v1/runs/register", fn -> Platform.register(req(), @token, %{issues: []}) end},
+        {"/api/v1/runs/#{@run}/issues/7/published",
+         fn -> Platform.published(req(), @token, @run, 7, %{}) end},
+        {"/api/v1/validation/start",
+         fn -> Platform.start_session(req(), @token, :validation, %{}) end}
+      ]
+
+      for {path, call} <- calls do
+        answer([:closed, 200])
+
+        assert call.() == {:error, {:transport, :closed}}, path
+        assert attempts(path) == 1, path
+      end
+    end
+
+    test "a read, a tool response or a result upload is repeated after a transient failure" do
+      for {path, call} <- [
+            {"/api/v1/validation/status/s1",
+             fn -> Platform.session_status(req(), @token, :validation, "s1") end},
+            {"/api/v1/validation/tool_response/s1",
+             fn -> Platform.tool_response(req(), @token, :validation, "s1", %{}) end},
+            {"/api/v1/runs/#{@run}/issues/7/results",
+             fn -> Platform.upload_result(req(), @token, @run, 7, "x") end}
+          ] do
+        answer([503, 200])
+
+        assert {:ok, _} =
+                 then(call.(), fn
+                   :ok -> {:ok, :ok}
+                   other -> other
+                 end)
+
+        assert attempts(path) == 2, path
+      end
+    end
+
+    test "never follows a redirect" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "https://exfil.example/collect")
+        |> Plug.Conn.send_resp(307, "")
+      end)
+
+      assert Platform.exchange(req(), "jwt", 7) == {:error, {:platform, 307, nil}}
+    end
+  end
 end

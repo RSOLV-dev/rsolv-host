@@ -8,7 +8,8 @@ defmodule RsolvHost.ScanRelay do
 
   Issue titles and bodies are rendered inside the sandbox (owner decision 2), so
   they are untrusted: the host caps their size, allows only the labels
-  `IssueCreator` produces, and caps the number of issues. A policy refusal is
+  `IssueCreator` produces, and caps the number of issues, counting every
+  creation attempted (a creation whose answer was lost may still have happened). A policy refusal is
   answered and the relay goes on; a refusal from the platform or GitHub ends it
   with that error. `list_issues` answers with each issue's `number`, `title`,
   `state`, `html_url` and label names only.
@@ -161,7 +162,7 @@ defmodule RsolvHost.ScanRelay do
     cond do
       not issue?(title, body, labels) -> refuse(state, "invalid arguments")
       not Enum.all?(labels, &allowed_label?/1) -> refuse(state, "label not allowed")
-      true -> create_issue(state, args)
+      true -> create_issue(%{state | created: state.created + 1}, args)
     end
   end
 
@@ -250,8 +251,7 @@ defmodule RsolvHost.ScanRelay do
       {:ok, %{"number" => number} = issue} when is_integer(number) ->
         reply = %{"ok" => %{"number" => number, "html_url" => issue["html_url"]}}
 
-        {:reply, reply,
-         %{state | created: state.created + 1, known: MapSet.put(state.known, number)}}
+        {:reply, reply, %{state | known: MapSet.put(state.known, number)}}
 
       {:ok, _malformed} ->
         {:error, :malformed_response}

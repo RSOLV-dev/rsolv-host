@@ -379,8 +379,28 @@ defmodule RsolvHost.TokenKeeperTest do
       assert {:ok, {_in, ""}} = StringIO.close(context.io)
     end
 
-    test "when there is no hand-off file, the resume is unavailable", context do
-      assert start(context, resume: true) == {:error, :resume_unavailable}
+    test "when there is no hand-off file (the first exchange's answer was lost), exchanges",
+         context do
+      raw = "rsolv_rt_" <> String.duplicate("E", 43)
+
+      Req.Test.stub(Platform, fn conn ->
+        assert conn.request_path == "/api/v1/runs/token"
+        Req.Test.json(conn, token_json(raw, 3_600))
+      end)
+
+      assert {:ok, keeper} = start(context, resume: true)
+      assert {:ok, %{raw: ^raw}} = TokenKeeper.token(keeper)
+    end
+
+    test "when the lost first exchange did happen, the refusal is transient", context do
+      Req.Test.stub(Platform, fn conn ->
+        conn |> Plug.Conn.put_status(409) |> Req.Test.json(%{error: "already_exchanged"})
+      end)
+
+      result = start(context, resume: true)
+
+      assert result == {:error, {:platform, 409, "already_exchanged"}}
+      assert RsolvHost.Outcome.exit_code(result) == 3
     end
   end
 

@@ -7,7 +7,8 @@ defmodule RsolvHost.Platform do
   Response bodies are read raw (never decompressed), capped, and decoded with
   `RsolvCore.StrictJson`. A refusal is `{:platform, status, error_code}`, where
   the code is the platform's `error` identifier or `nil`; error bodies are never
-  logged.
+  logged. Redirects are never followed (a 3xx is a refusal), and only
+  repeatable requests are retried (`retry?/2`).
   """
 
   alias RsolvCore.{Relay, StrictJson}
@@ -51,7 +52,8 @@ defmodule RsolvHost.Platform do
          Req.new(
            [
              base_url: url,
-             retry: :transient,
+             retry: &retry?/2,
+             redirect: false,
              receive_timeout: 120_000,
              raw: true,
              connect_options: [
@@ -65,6 +67,27 @@ defmodule RsolvHost.Platform do
         {:error, :api_url_not_allowed}
     end
   end
+
+  @doc """
+  Req's retry policy: a read, a tool response (the platform accepts a repeat)
+  or a result upload (write-once; a repeat is `409 already_uploaded`) is
+  repeated after a transient failure. The token exchange, a refresh (it
+  rotates the token), registration, a session start, validation, the scan plan
+  and the published report may have happened when the answer was lost, and
+  are never repeated blind.
+  """
+  @spec retry?(Req.Request.t(), Req.Response.t() | Exception.t()) :: boolean()
+  def retry?(%Req.Request{method: method, url: %URI{path: path}}, result),
+    do: repeatable?(method, path || "") and Http.transient?(result)
+
+  defp repeatable?(method, _path) when method in [:get, :head], do: true
+
+  defp repeatable?(:post, path),
+    do:
+      path =~ ~r{/api/v1/(validation|mitigation)/tool_response/[^/]+\z} or
+        path =~ ~r{/api/v1/runs/[^/]+/issues/[0-9]+/results\z}
+
+  defp repeatable?(_method, _path), do: false
 
   @doc "Exchanges a GitHub Actions OIDC token for a run token (`issue` is `nil` for scan)."
   @spec exchange(Req.Request.t(), String.t(), pos_integer() | nil) ::

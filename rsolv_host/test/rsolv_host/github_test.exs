@@ -80,4 +80,71 @@ defmodule RsolvHost.GitHubTest do
       assert GitHub.create_issue(gh(), %{}) == {:error, {:github, 403, :forbidden}}
     end
   end
+
+  describe "retries" do
+    defp answer(answers) do
+      test = self()
+      counter = :counters.new(1, [])
+
+      Req.Test.stub(GitHub, fn conn ->
+        :counters.add(counter, 1, 1)
+        send(test, {:attempt, conn.method, conn.request_path})
+
+        case Enum.at(answers, :counters.get(counter, 1) - 1, List.last(answers)) do
+          :closed -> Req.Test.transport_error(conn, :closed)
+          {status, json} -> conn |> Plug.Conn.put_status(status) |> Req.Test.json(json)
+        end
+      end)
+    end
+
+    defp attempts do
+      receive do
+        {:attempt, _method, _path} -> 1 + attempts()
+      after
+        0 -> 0
+      end
+    end
+
+    @sha String.duplicate("a", 40)
+
+    test "an issue, comment, label, pull request, commit or ref write that may have happened isn't repeated" do
+      for call <- [
+            fn -> GitHub.create_issue(gh(), %{title: "t"}) end,
+            fn -> GitHub.comment(gh(), 7, "b") end,
+            fn -> GitHub.add_labels(gh(), 7, ["l"]) end,
+            fn -> GitHub.create_label(gh(), %{name: "l"}) end,
+            fn -> GitHub.create_pull(gh(), %{title: "t"}) end,
+            fn -> GitHub.create_commit(gh(), "m", @sha, [@sha]) end,
+            fn -> GitHub.create_ref(gh(), "b", @sha) end
+          ] do
+        answer([:closed, {201, %{sha: @sha, number: 1}}])
+
+        assert call.() == {:error, {:transport, :closed}}
+        assert attempts() == 1
+      end
+    end
+
+    test "a read, or a content-addressed blob or tree, is repeated after a transient failure" do
+      for call <- [
+            fn -> GitHub.get_commit(gh(), @sha) end,
+            fn -> GitHub.create_blob(gh(), "x") end,
+            fn -> GitHub.create_tree(gh(), @sha, []) end
+          ] do
+        answer([:closed, {200, %{sha: @sha}}])
+
+        assert {:ok, _} = call.()
+        assert attempts() == 2
+      end
+    end
+
+    test "never follows a redirect" do
+      Req.Test.stub(GitHub, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "https://exfil.example/repos/acme/app/issues")
+        |> Plug.Conn.send_resp(307, "")
+      end)
+
+      assert GitHub.create_issue(gh(), %{title: "t"}) == {:error, {:github, 307, :refused}}
+    end
+  end
 end

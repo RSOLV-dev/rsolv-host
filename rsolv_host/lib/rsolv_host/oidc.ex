@@ -40,7 +40,7 @@ defmodule RsolvHost.Oidc do
     query = URI.encode_query(audience: audience)
     headers = [authorization: "bearer " <> token]
 
-    [retry: :transient]
+    [retry: :transient, redirect: false]
     |> Keyword.merge(extra)
     |> Req.new()
     |> Http.request([method: :get, url: url <> "&" <> query, headers: headers], @max_body_bytes)

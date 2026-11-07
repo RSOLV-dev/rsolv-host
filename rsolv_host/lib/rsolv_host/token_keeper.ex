@@ -19,7 +19,9 @@ defmodule RsolvHost.TokenKeeper do
   allows one exchange per run attempt, issue and role. So after every exchange and
   refresh the keeper writes the token to a `0600` file under `$RUNNER_TEMP/rsolv`,
   which no sandbox mounts, and `resume: true` refreshes that token (the same-job
-  path) instead of exchanging.
+  path) instead of exchanging. Without a hand-off file (the first exchange's
+  answer was lost), the resume exchanges: if the lost exchange did happen, the
+  platform refuses with `409 already_exchanged`, a transient failure.
   """
 
   use GenServer
@@ -200,9 +202,10 @@ defmodule RsolvHost.TokenKeeper do
       ActionsLog.mask(raw, state.io)
       refresh(state, raw)
     else
+      {:error, :enoent} -> first_token(state, false)
       {:error, {:platform, _status, _code}} = refused -> refused
       {:error, {:transport, _reason}} = transient -> transient
-      _missing_or_unreadable -> {:error, :resume_unavailable}
+      _unreadable -> {:error, :resume_unavailable}
     end
   end
 

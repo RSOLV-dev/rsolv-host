@@ -66,8 +66,10 @@ defmodule RsolvHost.Outcome do
   def classify(:base_not_on_target), do: :configuration
   def classify(:pull_collision), do: :configuration
 
+  def classify({:platform, 409, "already_exchanged"}), do: :transient
+
   def classify({api, status, _code})
-      when api in [:platform, :github] and status in @client_errors,
+      when api in [:platform, :github] and (status in @client_errors or status in 300..399),
       do: :configuration
 
   def classify({api, status, _code})
@@ -173,6 +175,10 @@ defmodule RsolvHost.Outcome do
       "Sandbox setup failed at step `#{kind(step)}`. Check that Docker on this runner can create internal networks and run containers."
 
   defp message(reason, :sandbox), do: "The sandbox failed (#{kind(reason)})."
+
+  defp message({:platform, 409, "already_exchanged"}, :transient),
+    do:
+      "This job's run token was issued, but the answer was lost on the way. Re-run the workflow."
 
   defp message(reason, :transient),
     do:
