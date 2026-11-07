@@ -44,6 +44,32 @@ The relay and token-exchange messages between `rsolv-host` and the RSOLV platfor
 release; knowing it grants no access, because every request is bound to a run token issued for
 one workflow run and role (and, for every role but scan, one issue).
 
+## Exit codes
+
+`rsolv-host` exits with one of these codes. They are a stable interface; changing one is a
+breaking change. `rsolv-work.yml` retries once on 3.
+
+| Code | Meaning | Annotation | Workflow behaviour |
+|---|---|---|---|
+| 0 | A model outcome was reached (any of them) | `::notice::` for a false positive | none |
+| 1 | Bug in the host client | `::error title=RSOLV host client bug::`, asking for an issue on `RSOLV-dev/rsolv-host` with the run URL | none |
+| 2 | Configuration, or something the customer can fix | `::error title=RSOLV configuration::` naming the fix (for example "Grant `id-token: write`") | none |
+| 3 | Transient platform or network failure | `::error title=RSOLV transient failure::` | `rsolv-work.yml` retries once, only on 3 |
+| 4 | Sandbox or runner infrastructure | `::error title=RSOLV sandbox setup::` naming the failed step | none |
+
+The `work` role writes the step outputs `outcome` and `has_patch` (`true` or `false`), and a
+job-summary row. `outcome` is one of:
+
+- `mitigated`: a fix was produced and uploaded;
+- `mitigation_failed`: the vulnerability was confirmed but no usable fix was produced;
+- `false_positive`: VALIDATE found the finding is not a vulnerability;
+- `not_validated`: VALIDATE could not confirm the vulnerability;
+- `validated`: VALIDATE confirmed it, then the job failed (non-zero exit) before MITIGATE
+  reported an outcome.
+
+Annotations and summaries are fixed text plus host-controlled values; text from the sandbox or
+an error response never reaches them.
+
 ## Layout
 
 - `rsolv_core/`: what the platform and the host must agree on byte for byte: the relay

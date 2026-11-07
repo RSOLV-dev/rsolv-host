@@ -5,7 +5,7 @@ defmodule RsolvHost.CLI do
   first, for every command, because the first invocation extracts the release.
   """
 
-  alias RsolvHost.{ActionsLog, Preflight}
+  alias RsolvHost.{Outcome, Preflight}
 
   @usage "usage: rsolv-host scan [--max-issues N] | work --issue N [--resume] | publish --issue N | version | selftest"
 
@@ -22,17 +22,22 @@ defmodule RsolvHost.CLI do
   @spec commands() :: [String.t()]
   def commands, do: @commands |> Map.keys() |> Enum.sort()
 
-  @doc "Runs one command and returns the process exit code."
-  @spec main([String.t()], map(), String.t()) :: non_neg_integer()
-  def main(argv, env, root_dir) do
+  @doc """
+  Runs one command and returns the process exit code (`RsolvHost.Outcome`).
+  `opts[:commands]` replaces the command table (tests).
+  """
+  @spec main([String.t()], map(), String.t(), keyword()) :: non_neg_integer()
+  def main(argv, env, root_dir, opts \\ []) do
+    commands = Keyword.get(opts, :commands, @commands)
+
     case Preflight.check(env, root_dir) do
-      :ok -> argv |> parse() |> run(env)
-      {:error, reason} -> finish({:error, reason}, env)
+      :ok -> argv |> parse(commands) |> run(env)
+      {:error, _reason} = error -> finish(error, %{}, env)
     end
   end
 
-  defp parse([name | args]) do
-    with {:ok, {fun, spec, required}} <- Map.fetch(@commands, name),
+  defp parse([name | args], commands) do
+    with {:ok, {fun, spec, required}} <- Map.fetch(commands, name),
          {opts, [], []} <- OptionParser.parse(args, strict: spec),
          opts = Map.new(opts),
          true <- Enum.all?(required, &Map.has_key?(opts, &1)) do
@@ -42,14 +47,22 @@ defmodule RsolvHost.CLI do
     end
   end
 
-  defp parse([]), do: {:error, :usage}
+  defp parse([], _commands), do: {:error, :usage}
 
-  defp run({:ok, {module, function}, opts}, env),
-    do: finish(apply(module, function, [opts, env]), env)
+  defp run({:ok, fun, opts}, env), do: fun |> call(opts, env) |> finish(opts, env)
 
-  defp run({:error, :usage}, env) do
+  defp run({:error, :usage} = error, env) do
     IO.puts(@usage)
-    finish({:error, :usage}, env)
+    finish(error, %{}, env)
+  end
+
+  defp call(fun, opts, env) do
+    case fun do
+      {module, function} -> apply(module, function, [opts, env])
+      fun when is_function(fun, 2) -> fun.(opts, env)
+    end
+  rescue
+    exception -> {:error, {:unexpected, exception}}
   end
 
   @doc false
@@ -60,16 +73,27 @@ defmodule RsolvHost.CLI do
   @spec selftest(map(), map()) :: {:error, :selftest_unavailable}
   def selftest(_opts, _env), do: {:error, :selftest_unavailable}
 
-  defp finish(:ok, _env), do: 0
-
-  defp finish({:error, {:preflight, variable}}, _env) do
-    ActionsLog.error(
-      "RSOLV configuration",
-      "Set #{variable} so rsolv-host installs under $RUNNER_TEMP (use RSOLV's reusable workflows)."
-    )
-
-    2
+  defp finish(result, opts, env) do
+    report(result, opts, env)
+    Outcome.exit_code(result)
   end
 
-  defp finish({:error, _reason}, _env), do: 2
+  defp report(:ok, _opts, _env), do: :ok
+
+  defp report({:outcome, _outcome, _has_patch} = result, opts, env), do: record(result, opts, env)
+
+  defp report({:error, reason, :validated} = result, opts, env) do
+    record(result, opts, env)
+    Outcome.annotate(reason)
+  end
+
+  defp report({:error, reason}, _opts, _env), do: Outcome.annotate(reason)
+
+  defp record(result, opts, env) do
+    Outcome.report(result,
+      issue: opts[:issue],
+      output: env["GITHUB_OUTPUT"],
+      summary: env["GITHUB_STEP_SUMMARY"]
+    )
+  end
 end

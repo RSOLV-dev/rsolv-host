@@ -40,6 +40,47 @@ defmodule RsolvHost.CLITest do
     end
   end
 
+  describe "main/4 with a role" do
+    @describetag :tmp_dir
+
+    defp commands(fun), do: %{"work" => {fun, [issue: :integer], [:issue]}}
+
+    test "when the role raises, annotates a host bug and exits 1" do
+      boom = fn _opts, _env -> raise ArgumentError, "secret detail" end
+
+      out =
+        capture_io(fn ->
+          assert CLI.main(["work", "--issue", "7"], @env, @root, commands: commands(boom)) == 1
+        end)
+
+      assert out =~ "::error title=RSOLV host client bug::"
+      assert out =~ "ArgumentError"
+      refute out =~ "secret detail"
+    end
+
+    test "when the role reaches a model outcome, reports it and exits 0", %{tmp_dir: dir} do
+      env = Map.put(@env, "GITHUB_OUTPUT", Path.join(dir, "out"))
+      done = fn %{issue: 7}, ^env -> {:outcome, :mitigated, true} end
+
+      capture_io(fn ->
+        assert CLI.main(["work", "--issue", "7"], env, @root, commands: commands(done)) == 0
+      end)
+
+      assert File.read!(Path.join(dir, "out")) == "outcome=mitigated\nhas_patch=true\n"
+    end
+
+    test "when the role fails, annotates its class and exits with its code" do
+      failed = fn _opts, _env -> {:error, :stream_exhausted} end
+
+      out =
+        capture_io(fn ->
+          assert CLI.main(["work", "--issue", "7"], @env, @root, commands: commands(failed)) == 3
+        end)
+
+      assert out =~ "::error title=RSOLV transient failure::"
+    end
+  end
+
   describe "commands/0" do
     test "is exactly the five roles and leaves maintenance to Burrito" do
       assert CLI.commands() == ~w(publish scan selftest version work)
