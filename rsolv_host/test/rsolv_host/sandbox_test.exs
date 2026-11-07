@@ -83,7 +83,8 @@ defmodule RsolvHost.SandboxTest do
                    "-e",
                    "https_proxy=http://172.18.0.2:3128"
                  ] ++
-                 ["-e", "NO_PROXY=", "-v", "/rt/rsolv/work:/work"] ++
+                 ["-e", "NO_PROXY=localhost,127.0.0.1", "-e", "no_proxy=localhost,127.0.0.1"] ++
+                 ["-v", "/rt/rsolv/work:/work"] ++
                  ["-v", "/rt/rsolv/home-rsolv-41-7-work:/opt/home", "-w", "/work"] ++
                  ["--entrypoint", "sleep", @image, "86400"]
     end
@@ -129,9 +130,18 @@ defmodule RsolvHost.SandboxTest do
 
         for ["-e", value] <- Enum.chunk_every(args, 2, 1), do: assert(value =~ "=")
 
-        for forbidden <- ["--env-file", "--privileged", "/var/run/docker.sock", "host"] do
+        for forbidden <- [
+              "--env-file",
+              "--privileged",
+              "/var/run/docker.sock",
+              "--add-host",
+              "host-gateway",
+              "host.docker.internal"
+            ] do
           refute Enum.any?(args, &String.contains?(&1, forbidden)), forbidden
         end
+
+        refute "host" in args
       end
     end
   end

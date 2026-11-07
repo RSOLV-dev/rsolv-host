@@ -15,7 +15,10 @@ defmodule RsolvCore.CanonicalJsonPropertyTest do
         string(:utf8)
       ])
 
-    tree(leaf, fn child -> one_of([list_of(child), map_of(string(:utf8), child)]) end)
+    # Maps from key-value pairs, not map_of/2: its keys must be unique, and at
+    # small sizes string(:utf8) yields little but "", which made it give up.
+    object = &map(list_of(tuple({string(:utf8), &1})), fn pairs -> Map.new(pairs) end)
+    tree(leaf, fn child -> one_of([list_of(child), object.(child)]) end)
   end
 
   defp reshuffle(map) when is_map(map),

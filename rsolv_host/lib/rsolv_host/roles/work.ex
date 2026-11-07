@@ -21,6 +21,7 @@ defmodule RsolvHost.Roles.Work do
     Outcome,
     Platform,
     Relay,
+    Runtimes,
     Sandbox,
     TokenKeeper,
     Workspace
@@ -124,17 +125,23 @@ defmodule RsolvHost.Roles.Work do
     end
   end
 
+  # RSOLV_EXACT_RUNTIME_VERSIONS=true makes a Python version with no build
+  # attestations fail rather than fall back to another patch (3d decision).
   defp bootstrap(ctx) do
     with {:ok, %{output: output}} <-
            Sandbox.exec(ctx.sbx, ["rsolv-sandbox", "bootstrap"],
-             input: "0\n",
+             input: bootstrap_input(ctx.env["RSOLV_EXACT_RUNTIME_VERSIONS"]),
              timeout_ms: @bootstrap_timeout_ms,
              max_bytes: @bootstrap_max_bytes
            ),
-         %{"log_tail" => tail} when is_binary(tail) <- Relay.last_object(output) do
+         %{"log_tail" => tail} = result when is_binary(tail) <- Relay.last_object(output) do
       ActionsLog.untrusted(tail, ctx.io)
+      Runtimes.annotate(result["runtimes"], ctx.io)
     end
   end
+
+  defp bootstrap_input("true"), do: Frame.encode(%{"exact_runtime_versions" => true})
+  defp bootstrap_input(_unset), do: "0\n"
 
   defp session(ctx, phase) do
     relay_opts = [io: ctx.io, deadline: ctx.deadline] ++ Keyword.take(ctx.deps, [:backoff_ms])

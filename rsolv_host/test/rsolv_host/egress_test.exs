@@ -4,13 +4,15 @@ defmodule RsolvHost.EgressTest do
   alias RsolvHost.Egress
 
   describe "allowlist/0" do
-    test "is the union of the spike's measured hosts, one per line" do
+    test "is the union of the spike's measured hosts and the measured runtime-download hosts, one per line" do
       assert Egress.allowlist() |> String.split("\n", trim: true) |> Enum.sort() ==
                Enum.sort(~w(
                  github.com api.github.com codeload.github.com .githubusercontent.com
                  registry.npmjs.org pypi.org files.pythonhosted.org rubygems.org index.rubygems.org
                  hex.pm repo.hex.pm builds.hex.pm repo.maven.apache.org repo1.maven.org
                  packagist.org repo.packagist.org
+                 mise-versions.jdx.dev nodejs.org mise-java.jdx.dev tuf-repo-cdn.sigstore.dev
+                 archive.apache.org
                ))
     end
 
