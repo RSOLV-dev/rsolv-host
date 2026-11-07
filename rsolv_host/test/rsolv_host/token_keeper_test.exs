@@ -42,7 +42,7 @@ defmodule RsolvHost.TokenKeeperTest do
   end
 
   defp start(context, opts \\ []) do
-    TokenKeeper.start_link([role: :work, issue: 7, env: context.env, io: context.io] ++ opts)
+    TokenKeeper.start([role: :work, issue: 7, env: context.env, io: context.io] ++ opts)
   end
 
   defp eventually(fun, tries \\ 100) do
@@ -53,7 +53,7 @@ defmodule RsolvHost.TokenKeeperTest do
     end
   end
 
-  describe "start_link/1" do
+  describe "start/1" do
     test "exchanges once, masks the token, and serves it with its binding", context do
       Req.Test.stub(Platform, fn conn ->
         assert conn.request_path == "/api/v1/runs/token"
@@ -181,7 +181,80 @@ defmodule RsolvHost.TokenKeeperTest do
     end
   end
 
-  describe "start_link/1 with resume" do
+  describe "while a refresh is slow" do
+    test "token/1 keeps answering with the current token at once", context do
+      test = self()
+      first = "rsolv_rt_" <> String.duplicate("F", 43)
+
+      Req.Test.stub(Platform, fn conn ->
+        case conn.request_path do
+          "/api/v1/runs/token" ->
+            Req.Test.json(conn, token_json(first, 3_600))
+
+          "/api/v1/runs/token/refresh" ->
+            send(test, {:refreshing, self()})
+            assert_receive :release, 5_000
+            Req.Test.json(conn, token_json("rsolv_rt_" <> String.duplicate("S", 43), 3_600))
+        end
+      end)
+
+      {:ok, keeper} = start(context, refresh_margin_s: 3_599)
+      assert_receive {:refreshing, refresher}, 2_000
+
+      {micros, reply} = :timer.tc(fn -> TokenKeeper.token(keeper) end)
+
+      assert {:ok, %{raw: ^first}} = reply
+      assert micros < 500_000
+
+      send(refresher, :release)
+      eventually(fn -> match?({:ok, %{raw: "rsolv_rt_SSS" <> _}}, TokenKeeper.token(keeper)) end)
+    end
+  end
+
+  describe "when the keeper is gone" do
+    setup context do
+      Req.Test.stub(
+        Platform,
+        &Req.Test.json(
+          &1,
+          token_json("rsolv_rt_" <> String.duplicate("A", 43), 3_600)
+        )
+      )
+
+      {:ok, keeper} = start(context)
+      %{keeper: keeper}
+    end
+
+    test "token/1 is an explicit error, and the caller isn't taken down", %{keeper: keeper} do
+      Process.exit(keeper, :kill)
+
+      assert TokenKeeper.token(keeper) == {:error, :token_unavailable}
+    end
+
+    test "stop/1 is safe to call", %{keeper: keeper} do
+      Process.exit(keeper, :kill)
+
+      assert TokenKeeper.stop(keeper) == :ok
+    end
+
+    test "the keeper stops when the process that started it ends", context do
+      test = self()
+
+      owner =
+        spawn(fn ->
+          Process.put(:"$callers", [test])
+          {:ok, keeper} = start(context)
+          send(test, {:keeper, keeper})
+        end)
+
+      assert_receive {:keeper, keeper}, 2_000
+      ref = Process.monitor(keeper)
+      refute Process.alive?(owner)
+      assert_receive {:DOWN, ^ref, :process, ^keeper, _reason}, 2_000
+    end
+  end
+
+  describe "start/1 with resume" do
     test "refreshes the first attempt's token instead of exchanging", context do
       path = TokenKeeper.handoff_path(context.env, :work, 7)
       File.mkdir_p!(Path.dirname(path))

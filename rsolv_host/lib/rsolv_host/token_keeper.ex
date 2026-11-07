@@ -20,6 +20,7 @@ defmodule RsolvHost.TokenKeeper do
 
   @default_margin_s 300
   @default_retry_ms 30_000
+  @call_timeout_ms 15_000
 
   @type role :: :scan | :work | :publish
   @type served :: %{
@@ -33,32 +34,52 @@ defmodule RsolvHost.TokenKeeper do
   Exchanges (or, with `resume: true`, refreshes the hand-off token) and starts
   the keeper. Options: `:role`, `:issue` (`nil` for scan), `:env`, `:resume`,
   `:refresh_margin_s` (default 300), `:retry_ms` (default 30 s) and `:io`.
+
+  The keeper isn't linked to the caller: it monitors it and stops when it ends,
+  and a keeper that has died is `{:error, :token_unavailable}` from `token/1`
+  rather than an exit signal that takes the role down.
   """
-  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
-  def start_link(opts) do
+  @spec start(keyword()) :: {:ok, pid()} | {:error, term()}
+  def start(opts) do
     state = %{
       role: Keyword.fetch!(opts, :role),
       issue: Keyword.get(opts, :issue),
       env: Keyword.fetch!(opts, :env),
       io: Keyword.get(opts, :io, :stdio),
       margin_s: Keyword.get(opts, :refresh_margin_s, @default_margin_s),
-      retry_ms: Keyword.get(opts, :retry_ms, @default_retry_ms)
+      retry_ms: Keyword.get(opts, :retry_ms, @default_retry_ms),
+      refreshing: nil
     }
 
     with {:ok, req} <- Platform.req(state.env),
          state = Map.put(state, :req, req),
          {:ok, token} <- first_token(state, Keyword.get(opts, :resume, false)) do
       callers = [self() | Process.get(:"$callers", [])]
-      GenServer.start_link(__MODULE__, {state |> Map.merge(token) |> keep(), callers})
+      GenServer.start(__MODULE__, {state |> Map.merge(token) |> keep(), self(), callers})
     end
   end
 
   @doc """
-  The current run token with its binding and the platform request to use it with,
-  or `{:error, :token_expired}` once it has expired unrefreshed.
+  The current run token with its binding and the platform request to use it with.
+  It answers at once, also while a refresh is in flight. `{:error,
+  :token_expired}` once it has expired unrefreshed; `{:error,
+  :token_unavailable}` if the keeper is gone or doesn't answer within 15 s.
   """
-  @spec token(GenServer.server()) :: {:ok, served()} | {:error, :token_expired}
-  def token(keeper), do: GenServer.call(keeper, :token)
+  @spec token(GenServer.server()) ::
+          {:ok, served()} | {:error, :token_expired | :token_unavailable}
+  def token(keeper) do
+    GenServer.call(keeper, :token, @call_timeout_ms)
+  catch
+    :exit, _reason -> {:error, :token_unavailable}
+  end
+
+  @doc "Stops the keeper and any refresh in flight. Safe to call on a keeper that's gone."
+  @spec stop(GenServer.server()) :: :ok
+  def stop(keeper) do
+    GenServer.stop(keeper)
+  catch
+    :exit, _reason -> :ok
+  end
 
   @doc "Where the retry hand-off token for `role` and `issue` lives."
   @spec handoff_path(map(), role(), pos_integer() | nil) :: Path.t()
@@ -78,8 +99,9 @@ defmodule RsolvHost.TokenKeeper do
   end
 
   @impl true
-  def init({state, callers}) do
+  def init({state, owner, callers}) do
     Process.put(:"$callers", callers)
+    state = Map.put(state, :owner, Process.monitor(owner))
     {:ok, schedule(state, refresh_delay_ms(state))}
   end
 
@@ -93,17 +115,46 @@ defmodule RsolvHost.TokenKeeper do
     {:reply, reply, state}
   end
 
+  # The refresh runs in a monitored task, so the keeper keeps answering `token/1`.
   @impl true
-  def handle_info(:refresh, state) do
-    case refresh(state, state.raw) do
-      {:ok, token} ->
-        {:noreply,
-         state |> Map.merge(token) |> keep() |> then(&schedule(&1, refresh_delay_ms(&1)))}
+  def handle_info(:refresh, %{refreshing: nil} = state) do
+    request = Map.take(state, [:env, :io, :req, :raw])
 
-      {:error, _reason} ->
-        {:noreply, schedule(state, state.retry_ms)}
-    end
+    task =
+      Task.Supervisor.async_nolink(RsolvHost.TaskSupervisor, fn ->
+        refresh(request, request.raw)
+      end)
+
+    {:noreply, %{state | refreshing: task}}
   end
+
+  def handle_info({ref, result}, %{refreshing: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    refreshed(result, %{state | refreshing: nil})
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{refreshing: %Task{ref: ref}} = state),
+    do: refreshed({:error, :refresh_crashed}, %{state | refreshing: nil})
+
+  def handle_info({:DOWN, ref, :process, _owner, _reason}, %{owner: ref} = state),
+    do: {:stop, :normal, state}
+
+  # A late reply from a refresh that was already given up on, or a stray message.
+  def handle_info(_other, state), do: {:noreply, state}
+
+  defp refreshed({:ok, token}, state),
+    do:
+      {:noreply, state |> Map.merge(token) |> keep() |> then(&schedule(&1, refresh_delay_ms(&1)))}
+
+  defp refreshed({:error, _reason}, state), do: {:noreply, schedule(state, state.retry_ms)}
+
+  @impl true
+  def terminate(_reason, %{refreshing: %Task{} = task}) do
+    Task.shutdown(task, :brutal_kill)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   defp first_token(state, false) do
     with {:ok, jwt} <- Oidc.fetch(state.env, io: state.io),

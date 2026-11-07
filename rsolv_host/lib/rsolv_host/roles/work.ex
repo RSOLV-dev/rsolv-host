@@ -35,7 +35,7 @@ defmodule RsolvHost.Roles.Work do
     with {:ok, run_id} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
          {:ok, workspace} <- env_value(env, "GITHUB_WORKSPACE", ~r/\A\//),
          {:ok, keeper} <-
-           TokenKeeper.start_link(role: :work, issue: issue, env: env, resume: resume?, io: io) do
+           TokenKeeper.start(role: :work, issue: issue, env: env, resume: resume?, io: io) do
       ctx = %{
         issue: issue,
         env: env,
@@ -50,7 +50,7 @@ defmodule RsolvHost.Roles.Work do
       try do
         prepare(ctx)
       after
-        GenServer.stop(keeper)
+        TokenKeeper.stop(keeper)
       end
     end
   end

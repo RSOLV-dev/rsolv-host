@@ -27,7 +27,7 @@ defmodule RsolvHost.Roles.Publish do
          {:ok, attempt} <- int_env(env, "GITHUB_RUN_ATTEMPT"),
          {:ok, gh} <- GitHub.new(env),
          {:ok, check_run_id} <- check_run_id(env, io),
-         {:ok, keeper} <- TokenKeeper.start_link(role: :publish, issue: issue, env: env, io: io) do
+         {:ok, keeper} <- TokenKeeper.start(role: :publish, issue: issue, env: env, io: io) do
       expect = %{
         "run_id" => run_id,
         "repository_id" => repository_id,
@@ -39,7 +39,7 @@ defmodule RsolvHost.Roles.Publish do
       try do
         publish(%{gh: gh, keeper: keeper, issue: issue, keys: keys, expect: expect})
       after
-        GenServer.stop(keeper)
+        TokenKeeper.stop(keeper)
       end
     end
   end

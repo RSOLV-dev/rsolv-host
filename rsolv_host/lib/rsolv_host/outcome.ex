@@ -74,6 +74,7 @@ defmodule RsolvHost.Outcome do
 
   def classify({:transport, _reason}), do: :transient
   def classify(:token_expired), do: :transient
+  def classify(:token_unavailable), do: :transient
   def classify({:session, _data}), do: :transient
   def classify(:stream_exhausted), do: :transient
   def classify({:sandbox_setup, _step}), do: :sandbox

@@ -31,7 +31,7 @@ defmodule RsolvHost.Roles.Scan do
          {:ok, run_id} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
          {:ok, workspace} <- env_value(env, "GITHUB_WORKSPACE", ~r/\A\//),
          {:ok, gh} <- GitHub.new(env),
-         {:ok, keeper} <- TokenKeeper.start_link(role: :scan, env: env, io: io) do
+         {:ok, keeper} <- TokenKeeper.start(role: :scan, env: env, io: io) do
       ctx = %{
         env: env,
         deps: deps,
@@ -44,7 +44,7 @@ defmodule RsolvHost.Roles.Scan do
       try do
         scan(ctx, workspace)
       after
-        GenServer.stop(keeper)
+        TokenKeeper.stop(keeper)
       end
     end
   end

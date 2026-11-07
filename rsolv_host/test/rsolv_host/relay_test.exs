@@ -55,7 +55,7 @@ defmodule RsolvHost.RelayTest do
     end)
 
     {:ok, keeper} =
-      TokenKeeper.start_link(role: :work, issue: 7, env: context.env, io: context.io)
+      TokenKeeper.start(role: :work, issue: 7, env: context.env, io: context.io)
 
     keeper
   end

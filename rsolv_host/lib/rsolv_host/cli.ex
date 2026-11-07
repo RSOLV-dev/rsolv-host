@@ -74,6 +74,8 @@ defmodule RsolvHost.CLI do
     end
   rescue
     exception -> {:error, {:unexpected, exception}}
+  catch
+    kind, _reason -> {:error, {:unexpected, kind}}
   end
 
   @doc false

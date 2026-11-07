@@ -56,7 +56,7 @@ defmodule RsolvHost.ScanRelayTest do
   # Serves `frames` (the sandbox's side) and returns the relay's result and replies.
   defp serve(context, frames, opts \\ []) do
     platform(Keyword.get(opts, :platform, fn _conn -> nil end))
-    {:ok, keeper} = TokenKeeper.start_link(role: :scan, env: context.env, io: context.io)
+    {:ok, keeper} = TokenKeeper.start(role: :scan, env: context.env, io: context.io)
     {:ok, gh} = GitHub.new(context.env)
     for frame <- frames, do: send(self(), {self(), {:data, Frame.encode(frame)}})
 
@@ -351,7 +351,7 @@ defmodule RsolvHost.ScanRelayTest do
 
     test "a malformed frame ends the relay", context do
       platform()
-      {:ok, keeper} = TokenKeeper.start_link(role: :scan, env: context.env, io: context.io)
+      {:ok, keeper} = TokenKeeper.start(role: :scan, env: context.env, io: context.io)
       {:ok, gh} = GitHub.new(context.env)
       send(self(), {self(), {:data, "x\n{}"}})
 
@@ -376,7 +376,7 @@ defmodule RsolvHost.ScanRelayTest do
 
     test "the scanner exiting before done is a sandbox failure", context do
       platform()
-      {:ok, keeper} = TokenKeeper.start_link(role: :scan, env: context.env, io: context.io)
+      {:ok, keeper} = TokenKeeper.start(role: :scan, env: context.env, io: context.io)
       {:ok, gh} = GitHub.new(context.env)
       send(self(), {self(), {:exit_status, 1}})
 

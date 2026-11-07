@@ -58,6 +58,21 @@ defmodule RsolvHost.CLITest do
       refute out =~ "secret detail"
     end
 
+    test "when the role exits or throws, annotates a host bug and exits 1, logging no reason" do
+      for role <- [
+            fn _opts, _env -> exit({:timeout, {GenServer, :call, ["secret detail"]}}) end,
+            fn _opts, _env -> throw("secret detail") end
+          ] do
+        out =
+          capture_io(fn ->
+            assert CLI.main(["work", "--issue", "7"], @env, @root, commands: commands(role)) == 1
+          end)
+
+        assert out =~ "::error title=RSOLV host client bug::"
+        refute out =~ "secret detail"
+      end
+    end
+
     test "when the role reaches a model outcome, reports it and exits 0", %{tmp_dir: dir} do
       env = Map.put(@env, "GITHUB_OUTPUT", Path.join(dir, "out"))
       done = fn %{issue: 7}, ^env -> {:outcome, :mitigated, true} end
