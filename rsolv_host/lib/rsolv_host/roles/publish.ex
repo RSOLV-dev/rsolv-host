@@ -88,8 +88,8 @@ defmodule RsolvHost.Roles.Publish do
          :ok <- GitTree.check_base(ctx.gh, verified.decision["base_sha"], verified.change_set),
          :ok <- on_target(ctx, verified.decision),
          {:ok, commits} <- write_commits(ctx, verified.decision, verified.change_set, images),
-         {:ok, commits} <- branch(ctx, verified.decision, commits) do
-      open_pull(ctx, verified.decision, bodies, commits)
+         {:ok, pull} <- earlier_pull(ctx, verified.decision, bodies, commits) do
+      finish(ctx, verified.decision, bodies, commits, pull)
     else
       {:ok, _unbound} -> {:error, :run_unbound}
       error -> error
@@ -261,16 +261,24 @@ defmodule RsolvHost.Roles.Publish do
     end
   end
 
-  defp existing_branch(ctx, %{"branch" => branch, "effects" => effects}, commits) do
+  defp existing_branch(ctx, %{"branch" => branch} = decision, commits) do
     with {:ok, fix} <- GitHub.get_ref(ctx.gh, branch),
-         {:ok, fix_commit} <- GitHub.get_commit(ctx.gh, fix),
+         do: signed_chain(ctx, decision, commits, fix, :branch_collision)
+  end
+
+  # The commits from `fix` down, if they are exactly the two signed commits on
+  # the base: the fix (signed message, our fix tree) whose only parent is the
+  # RED commit (signed message, our RED tree) whose only parent is the base.
+  defp signed_chain(ctx, %{"effects" => effects}, commits, fix, collision) do
+    with {:ok, fix_commit} <- GitHub.get_commit(ctx.gh, fix),
          {:ok, red} <- parent(fix_commit, effects["fix_commit_message"], commits.fix_tree),
          {:ok, red_commit} <- GitHub.get_commit(ctx.gh, red),
          {:ok, base} <- parent(red_commit, effects["red_commit_message"], commits.red_tree),
          true <- base == commits.base do
       {:ok, %{commits | red: red, fix: fix}}
     else
-      false -> {:error, :branch_collision}
+      false -> {:error, collision}
+      {:error, :not_signed} -> {:error, collision}
       error -> error
     end
   end
@@ -283,20 +291,70 @@ defmodule RsolvHost.Roles.Publish do
        when is_binary(parent),
        do: {:ok, parent}
 
-  defp parent(_commit, _message, _tree), do: {:error, :branch_collision}
+  defp parent(_commit, _message, _tree), do: {:error, :not_signed}
 
-  defp open_pull(ctx, decision, bodies, commits) do
-    effects = decision["effects"]
-
-    wanted = %{
-      "title" => effects["pr_title"],
+  defp wanted(decision, bodies),
+    do: %{
+      "title" => decision["effects"]["pr_title"],
       "body" => bodies.pr_body,
       "head" => decision["branch"],
       "base" => decision["target_branch"]
     }
 
-    with {:ok, %{"number" => number, "html_url" => url} = pull} <- pull(ctx, wanted, commits),
-         :ok <- labels(ctx, pull, effects["labels"]),
+  # A pull request an earlier attempt opened from the branch decides what
+  # happens, before anything visible is written (RFC-150 §6.3):
+  #
+  #   * open, or none: the branch and the pull request are made or reused;
+  #   * merged: the fix is in. That pull request, if it is the signed one
+  #     (fields and its head's commit chain), is reported as published:
+  #     nothing is written but missing labels and comments. Its branch may
+  #     be gone, deleted on merge;
+  #   * closed unmerged, and none open: someone rejected the fix, and a
+  #     re-run doesn't overrule them: `{:error, :pull_closed}` (exit 2) until
+  #     the pull request is reopened.
+  defp earlier_pull(ctx, decision, bodies, commits) do
+    %{"head" => head} = wanted = wanted(decision, bodies)
+
+    with {:ok, pulls} <- GitHub.list_pulls(ctx.gh, head, wanted["base"]) do
+      pulls = Enum.filter(pulls, &match?(%{"head" => %{"ref" => ^head}}, &1))
+
+      cond do
+        pulls == [] or Enum.any?(pulls, &(&1["state"] == "open")) ->
+          {:ok, :none}
+
+        merged = Enum.find(pulls, &is_binary(&1["merged_at"])) ->
+          merged(ctx, merged, decision, wanted, commits)
+
+        true ->
+          {:error, :pull_closed}
+      end
+    end
+  end
+
+  defp merged(ctx, pull, decision, wanted, commits) do
+    with {:ok, %{"head" => %{"sha" => fix}}} when is_binary(fix) <-
+           checked_fields(pull, wanted),
+         true <- fix =~ ~r/\A[0-9a-f]{40}\z/,
+         {:ok, commits} <- signed_chain(ctx, decision, commits, fix, :pull_collision) do
+      {:ok, {:merged, pull, commits}}
+    else
+      {:ok, _no_head} -> {:error, :malformed_response}
+      false -> {:error, :malformed_response}
+      error -> error
+    end
+  end
+
+  defp finish(ctx, decision, bodies, _commits, {:merged, pull, commits}),
+    do: effects(ctx, decision, bodies, commits, pull)
+
+  defp finish(ctx, decision, bodies, commits, :none) do
+    with {:ok, commits} <- branch(ctx, decision, commits),
+         {:ok, pull} <- pull(ctx, wanted(decision, bodies), commits),
+         do: effects(ctx, decision, bodies, commits, pull)
+  end
+
+  defp effects(ctx, decision, bodies, commits, %{"number" => number, "html_url" => url} = pull) do
+    with :ok <- labels(ctx, pull, decision["effects"]["labels"]),
          :ok <- comments(ctx, bodies.comments) do
       Platform.published(ctx.req, ctx.raw, ctx.run, ctx.issue, %{
         decision_id: decision["decision_id"],
@@ -309,7 +367,7 @@ defmodule RsolvHost.Roles.Publish do
     end
   end
 
-  # An existing pull request from the branch is reused if it is the signed one;
+  # An open pull request from the branch is reused if it is the signed one;
   # a 422 from creating one (it exists, an earlier answer was lost) is looked up
   # again, once.
   defp pull(ctx, wanted, commits) do
@@ -333,7 +391,7 @@ defmodule RsolvHost.Roles.Publish do
   defp find_pull(ctx, %{"head" => head} = wanted, commits) do
     with {:ok, pulls} <- GitHub.list_pulls(ctx.gh, head, wanted["base"]) do
       pulls
-      |> Enum.filter(&match?(%{"head" => %{"ref" => ^head}}, &1))
+      |> Enum.filter(&match?(%{"head" => %{"ref" => ^head}, "state" => "open"}, &1))
       |> case do
         [] -> {:ok, nil}
         [pull | _older] -> checked_pull(pull, wanted, commits)
@@ -341,7 +399,13 @@ defmodule RsolvHost.Roles.Publish do
     end
   end
 
-  defp checked_pull(
+  defp checked_pull(pull, wanted, commits) do
+    with {:ok, pull} <- checked_fields(pull, wanted) do
+      if pull["head"]["sha"] == commits.fix, do: {:ok, pull}, else: {:error, :pull_collision}
+    end
+  end
+
+  defp checked_fields(
          %{
            "number" => number,
            "html_url" => url,
@@ -350,18 +414,16 @@ defmodule RsolvHost.Roles.Publish do
            "head" => %{"ref" => head},
            "base" => %{"ref" => base}
          } = pull,
-         %{"title" => title, "body" => body, "head" => head, "base" => base},
-         commits
+         %{"title" => title, "body" => body, "head" => head, "base" => base}
        )
-       when is_integer(number) and is_binary(url) do
-    if pull["head"]["sha"] == commits.fix, do: {:ok, pull}, else: {:error, :pull_collision}
-  end
+       when is_integer(number) and is_binary(url),
+       do: {:ok, pull}
 
-  defp checked_pull(%{"number" => number, "html_url" => url}, _wanted, _commits)
+  defp checked_fields(%{"number" => number, "html_url" => url}, _wanted)
        when is_integer(number) and is_binary(url),
        do: {:error, :pull_collision}
 
-  defp checked_pull(_malformed, _wanted, _commits), do: {:error, :malformed_response}
+  defp checked_fields(_malformed, _wanted), do: {:error, :malformed_response}
 
   # Adding labels is a union on GitHub; only the missing ones are sent.
   defp labels(ctx, %{"number" => number} = pull, wanted) do

@@ -65,6 +65,7 @@ defmodule RsolvHost.Outcome do
   def classify(:branch_collision), do: :configuration
   def classify(:base_not_on_target), do: :configuration
   def classify(:pull_collision), do: :configuration
+  def classify(:pull_closed), do: :configuration
 
   def classify({:platform, 409, "already_exchanged"}), do: :transient
 
@@ -161,6 +162,10 @@ defmodule RsolvHost.Outcome do
   defp message(:pull_collision, _class),
     do:
       "A pull request from the fix branch already exists and isn't the one RSOLV signed. Close it, delete the branch and re-run the issue's workflow."
+
+  defp message(:pull_closed, _class),
+    do:
+      "The pull request RSOLV opened for this fix was closed without being merged, so RSOLV won't publish the fix again. To publish it, reopen the pull request and re-run the issue's workflow."
 
   defp message(:run_unbound, _class),
     do:

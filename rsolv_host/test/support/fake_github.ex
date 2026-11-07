@@ -118,6 +118,32 @@ defmodule RsolvHost.FakeGithub do
   def put_pull(agent, request),
     do: Agent.update(agent, fn state -> state |> open_pull(request) |> elem(1) end)
 
+  @doc """
+  Closes pull request `number`, merged or not. Merging deletes its branch, as
+  GitHub's auto-delete does; the pull request keeps its head SHA.
+  """
+  @spec close_pull(pid(), pos_integer(), :merged | :unmerged) :: :ok
+  def close_pull(agent, number, how) do
+    Agent.update(agent, fn state ->
+      pulls =
+        Enum.map(state.pulls, fn
+          %{number: ^number} = pull ->
+            head = state.refs["refs/heads/" <> pull.request["head"]]
+            %{pull | state: "closed", merged: how == :merged, head_sha: head}
+
+          pull ->
+            pull
+        end)
+
+      [%{request: %{"head" => branch}}] = Enum.filter(pulls, &(&1.number == number))
+
+      refs =
+        if how == :merged, do: Map.delete(state.refs, "refs/heads/" <> branch), else: state.refs
+
+      %{state | pulls: pulls, refs: refs}
+    end)
+  end
+
   @doc "Posts a comment on issue `number` as `login` (someone other than the host)."
   @spec put_comment(pid(), pos_integer(), String.t(), String.t()) :: :ok
   def put_comment(agent, number, body, login),
@@ -413,6 +439,8 @@ defmodule RsolvHost.FakeGithub do
       number: number,
       request: request,
       state: "open",
+      merged: false,
+      head_sha: nil,
       labels: []
     }
 
@@ -422,15 +450,19 @@ defmodule RsolvHost.FakeGithub do
   defp same_pull?(%{request: request}, %{"head" => head, "base" => base}),
     do: request["head"] == head and request["base"] == base
 
-  # As on GitHub, a pull request's head is wherever its branch points now.
+  # As on GitHub, an open pull request's head is wherever its branch points now.
   defp pull_json(state, pull) do
     %{
       number: pull.number,
       html_url: "https://github.com/acme/app/pull/#{pull.number}",
       state: pull.state,
+      merged_at: if(pull.merged, do: "2026-11-06T00:00:00Z"),
       title: pull.request["title"],
       body: pull.request["body"],
-      head: %{ref: pull.request["head"], sha: state.refs["refs/heads/" <> pull.request["head"]]},
+      head: %{
+        ref: pull.request["head"],
+        sha: pull.head_sha || state.refs["refs/heads/" <> pull.request["head"]]
+      },
       base: %{ref: pull.request["base"]},
       labels: Enum.map(pull.labels, &%{name: &1})
     }

@@ -546,6 +546,64 @@ defmodule RsolvHost.Roles.PublishTest do
       refute_received {:published, _}
     end
 
+    test "after its PR was merged (and the branch deleted), reports that PR and writes nothing visible",
+         context do
+      platform(context, published: {503, %{}})
+      {:error, {:platform, 503, nil}} = run(context)
+      assert_received {:published, _first}
+      {red, fix} = chain(context)
+      FakeGithub.close_pull(context.gh, 100, :merged)
+
+      platform(context)
+      assert run(context) == :ok
+
+      assert Enum.count(posts(context.gh), &(&1 in ["/git/refs", "/pulls"])) == 2
+      assert %{pulls: [_one], comments: [_one_comment]} = FakeGithub.writes(context.gh)
+
+      assert_received {:published,
+                       %{"pr_number" => 100, "red_commit_sha" => ^red, "fix_commit_sha" => ^fix}}
+    end
+
+    test "refuses a merged PR from the branch whose head isn't the signed commits", context do
+      platform(context)
+      FakeGithub.put_ref(context.gh, @branch, context.base)
+
+      FakeGithub.put_pull(context.gh, %{
+        "title" => "Fix SQL injection in lib/app.rb",
+        "body" => @pr_body,
+        "head" => @branch,
+        "base" => "main"
+      })
+
+      FakeGithub.close_pull(context.gh, 100, :merged)
+
+      result = run(context)
+
+      assert result == {:error, :pull_collision}
+      assert Outcome.exit_code(result) == 2
+      refute Enum.any?(posts(context.gh), &(&1 in ["/git/refs", "/pulls"]))
+      refute_received {:published, _}
+    end
+
+    test "after its PR was closed unmerged, refuses: closing it rejected the fix", context do
+      platform(context, published: {503, %{}})
+      {:error, {:platform, 503, nil}} = run(context)
+      assert_received {:published, _first}
+      FakeGithub.close_pull(context.gh, 100, :unmerged)
+      writes = FakeGithub.writes(context.gh)
+      before = length(posts(context.gh))
+
+      platform(context)
+      result = run(context)
+
+      assert result == {:error, :pull_closed}
+      assert Outcome.exit_code(result) == 2
+      assert FakeGithub.writes(context.gh) == writes
+
+      refute Enum.any?(Enum.drop(posts(context.gh), before), &(&1 in ["/git/refs", "/pulls"]))
+      refute_received {:published, _}
+    end
+
     test "refuses a branch with the fix's tree but another history", context do
       platform(context)
       :ok = run(context)
