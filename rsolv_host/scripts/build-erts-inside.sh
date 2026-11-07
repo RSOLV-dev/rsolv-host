@@ -5,12 +5,13 @@
 # Burrito copies erts-*/bin and every */lib/**/*.so from it into the release.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C TZ=UTC
-case $ARCH in x86_64) archive=ubuntu ;; aarch64) archive=ubuntu-ports ;; esac
 # The snapshot service is HTTPS-only, so CA certificates come first (from the
 # live archive; they don't reach the build output). Then every build package
-# at the version the archive held at $APT_SNAPSHOT.
+# at the version the archive held at $APT_SNAPSHOT. The snapshot's "ubuntu"
+# archive serves every architecture, arm64 included (its "ubuntu-ports" path
+# answers 401).
 apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates >/dev/null
-sed -i -E "s#https?://(archive|security|ports)\.ubuntu\.com/[a-z-]+/?#https://snapshot.ubuntu.com/$archive/$APT_SNAPSHOT/#" /etc/apt/sources.list
+sed -i -E "s#https?://(archive|security|ports)\.ubuntu\.com/[a-z-]+/?#https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT/#" /etc/apt/sources.list
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends build-essential autoconf libncurses-dev curl perl >/dev/null
 cd /tmp
