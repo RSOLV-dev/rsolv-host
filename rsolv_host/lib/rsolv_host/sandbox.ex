@@ -68,13 +68,18 @@ defmodule RsolvHost.Sandbox do
   defp network(:proxy, network), do: network
   defp network(:none, _network), do: "none"
 
+  # Only the sandbox's own loopback skips the proxy. An empty NO_PROXY makes
+  # Mix/Hex bypass the proxy entirely, and with no direct egress it then fails.
+  @no_proxy "localhost,127.0.0.1"
+
   defp proxy_env(:none, _ip), do: []
 
   defp proxy_env(:proxy, ip) do
     url = "http://#{ip}:3128"
 
     ["-e", "HTTP_PROXY=" <> url, "-e", "HTTPS_PROXY=" <> url] ++
-      ["-e", "http_proxy=" <> url, "-e", "https_proxy=" <> url, "-e", "NO_PROXY="]
+      ["-e", "http_proxy=" <> url, "-e", "https_proxy=" <> url] ++
+      ["-e", "NO_PROXY=" <> @no_proxy, "-e", "no_proxy=" <> @no_proxy]
   end
 
   @doc """
