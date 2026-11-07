@@ -9,8 +9,9 @@ defmodule RsolvHost.Roles.Publish do
   signed digests; check the base tree and that the target branch still contains
   `base_sha`; write the RED commit (exactly the `red_paths`) on `base_sha` and
   the fix commit on it; check both written trees; create the branch; open the
-  pull request with its labels and comments; report it. Every refusal before the first write is configuration (exit 2): the remedy
-  is re-running the issue's workflow for a fresh decision.
+  pull request with its labels and comments; report it. Every refusal before the
+  first write is configuration (exit 2): the remedy is re-running the issue's
+  workflow for a fresh decision.
   """
 
   alias RsolvCore.{ChangeSet, Decision}
@@ -79,16 +80,39 @@ defmodule RsolvHost.Roles.Publish do
            TokenKeeper.token(ctx.keeper),
          ctx = Map.merge(ctx, %{req: req, raw: raw, run: run}),
          {:ok, verified} <- decision(ctx),
+         {:ok, deadline, 0} <- DateTime.from_iso8601(verified.decision["expires_at"]),
+         ctx = Map.put(ctx, :deadline, deadline),
          {:ok, bodies} <- bodies(verified),
+         {:ok, ctx} <- live(ctx),
          {:ok, images} <- post_images(ctx, verified.change_set),
          :ok <- GitTree.check_base(ctx.gh, verified.decision["base_sha"], verified.change_set),
          :ok <- on_target(ctx, verified.decision),
+         {:ok, ctx} <- live(ctx),
          {:ok, commits} <- write_commits(ctx, verified.decision, verified.change_set, images),
+         {:ok, ctx} <- live(ctx),
          :ok <- branch(ctx, verified.decision["branch"], commits) do
       open_pull(ctx, verified.decision, bodies, commits)
     else
       {:ok, _unbound} -> {:error, :run_unbound}
       error -> error
+    end
+  end
+
+  # The decision authorizes writes only until its `expires_at` (RFC-150 §6.1):
+  # this is checked before each step that writes, and every request's wait is
+  # bounded by the time left.
+  defp live(%{deadline: deadline} = ctx) do
+    case DateTime.diff(deadline, DateTime.utc_now(), :millisecond) do
+      left when left > 0 ->
+        {:ok,
+         %{
+           ctx
+           | gh: %{ctx.gh | req: Req.merge(ctx.gh.req, receive_timeout: min(left, 60_000))},
+             req: Req.merge(ctx.req, receive_timeout: min(left, 120_000))
+         }}
+
+      _expired ->
+        {:error, :expired}
     end
   end
 
@@ -237,7 +261,8 @@ defmodule RsolvHost.Roles.Publish do
   defp open_pull(ctx, decision, bodies, commits) do
     effects = decision["effects"]
 
-    with {:ok, %{"number" => number, "html_url" => url}}
+    with {:ok, ctx} <- live(ctx),
+         {:ok, %{"number" => number, "html_url" => url}}
          when is_integer(number) and is_binary(url) <-
            GitHub.create_pull(ctx.gh, %{
              "title" => effects["pr_title"],
@@ -245,8 +270,10 @@ defmodule RsolvHost.Roles.Publish do
              "head" => decision["branch"],
              "base" => decision["target_branch"]
            }),
+         {:ok, ctx} <- live(ctx),
          :ok <- labels(ctx, number, effects["labels"]),
-         :ok <- comments(ctx, bodies.comments) do
+         :ok <- comments(ctx, bodies.comments),
+         {:ok, ctx} <- live(ctx) do
       Platform.published(ctx.req, ctx.raw, ctx.run, ctx.issue, %{
         decision_id: decision["decision_id"],
         pr_number: number,
@@ -266,10 +293,14 @@ defmodule RsolvHost.Roles.Publish do
 
   defp comments(ctx, comments) do
     Enum.reduce_while(comments, :ok, fn {issue, body}, :ok ->
-      case GitHub.comment(ctx.gh, issue, body) do
+      case comment(ctx, issue, body) do
         :ok -> {:cont, :ok}
         error -> {:halt, error}
       end
     end)
+  end
+
+  defp comment(ctx, issue, body) do
+    with {:ok, ctx} <- live(ctx), do: GitHub.comment(ctx.gh, issue, body)
   end
 end

@@ -180,6 +180,8 @@ defmodule RsolvHost.Roles.PublishTest do
           end).(conn)
 
         {"GET", "/api/v1/runs/" <> @run <> "/issues/7/post-images"} ->
+          Process.sleep(Keyword.get(opts, :images_delay_ms, 0))
+
           Req.Test.json(conn, %{
             files: Map.new(images, fn {path, bytes} -> {path, Base.encode64(bytes)} end)
           })
@@ -365,6 +367,37 @@ defmodule RsolvHost.Roles.PublishTest do
       )
 
       refused(context, :publish_unavailable)
+    end
+  end
+
+  describe "run/3 and the decision's expiry" do
+    # A decision valid for 1 to 2 more seconds, and how long to wait past it.
+    defp short_lived(context) do
+      expires = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.add(2)
+      wait_ms = DateTime.diff(expires, DateTime.utc_now(), :millisecond) + 200
+      {decision(context, %{"expires_at" => DateTime.to_iso8601(expires)}), wait_ms}
+    end
+
+    test "when the post-images arrive after it, writes nothing", context do
+      {decision, wait_ms} = short_lived(context)
+      platform(context, decision: decision, images_delay_ms: wait_ms)
+
+      result = run(context)
+
+      assert result == {:error, :expired}
+      assert Outcome.exit_code(result) == 2
+      assert posts(context.gh) == []
+      refute_received {:published, _}
+    end
+
+    test "when a GitHub write returns after it, starts no other write", context do
+      {decision, wait_ms} = short_lived(context)
+      platform(context, decision: decision)
+      FakeGithub.delay(context.gh, "POST", "/git/refs", wait_ms)
+
+      assert run(context) == {:error, :expired}
+      assert %{pulls: [], labels: [], comments: []} = FakeGithub.writes(context.gh)
+      refute_received {:published, _}
     end
   end
 

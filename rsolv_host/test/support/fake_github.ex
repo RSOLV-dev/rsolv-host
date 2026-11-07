@@ -27,7 +27,8 @@ defmodule RsolvHost.FakeGithub do
           comments: [],
           compare: "identical",
           tamper: nil,
-          truncated: false
+          truncated: false,
+          delays: %{}
         }
       end)
 
@@ -80,6 +81,11 @@ defmodule RsolvHost.FakeGithub do
   @spec compare(pid(), String.t() | :not_found) :: :ok
   def compare(agent, status), do: Agent.update(agent, &%{&1 | compare: status})
 
+  @doc "Delays GitHub's answer to every `method` request to `path` by `ms` (a slow write)."
+  @spec delay(pid(), String.t(), String.t(), non_neg_integer()) :: :ok
+  def delay(agent, method, path, ms),
+    do: Agent.update(agent, &put_in(&1.delays[{method, path}], ms))
+
   @doc "Makes every tree listing say `truncated: true`."
   @spec truncate(pid()) :: :ok
   def truncate(agent), do: Agent.update(agent, &%{&1 | truncated: true})
@@ -121,6 +127,7 @@ defmodule RsolvHost.FakeGithub do
     @repo <> path = conn.request_path
     Agent.update(agent, &%{&1 | requests: [{conn.method, path} | &1.requests]})
     {status, json} = Agent.get_and_update(agent, &route(&1, conn.method, path, body))
+    agent |> Agent.get(& &1.delays[{conn.method, path}]) |> then(&Process.sleep(&1 || 0))
     conn |> Plug.Conn.put_status(status) |> Req.Test.json(json)
   end
 
