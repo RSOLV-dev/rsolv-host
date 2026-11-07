@@ -296,6 +296,27 @@ defmodule RsolvHost.ScanRelayTest do
                        }}
     end
 
+    test "create_issue breaks @mentions in the body, so a scan can't ping anyone", context do
+      github(&created/1)
+
+      body = "cc @octocat and @acme/security-team, see https://x.example/@y, mail a@b.example"
+
+      frames = [
+        %{
+          "call" => "create_issue",
+          "args" => %{"title" => "t", "body" => body, "labels" => ["security"]}
+        },
+        done()
+      ]
+
+      serve(context, frames)
+
+      assert_received {:created, %{"body" => posted}}
+
+      assert posted ==
+               "cc @\u200Boctocat and @\u200Bacme/security-team, see https://x.example/@y, mail a@b.example"
+    end
+
     test "create_issue refuses an oversized title or body, or a foreign label", context do
       github(fn _conn -> flunk("no GitHub call expected") end)
 
@@ -416,6 +437,23 @@ defmodule RsolvHost.ScanRelayTest do
 
       assert result == {:error, :frame_too_large}
       assert RsolvHost.Outcome.exit_code(result) == 4
+    end
+
+    test "done naming more issues than --max-issues is refused, existing ones included",
+         context do
+      github(fn conn ->
+        Req.Test.json(
+          conn,
+          for(n <- 1..3, do: %{number: n, title: "t", state: "open", labels: []})
+        )
+      end)
+
+      list = %{"call" => "list_issues", "args" => %{"labels" => ["rsolv:detected"]}}
+      issues = for n <- 1..3, do: %{"number" => n}
+
+      {result, _replies} = serve(context, [list, done(issues)], max_issues: 2)
+
+      assert result == {:error, :too_many_issues}
     end
 
     test "done naming an issue the relay never saw is refused", context do

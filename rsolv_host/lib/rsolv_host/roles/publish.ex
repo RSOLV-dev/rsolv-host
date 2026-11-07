@@ -82,6 +82,7 @@ defmodule RsolvHost.Roles.Publish do
          {:ok, verified} <- decision(ctx),
          {:ok, deadline, 0} <- DateTime.from_iso8601(verified.decision["expires_at"]),
          ctx = Map.put(ctx, :deadline, deadline),
+         :ok <- no_workflow_paths(verified.change_set),
          {:ok, bodies} <- bodies(verified),
          {:ok, ctx} <- live(ctx),
          {:ok, images} <- post_images(ctx, verified.change_set),
@@ -127,6 +128,14 @@ defmodule RsolvHost.Roles.Publish do
       error ->
         error
     end
+  end
+
+  # Defence in depth: the platform never signs a change under .github/ (CI
+  # configuration), and the host refuses one anyway, whatever its case.
+  defp no_workflow_paths(change_set) do
+    if Enum.any?(change_set, &(String.downcase(&1.path) =~ ~r{\A\.github(/|\z)})),
+      do: {:error, :workflow_path},
+      else: :ok
   end
 
   # The unsigned bodies, each checked against its signed digest.

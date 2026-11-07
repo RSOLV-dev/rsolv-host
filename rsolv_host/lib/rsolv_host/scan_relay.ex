@@ -11,7 +11,8 @@ defmodule RsolvHost.ScanRelay do
   `IssueCreator` produces, and caps the number of issues, counting every
   creation attempted (a creation whose answer was lost may still have happened). A policy refusal is
   answered and the relay goes on; a refusal from the platform or GitHub ends it
-  with that error. `list_issues` answers with each issue's `number`, `title`,
+  with that error. `done` may name at most `max_issues` issues, existing ones
+  included. `list_issues` answers with each issue's `number`, `title`,
   `state`, `html_url` and label names only.
 
   The frame channel is the scanner's stdout and stderr merged (a Port can't
@@ -188,6 +189,10 @@ defmodule RsolvHost.ScanRelay do
     end
   end
 
+  defp handle("done", %{"issues" => issues}, %{max_issues: max})
+       when is_list(issues) and length(issues) > max,
+       do: {:error, :too_many_issues}
+
   defp handle("done", %{"issues" => issues} = args, state)
        when is_list(issues) and length(issues) <= @max_done_issues do
     if Enum.all?(issues, &match?(%{"number" => n} when is_integer(n), &1)) and
@@ -258,6 +263,11 @@ defmodule RsolvHost.ScanRelay do
     end)
   end
 
+  # A zero-width space after `@` keeps the text readable but stops GitHub
+  # notifying the user or team. An `@` inside a word, an email or a URL path
+  # isn't a mention and is left alone; links are kept as they are.
+  defp unmention(body), do: String.replace(body, ~r/(?<![\w\/.-])@(?=[A-Za-z0-9])/u, "@\u200B")
+
   defp issue?(title, body, labels)
        when is_binary(title) and is_binary(body) and is_list(labels) do
     byte_size(title) in 1..@max_title_bytes and Text.plain?(title) and
@@ -269,7 +279,7 @@ defmodule RsolvHost.ScanRelay do
   defp issue?(_title, _body, _labels), do: false
 
   defp create_issue(state, args) do
-    case GitHub.create_issue(state.github, args) do
+    case GitHub.create_issue(state.github, Map.update!(args, "body", &unmention/1)) do
       {:ok, %{"number" => number} = issue} when is_integer(number) ->
         reply = %{"ok" => %{"number" => number, "html_url" => issue["html_url"]}}
 

@@ -361,6 +361,34 @@ defmodule RsolvHost.Roles.PublishTest do
       refused(context, {:github, 404, :not_found})
     end
 
+    test "a change set that touches .github/, whatever its case", context do
+      for path <- [".github/workflows/ci.yml", ".GitHub/workflows/ci.yml", ".github/CODEOWNERS"] do
+        entries = [
+          %Entry{
+            path: path,
+            op: :add,
+            base_mode: nil,
+            base_blob_sha: nil,
+            mode: "100644",
+            new_blob_sha: blob("on: push\n")
+          }
+          | change_set()
+        ]
+
+        entries = Enum.sort_by(entries, & &1.path)
+
+        decision =
+          decision(context, %{
+            "change_set" => ChangeSet.to_json(entries),
+            "change_set_digest" => ChangeSet.digest(entries)
+          })
+
+        platform(context, decision: decision, images: Map.put(@post_images, path, "on: push\n"))
+
+        refused(context, :workflow_path)
+      end
+    end
+
     test "a platform that doesn't serve decisions yet", context do
       platform(context,
         decision_response: &Plug.Conn.send_resp(&1, 404, ~s({"error":"not_found"}))

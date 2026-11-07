@@ -10,4 +10,16 @@ defmodule RsolvHost.ReleaseConfigTest do
       assert "-env ERL_CRASH_DUMP_SECONDS 0" in lines
     end
   end
+
+  describe "the release's steps" do
+    test "are Mix's own or functions that exist, so `mix release` can run" do
+      steps = Mix.Project.config()[:releases][:rsolv_host][:steps]
+
+      for step <- steps, is_function(step) do
+        info = Function.info(step)
+        assert Code.ensure_loaded?(info[:module]), inspect(step)
+        assert function_exported?(info[:module], info[:name], info[:arity]), inspect(step)
+      end
+    end
+  end
 end
