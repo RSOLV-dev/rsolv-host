@@ -77,6 +77,7 @@ defmodule RsolvHost.Outcome do
   def classify(:token_unavailable), do: :transient
   def classify({:session, _data}), do: :transient
   def classify(:stream_exhausted), do: :transient
+  def classify({:handoff, _posix}), do: :sandbox
   def classify({:sandbox_setup, _step}), do: :sandbox
   def classify({:sandbox, _reason}), do: :sandbox
   def classify(_unexpected), do: :host_bug
@@ -152,6 +153,10 @@ defmodule RsolvHost.Outcome do
 
   defp message({:sandbox, :enoent}, :sandbox),
     do: "Docker is not available on this runner (no `docker` on PATH)."
+
+  defp message({:handoff, _posix}, :sandbox),
+    do:
+      "Couldn't write the run-token hand-off file under $RUNNER_TEMP. Check the runner's temp disk."
 
   defp message({:sandbox_setup, step}, :sandbox),
     do:

@@ -4,8 +4,16 @@ defmodule RsolvHost.TokenKeeper do
   OIDC token before it expires (RFC-150 §1.2, ADR-074).
 
   The first exchange happens in the caller, so a refusal comes back from
-  `start_link/1` as a plain error reason. Every token is masked in the log the
+  `start/1` as a plain error reason. Every token is masked in the log the
   moment it's received.
+
+  Secrets in memory: the keeper keeps only the run token, the two OIDC request
+  variables and the hand-off path, never the job's whole environment, and
+  `format_status/1` redacts the token and the OIDC request token from
+  `:sys.get_status/1` and crash reports. A BEAM crash dump would still hold
+  them: the release must start the VM with crash dumps off
+  (`ERL_CRASH_DUMP_SECONDS=0`), a packaging requirement (plan Task 27) that
+  `rel/vm.args.eex` sets.
 
   Retry hand-off: the work workflow retries once on exit 3, and the platform
   allows one exchange per run attempt, issue and role. So after every exchange and
@@ -21,6 +29,7 @@ defmodule RsolvHost.TokenKeeper do
   @default_margin_s 300
   @default_retry_ms 30_000
   @call_timeout_ms 15_000
+  @oidc_env ~w(ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN)
 
   @type role :: :scan | :work | :publish
   @type served :: %{
@@ -41,21 +50,24 @@ defmodule RsolvHost.TokenKeeper do
   """
   @spec start(keyword()) :: {:ok, pid()} | {:error, term()}
   def start(opts) do
+    env = Keyword.fetch!(opts, :env)
+
     state = %{
-      role: Keyword.fetch!(opts, :role),
+      path: handoff_path(env, Keyword.fetch!(opts, :role), Keyword.get(opts, :issue)),
+      oidc: Map.take(env, @oidc_env),
       issue: Keyword.get(opts, :issue),
-      env: Keyword.fetch!(opts, :env),
       io: Keyword.get(opts, :io, :stdio),
       margin_s: Keyword.get(opts, :refresh_margin_s, @default_margin_s),
       retry_ms: Keyword.get(opts, :retry_ms, @default_retry_ms),
       refreshing: nil
     }
 
-    with {:ok, req} <- Platform.req(state.env),
+    with {:ok, req} <- Platform.req(env),
          state = Map.put(state, :req, req),
-         {:ok, token} <- first_token(state, Keyword.get(opts, :resume, false)) do
+         {:ok, token} <- first_token(state, Keyword.get(opts, :resume, false)),
+         {:ok, state} <- state |> Map.merge(token) |> keep() do
       callers = [self() | Process.get(:"$callers", [])]
-      GenServer.start(__MODULE__, {state |> Map.merge(token) |> keep(), self(), callers})
+      GenServer.start(__MODULE__, {state, self(), callers})
     end
   end
 
@@ -118,7 +130,7 @@ defmodule RsolvHost.TokenKeeper do
   # The refresh runs in a monitored task, so the keeper keeps answering `token/1`.
   @impl true
   def handle_info(:refresh, %{refreshing: nil} = state) do
-    request = Map.take(state, [:env, :io, :req, :raw])
+    request = Map.take(state, [:oidc, :io, :req, :raw])
 
     task =
       Task.Supervisor.async_nolink(RsolvHost.TaskSupervisor, fn ->
@@ -142,9 +154,13 @@ defmodule RsolvHost.TokenKeeper do
   # A late reply from a refresh that was already given up on, or a stray message.
   def handle_info(_other, state), do: {:noreply, state}
 
-  defp refreshed({:ok, token}, state),
-    do:
-      {:noreply, state |> Map.merge(token) |> keep() |> then(&schedule(&1, refresh_delay_ms(&1)))}
+  # A hand-off file that can't be written leaves the retry the older token; the
+  # role goes on with the new one.
+  defp refreshed({:ok, token}, state) do
+    state = Map.merge(state, token)
+    _kept_or_not = keep(state)
+    {:noreply, schedule(state, refresh_delay_ms(state))}
+  end
 
   defp refreshed({:error, _reason}, state), do: {:noreply, schedule(state, state.retry_ms)}
 
@@ -156,13 +172,29 @@ defmodule RsolvHost.TokenKeeper do
 
   def terminate(_reason, _state), do: :ok
 
+  @doc "Redacts the run token, the OIDC request token and any message or reason that may hold one."
+  @impl true
+  @spec format_status(map()) :: map()
+  def format_status(status) do
+    status
+    |> Map.replace_lazy(:state, &redact/1)
+    |> Map.replace(:message, :redacted)
+    |> Map.replace(:reason, :redacted)
+    |> Map.replace(:log, [])
+  end
+
+  defp redact(state) when is_map(state),
+    do: state |> Map.replace(:raw, :redacted) |> Map.replace(:oidc, :redacted)
+
+  defp redact(_state), do: :redacted
+
   defp first_token(state, false) do
-    with {:ok, jwt} <- Oidc.fetch(state.env, io: state.io),
+    with {:ok, jwt} <- Oidc.fetch(state.oidc, io: state.io),
          do: Platform.exchange(state.req, jwt, state.issue)
   end
 
   defp first_token(state, true) do
-    with {:ok, json} <- File.read(handoff_path(state.env, state.role, state.issue)),
+    with {:ok, json} <- File.read(state.path),
          {:ok, %{"raw" => raw}} <- RsolvCore.StrictJson.decode(json),
          true <- Platform.run_token?(raw) do
       ActionsLog.mask(raw, state.io)
@@ -175,32 +207,36 @@ defmodule RsolvHost.TokenKeeper do
   end
 
   defp refresh(state, raw) do
-    with {:ok, jwt} <- Oidc.fetch(state.env, io: state.io),
+    with {:ok, jwt} <- Oidc.fetch(state.oidc, io: state.io),
          do: Platform.refresh(state.req, raw, jwt)
   end
 
   # Masks the new token, then writes the hand-off file: emptied and made 0600
-  # before the token is written, so it never sits in a readable file.
+  # before the token is written, so it never sits in a readable file. A file
+  # error is `{:error, {:handoff, posix}}`, never a raise carrying the path.
   defp keep(state) do
     ActionsLog.mask(state.raw, state.io)
-    path = handoff_path(state.env, state.role, state.issue)
-    File.mkdir_p!(Path.dirname(path))
-    File.chmod!(Path.dirname(path), 0o700)
-    _ = File.rm(path)
-    File.write!(path, "", [:exclusive])
-    File.chmod!(path, 0o600)
+    dir = Path.dirname(state.path)
 
-    File.write!(
-      path,
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.chmod(dir, 0o700),
+         _removed_or_absent = File.rm(state.path),
+         :ok <- File.write(state.path, "", [:exclusive]),
+         :ok <- File.chmod(state.path, 0o600),
+         :ok <- File.write(state.path, handoff_json(state)) do
+      {:ok, state}
+    else
+      {:error, reason} -> {:error, {:handoff, reason}}
+    end
+  end
+
+  defp handoff_json(state),
+    do:
       JSON.encode!(%{
         raw: state.raw,
         expires_at: DateTime.to_iso8601(state.expires_at),
         binding: state.binding
       })
-    )
-
-    state
-  end
 
   defp refresh_delay_ms(state) do
     state.expires_at

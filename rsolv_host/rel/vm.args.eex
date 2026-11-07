@@ -1,0 +1,7 @@
+## The release's VM arguments (mix release copies this file into the release).
+##
+## Crash dumps are off: a BEAM crash dump holds every process's heap, run token
+## and OIDC request token included. Packaging (plan Task 27) must check that
+## the Burrito launcher passes this file to erlexec, or set
+## ERL_CRASH_DUMP_SECONDS=0 in the environment before the VM starts.
+-env ERL_CRASH_DUMP_SECONDS 0

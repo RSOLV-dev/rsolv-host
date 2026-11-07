@@ -254,6 +254,84 @@ defmodule RsolvHost.TokenKeeperTest do
     end
   end
 
+  describe "secrets in the keeper's state" do
+    setup context do
+      raw = "rsolv_rt_" <> String.duplicate("R", 43)
+      Req.Test.stub(Platform, &Req.Test.json(&1, token_json(raw, 3_600)))
+      env = Map.put(context.env, "GITHUB_TOKEN", "ghs_unrelated_runner_secret")
+      %{raw: raw, context: %{context | env: env}}
+    end
+
+    test "never show in :sys.get_status/1", %{raw: raw, context: context} do
+      {:ok, keeper} = start(context)
+
+      status =
+        keeper |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute status =~ raw
+      refute status =~ "request-token"
+      refute status =~ "ghs_unrelated_runner_secret"
+
+      # Only what a refresh needs is kept at all, redacted or not.
+      refute inspect(:sys.get_state(keeper), limit: :infinity) =~ "ghs_unrelated_runner_secret"
+    end
+
+    test "are redacted from a crash report's last message too", %{raw: raw} do
+      status =
+        TokenKeeper.format_status(%{
+          state: %{raw: raw, oidc: %{"ACTIONS_ID_TOKEN_REQUEST_TOKEN" => "request-token"}},
+          message: {make_ref(), {:ok, %{raw: raw}}},
+          reason: {:badmatch, raw},
+          log: [{:ok, raw}]
+        })
+
+      refute inspect(status, limit: :infinity, printable_limit: :infinity) =~ raw
+      refute inspect(status, limit: :infinity) =~ "request-token"
+    end
+  end
+
+  describe "when the hand-off file can't be written" do
+    test "start/1 is a plain error, not a crash", context do
+      Req.Test.stub(
+        Platform,
+        &Req.Test.json(&1, token_json("rsolv_rt_" <> String.duplicate("A", 43), 3_600))
+      )
+
+      File.write!(Path.join(context.tmp_dir, "rsolv"), "a file where the directory goes")
+
+      assert {:error, {:handoff, reason}} = start(context)
+      assert is_atom(reason)
+    end
+
+    test "a refresh still serves the new token", context do
+      test = self()
+
+      Req.Test.stub(Platform, fn conn ->
+        case conn.request_path do
+          "/api/v1/runs/token" ->
+            Req.Test.json(conn, token_json("rsolv_rt_" <> String.duplicate("A", 43), 3_600))
+
+          "/api/v1/runs/token/refresh" ->
+            send(test, {:refreshing, self()})
+            assert_receive :release, 5_000
+            Req.Test.json(conn, token_json("rsolv_rt_" <> String.duplicate("B", 43), 3_600))
+        end
+      end)
+
+      {:ok, keeper} = start(context, refresh_margin_s: 3_599)
+      ref = Process.monitor(keeper)
+      assert_receive {:refreshing, refresher}, 2_000
+
+      dir = Path.join(context.tmp_dir, "rsolv")
+      File.rm_rf!(dir)
+      File.write!(dir, "a file where the directory goes")
+      send(refresher, :release)
+
+      eventually(fn -> match?({:ok, %{raw: "rsolv_rt_BBB" <> _}}, TokenKeeper.token(keeper)) end)
+      refute_received {:DOWN, ^ref, _, _, _}
+    end
+  end
+
   describe "start/1 with resume" do
     test "refreshes the first attempt's token instead of exchanging", context do
       path = TokenKeeper.handoff_path(context.env, :work, 7)
