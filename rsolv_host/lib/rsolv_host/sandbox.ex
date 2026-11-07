@@ -80,8 +80,8 @@ defmodule RsolvHost.Sandbox do
   Starts the sandbox. Options: `:name` (the container), `:network`, `:copy_dir`
   (the copy to mount; its owner becomes the sandbox user), `:runner_temp`,
   `:egress` (`:proxy` or `:none`), `:image` (default: the pinned sandbox
-  image), `:probe` (the proxy readiness check, `fn ip -> :ok | :error end`) and
-  `:exec`.
+  image), `:probe` (the proxy readiness check, `fn ip -> :ok | :error end`),
+  `:stat` (how the copy is stat'ed, default `File.stat!/1`) and `:exec`.
   """
   @spec start(keyword()) ::
           {:ok, t()}
@@ -101,7 +101,8 @@ defmodule RsolvHost.Sandbox do
     }
 
     with :ok <- pinned(image),
-         %{uid: uid, gid: gid} = File.stat!(Keyword.fetch!(opts, :copy_dir)),
+         %{uid: uid, gid: gid} =
+           Keyword.get(opts, :stat, &File.stat!/1).(Keyword.fetch!(opts, :copy_dir)),
          home_dir = home(opts),
          {:ok, proxy_ip} <- start_proxy(sbx, opts),
          :ok <-

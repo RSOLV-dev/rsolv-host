@@ -61,7 +61,8 @@ defmodule RsolvHost.OutcomeTest do
               :publish_unavailable,
               {:base_mismatch, "a"},
               {:tree_mismatch, "a"},
-              :branch_collision
+              :branch_collision,
+              {:missing_env, "GITHUB_RUN_ID"}
             ] ++ verify_errors ++ http do
         assert Outcome.classify(reason) == :configuration, inspect(reason)
       end
@@ -110,6 +111,11 @@ defmodule RsolvHost.OutcomeTest do
     test "names the fix for a missing OIDC permission" do
       assert capture(&Outcome.annotate(:oidc_unavailable, &1)) ==
                "::error title=RSOLV configuration::Grant `id-token: write` to the job that calls RSOLV.\n"
+    end
+
+    test "names a missing Actions variable" do
+      assert capture(&Outcome.annotate({:missing_env, "GITHUB_WORKSPACE"}, &1)) =~
+               ~r/\A::error title=RSOLV configuration::GITHUB_WORKSPACE is not set/
     end
 
     test "titles each class as the contract says" do

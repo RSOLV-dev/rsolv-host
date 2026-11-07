@@ -50,6 +50,7 @@ defmodule RsolvHost.Outcome do
   @spec classify(term()) :: class()
   def classify(:usage), do: :configuration
   def classify({:preflight, _variable}), do: :configuration
+  def classify({:missing_env, _variable}), do: :configuration
   def classify(:oidc_unavailable), do: :configuration
   def classify({:oidc_http, status}) when status == 429 or status >= 500, do: :transient
   def classify({:oidc_http, _status}), do: :configuration
@@ -102,6 +103,9 @@ defmodule RsolvHost.Outcome do
   defp message({:preflight, variable}, _class),
     do:
       "Set #{variable} so rsolv-host installs under $RUNNER_TEMP. Call RSOLV through its reusable workflows."
+
+  defp message({:missing_env, variable}, _class),
+    do: "#{variable} is not set. Run rsolv-host only inside RSOLV's reusable workflows."
 
   defp message(:oidc_unavailable, _class),
     do: "Grant `id-token: write` to the job that calls RSOLV."

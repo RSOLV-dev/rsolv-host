@@ -9,3 +9,6 @@ config :rsolv_host, RsolvHost.Oidc, req_options: [plug: {Req.Test, RsolvHost.Oid
 
 config :rsolv_host, RsolvHost.GitHub,
   req_options: [plug: {Req.Test, RsolvHost.GitHub}, retry: false]
+
+config :rsolv_host,
+  sandbox_image: "ghcr.io/rsolv-dev/rsolv-sandbox@sha256:" <> String.duplicate("1", 64)
