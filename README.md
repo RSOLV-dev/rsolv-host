@@ -5,12 +5,12 @@ core library it shares with the RSOLV platform. Apache-2.0.
 
 ## Status
 
-This repository is at its first stage: only the shared core library, `rsolv_core/`, is here.
-The host client (`rsolv_host/`) and its attested release binaries are planned and land in
-later changes. Until they do, the trust model below is the design those changes must meet,
-not behaviour you can run today.
+The shared core library, `rsolv_core/`, and the host client's source, `rsolv_host/`, are here.
+The host client has no release yet: its attested release binaries and the sandbox image it
+runs land in later changes. Until they do, the last point of the trust model below (pinned,
+attested binaries) is the design those changes must meet, not something you can verify today.
 
-## Trust model (planned)
+## Trust model
 
 - **What runs where.** RSOLV's AI model runs on the RSOLV platform. Its tool calls (read a file,
   run the tests) run on your runner, inside a sandbox container that `rsolv-host` starts: no
@@ -75,5 +75,5 @@ an error response never reaches them.
 - `rsolv_core/`: what the platform and the host must agree on byte for byte: the relay
   protocol types, canonical JSON (RFC 8785, for the subset RSOLV signs, which has no floats),
   the change set and the signed decision envelope. It depends on nothing in the platform.
-- `rsolv_host/` (planned): the host client, packaged with Burrito as a self-contained Linux
-  binary.
+- `rsolv_host/`: the host client, to be packaged with Burrito as a self-contained Linux binary
+  (not yet released).
