@@ -13,7 +13,8 @@ defmodule RsolvCore.Patch do
   - `:not_regular_file` — a symlink (`120000`) or gitlink (`160000`) on either side;
   - `:invalid_path` — a path `RsolvCore.ChangeSet.valid_path?/1` refuses, or names that disagree;
   - `:duplicate_path`, `:too_large` (over 8 MiB, 200,000 lines or 1,000 files);
-  - `:malformed` — anything else that isn't exactly git's format.
+  - `:malformed` — anything else that isn't exactly git's format, including a
+    hunk header whose new side isn't where its old side and earlier hunks put it.
 
       iex> {:ok, [diff]} = RsolvCore.Patch.parse("diff --git a/x b/x\\nnew file mode 100644\\nindex 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\\n")
       iex> {diff.path, diff.op, diff.hunks}
@@ -29,7 +30,14 @@ defmodule RsolvCore.Patch do
 
     @typedoc "A hunk line: its kind, its bytes without the newline, and whether a newline ended it."
     @type line :: {:context | :del | :add, binary(), boolean()}
-    @type hunk :: %{old_start: non_neg_integer(), old_count: non_neg_integer(), lines: [line()]}
+    @typedoc "A hunk: both sides of its header, as git wrote them, and its lines."
+    @type hunk :: %{
+            old_start: non_neg_integer(),
+            old_count: non_neg_integer(),
+            new_start: non_neg_integer(),
+            new_count: non_neg_integer(),
+            lines: [line()]
+          }
     @type t :: %__MODULE__{path: String.t(), op: :add | :modify | :delete, hunks: [hunk()]}
   end
 
@@ -74,7 +82,7 @@ defmodule RsolvCore.Patch do
 
   # Counted before splitting, so a patch of short lines is refused before it
   # becomes a list of millions of sub-binaries.
-  defp line_count(_bytes, _from, @max_lines), do: {:error, :too_large}
+  defp line_count(_bytes, _from, count) when count > @max_lines, do: {:error, :too_large}
 
   defp line_count(bytes, from, count) do
     case :binary.match(bytes, "\n", scope: {from, byte_size(bytes) - from}) do
@@ -179,7 +187,7 @@ defmodule RsolvCore.Patch do
 
   defp content(["--- " <> old, "+++ " <> new | rest], path, op) do
     with :ok <- sides(old, new, path, op),
-         {:ok, [_ | _] = hunks, rest} <- hunks(rest, []) do
+         {:ok, [_ | _] = hunks, rest} <- hunks(rest, [], 0) do
       {:ok, hunks, rest}
     else
       {:ok, [], _rest} -> {:error, :malformed}
@@ -256,34 +264,52 @@ defmodule RsolvCore.Patch do
   defp escape(?r), do: 13
   defp escape(c), do: c
 
-  defp hunks(["@@ " <> _ = header | rest], acc) do
-    with {:ok, hunk, rest} <- hunk(header, rest), do: hunks(rest, [hunk | acc])
+  # `delta` is the lines earlier hunks added less the lines they deleted.
+  defp hunks(["@@ " <> _ = header | rest], acc, delta) do
+    with {:ok, hunk, rest} <- hunk(header, rest, delta),
+         do: hunks(rest, [hunk | acc], delta + hunk.new_count - hunk.old_count)
   end
 
-  defp hunks(rest, acc), do: {:ok, Enum.reverse(acc), rest}
+  defp hunks(rest, acc, _delta), do: {:ok, Enum.reverse(acc), rest}
 
-  defp hunk(header, rest) do
-    case Regex.run(@hunk_header, header, capture: :all_but_first) do
-      nil ->
-        {:error, :malformed}
-
-      captures ->
-        [old_start, old_count, _new_start, new_count] =
-          captures ++ List.duplicate("", 4 - length(captures))
-
-        old_count = count(old_count)
-
-        with {:ok, lines, rest} <- body(rest, old_count, count(new_count), []) do
-          {:ok, %{old_start: String.to_integer(old_start), old_count: old_count, lines: lines},
-           rest}
-        end
+  defp hunk(header, rest, delta) do
+    with [_ | _] = captures <- Regex.run(@hunk_header, header, capture: :all_but_first),
+         [old_start, old_count, new_start, new_count] =
+           Enum.map(captures ++ List.duplicate("", 4 - length(captures)), &number/1),
+         old_count = old_count || 1,
+         new_count = new_count || 1,
+         true <- placed?(old_start, old_count, new_start, new_count, delta),
+         {:ok, lines, rest} <- body(rest, old_count, new_count, []) do
+      {:ok,
+       %{
+         old_start: old_start,
+         old_count: old_count,
+         new_start: new_start,
+         new_count: new_count,
+         lines: lines
+       }, rest}
+    else
+      {:error, _reason} = error -> error
+      _malformed -> {:error, :malformed}
     end
   end
 
-  defp count(""), do: 1
-  defp count(digits), do: String.to_integer(digits)
+  defp number(""), do: nil
+  defp number(digits), do: String.to_integer(digits)
 
-  defp body(["\\ " <> _ | rest], old, new, [{kind, text, true} | acc]),
+  # git writes an empty side's start one line early (xdiff's `s - 1` when the
+  # count is 0), so both sides start at line 1 or later once that's undone,
+  # and the new side is the old side moved by what earlier hunks added.
+  defp placed?(old_start, old_count, new_start, new_count, delta) do
+    old = first_line(old_start, old_count)
+    new = first_line(new_start, new_count)
+    old >= 1 and new >= 1 and new - old == delta
+  end
+
+  defp first_line(start, 0), do: start + 1
+  defp first_line(start, _count), do: start
+
+  defp body(["\\ No newline at end of file" | rest], old, new, [{kind, text, true} | acc]),
     do: body(rest, old, new, [{kind, text, false} | acc])
 
   defp body([" " <> text | rest], old, new, acc) when old > 0 and new > 0,

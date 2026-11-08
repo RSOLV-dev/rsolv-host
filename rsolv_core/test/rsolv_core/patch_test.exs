@@ -66,6 +66,30 @@ defmodule RsolvCore.PatchTest do
       assert {:ok, [%FileDiff{path: "x.js", op: :modify}]} = Patch.parse(lying)
     end
 
+    test "keeps both sides of each hunk header" do
+      hunks = "@@ -1,2 +1,3 @@\n a\n+b\n c\n@@ -8,2 +9,2 @@\n d\n-e\n+f\n"
+
+      assert {:ok, [%FileDiff{hunks: [first, second]}]} = Patch.parse(modify("x.js", hunks))
+      assert %{old_start: 1, old_count: 2, new_start: 1, new_count: 3} = first
+      assert %{old_start: 8, old_count: 2, new_start: 9, new_count: 2} = second
+    end
+
+    test "accepts exactly 200,000 lines" do
+      header =
+        "diff --git a/x b/x\nnew file mode 100644\nindex #{@z}..#{@b}\n--- /dev/null\n+++ b/x\n"
+
+      added = 200_000 - 6
+      patch = header <> "@@ -0,0 +1,#{added} @@\n" <> :binary.copy("+\n", added)
+
+      assert {:ok, [%FileDiff{path: "x", op: :add}]} = Patch.parse(patch)
+    end
+
+    test "accepts git's zero-context hunks, whose empty sides start a line early" do
+      # git diff -U0, inserting two lines after line 5 and deleting lines 8-9 of ten.
+      hunks = "@@ -5,0 +6,2 @@\n+new1\n+new2\n@@ -8,2 +9,0 @@\n-8\n-9\n"
+      assert {:ok, [%FileDiff{hunks: [_insert, _delete]}]} = Patch.parse(modify("f", hunks))
+    end
+
     test "is empty for an empty patch" do
       assert Patch.parse("") == {:ok, []}
     end
@@ -168,6 +192,32 @@ defmodule RsolvCore.PatchTest do
 
     test "refuses more than 200,000 lines, however few bytes they hold" do
       assert Patch.parse(:binary.copy("+\n", 200_001)) == {:error, :too_large}
+    end
+
+    test "refuses a new side that starts at line 0 but isn't empty" do
+      patch =
+        "diff --git a/x b/x\nnew file mode 100644\nindex #{@z}..#{@b}\n--- /dev/null\n+++ b/x\n" <>
+          "@@ -0,0 +0,1 @@\n+a\n"
+
+      assert Patch.parse(patch) == {:error, :malformed}
+    end
+
+    test "refuses an old side that starts at line 0 but isn't empty" do
+      assert Patch.parse(modify("x.js", "@@ -0,1 +1 @@\n-a\n+b\n")) == {:error, :malformed}
+    end
+
+    test "refuses a first hunk whose new start isn't its old start" do
+      assert Patch.parse(modify("x.js", "@@ -1 +2 @@\n-a\n+b\n")) == {:error, :malformed}
+    end
+
+    test "refuses a hunk whose new start ignores the lines earlier hunks added" do
+      hunks = "@@ -1,2 +1,3 @@\n a\n+b\n c\n@@ -8,2 +8,2 @@\n d\n-e\n+f\n"
+      assert Patch.parse(modify("x.js", hunks)) == {:error, :malformed}
+    end
+
+    test "refuses a backslash line other than git's no-newline marker" do
+      assert Patch.parse(modify("x.js", "@@ -1 +1 @@\n-a\n\\ garbage\n+b\n")) ==
+               {:error, :malformed}
     end
 
     test "refuses text glued to a hunk header's closing @@" do
