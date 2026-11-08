@@ -75,6 +75,47 @@ defmodule RsolvCore.VerifyPlanTest do
                VerifyPlan.decode(plan(%{"report" => report}))
     end
 
+    # The platform's per-framework templates (RFC-150 steps 4-5 plan, Task 16).
+    @templates %{
+      "jest" =>
+        {[], [],
+         ~w(npx --no-install jest --ci --json --outputFile=/tmp/rsolv-report.json --runTestsByPath test/app.test.js),
+         "jest_json", ~w(cat -- /tmp/rsolv-report.json)},
+      "pytest" =>
+        {[], [],
+         ~w(python -m pytest -q -p no:cacheprovider -o junit_family=xunit1 --junitxml=/tmp/rsolv-report.xml tests/test_xss.py),
+         "junit_xml", ~w(cat -- /tmp/rsolv-report.xml)},
+      "rspec" =>
+        {[], [],
+         ~w(bundle exec rspec --format json --out /tmp/rsolv-report.json spec/xss_spec.rb),
+         "rspec_json", ~w(cat -- /tmp/rsolv-report.json)},
+      "ex_unit" => {[], [], ~w(mix test --trace test/xss_test.exs), "exunit_trace", nil},
+      "junit" =>
+        {[~w(mvn -B -q test -Dmaven.test.failure.ignore=true)],
+         [~w(rm -rf -- target/surefire-reports)],
+         ~w(mvn -B -o -q test -Dsurefire.failIfNoSpecifiedTests=false -Dtest=com.acme.XssTest),
+         "junit_xml",
+         ~w(find target/surefire-reports -maxdepth 1 -name TEST-*.xml -exec cat -- {} +)},
+      "phpunit" =>
+        {[], [], ~w(vendor/bin/phpunit --log-junit /tmp/rsolv-report.xml tests/XssTest.php),
+         "junit_xml", ~w(cat -- /tmp/rsolv-report.xml)}
+    }
+
+    for {framework, {install, prepare, test, format, report_argv}} <- @templates do
+      test "accepts the platform's #{framework} template" do
+        overrides = %{
+          "framework" => unquote(framework),
+          "install" => unquote(install),
+          "prepare" => unquote(prepare),
+          "test" => unquote(test),
+          "report" => %{"format" => unquote(format), "argv" => unquote(report_argv)}
+        }
+
+        assert {:ok, %VerifyPlan{framework: unquote(framework), test: unquote(test)}} =
+                 VerifyPlan.decode(plan(overrides))
+      end
+    end
+
     test "keeps long flags and single-dash flags that aren't -c" do
       argv = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--collect-only"]
       assert {:ok, %VerifyPlan{test: ^argv}} = VerifyPlan.decode(plan(%{"test" => argv}))
