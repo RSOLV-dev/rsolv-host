@@ -27,6 +27,8 @@ defmodule RsolvCore.GitAttributes do
   """
   @spec filtered?(String.t(), %{String.t() => binary()}) :: boolean()
   def filtered?(path, attributes) do
+    # ponytail: re-parses the files and recompiles each pattern per call; for patches near
+    # the 1,000-file cap over large .gitattributes, parse once per change set instead.
     files = Map.new(attributes, fn {dir, text} -> {dir, lines(text)} end)
     macros = files |> Map.values() |> Enum.concat() |> macros(MapSet.new())
 

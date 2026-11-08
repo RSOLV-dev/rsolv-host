@@ -86,6 +86,10 @@ defmodule RsolvCore.PatchTest do
       assert Patch.parse(patch) == {:error, :binary}
     end
 
+    test "refuses a NUL byte in a hunk, which git would have called binary" do
+      assert Patch.parse(modify("x.js", "@@ -1 +1 @@\n-a\n+b\0c\n")) == {:error, :binary}
+    end
+
     test "refuses a mode change" do
       patch = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
       assert Patch.parse(patch) == {:error, :mode_change}
@@ -160,6 +164,19 @@ defmodule RsolvCore.PatchTest do
 
     test "refuses bytes without a final newline" do
       assert Patch.parse("diff --git a/x b/x") == {:error, :malformed}
+    end
+
+    test "refuses more than 200,000 lines, however few bytes they hold" do
+      assert Patch.parse(:binary.copy("+\n", 200_001)) == {:error, :too_large}
+    end
+
+    test "refuses text glued to a hunk header's closing @@" do
+      assert Patch.parse(modify("x.js", "@@ -1 +1 @@x\n-a\n+b\n")) == {:error, :malformed}
+    end
+
+    test "keeps the function context git writes after a hunk header" do
+      assert {:ok, [%FileDiff{hunks: [_hunk]}]} =
+               Patch.parse(modify("x.js", "@@ -1 +1 @@ function f() {\n-a\n+b\n"))
     end
 
     test "refuses more than 8 MiB" do

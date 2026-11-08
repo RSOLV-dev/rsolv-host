@@ -6,13 +6,13 @@ defmodule RsolvCore.Patch do
   them), and no base content is needed until `RsolvCore.Canonicalize`.
 
   Refusals:
-  - `:binary` — `Binary files … differ` or `GIT binary patch`;
+  - `:binary` — `Binary files … differ`, `GIT binary patch`, or a NUL byte anywhere;
   - `:rename` — similarity, rename or copy headers;
   - `:mode_change` — `old mode`/`new mode`;
   - `:executable` — a new file whose mode isn't `100644`;
   - `:not_regular_file` — a symlink (`120000`) or gitlink (`160000`) on either side;
   - `:invalid_path` — a path `RsolvCore.ChangeSet.valid_path?/1` refuses, or names that disagree;
-  - `:duplicate_path`, `:too_large` (over 8 MiB or 1,000 files);
+  - `:duplicate_path`, `:too_large` (over 8 MiB, 200,000 lines or 1,000 files);
   - `:malformed` — anything else that isn't exactly git's format.
 
       iex> {:ok, [diff]} = RsolvCore.Patch.parse("diff --git a/x b/x\\nnew file mode 100644\\nindex 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\\n")
@@ -46,8 +46,9 @@ defmodule RsolvCore.Patch do
 
   @max_bytes 8 * 1024 * 1024
   @max_files 1_000
+  @max_lines 200_000
   @file_modes ["100644", "100755"]
-  @hunk_header ~r/\A@@ -(\d{1,9})(?:,(\d{1,9}))? \+(\d{1,9})(?:,(\d{1,9}))? @@/
+  @hunk_header ~r/\A@@ -(\d{1,9})(?:,(\d{1,9}))? \+(\d{1,9})(?:,(\d{1,9}))? @@(?: |\z)/
 
   @doc "Parses patch bytes into one `FileDiff` per path. The empty patch is `{:ok, []}`."
   @spec parse(term()) :: {:ok, [FileDiff.t()]} | {:error, reason()}
@@ -57,13 +58,30 @@ defmodule RsolvCore.Patch do
     do: {:error, :too_large}
 
   def parse(bytes) when is_binary(bytes) do
-    case bytes |> :binary.split("\n", [:global]) |> Enum.reverse() do
-      ["" | reversed] -> reversed |> Enum.reverse() |> files([], 0) |> unique()
-      _no_final_newline -> {:error, :malformed}
+    with :ok <- text(bytes),
+         :ok <- line_count(bytes, 0, 0) do
+      case bytes |> :binary.split("\n", [:global]) |> Enum.reverse() do
+        ["" | reversed] -> reversed |> Enum.reverse() |> files([], 0) |> unique()
+        _no_final_newline -> {:error, :malformed}
+      end
     end
   end
 
   def parse(_other), do: {:error, :malformed}
+
+  defp text(bytes),
+    do: if(:binary.match(bytes, <<0>>) == :nomatch, do: :ok, else: {:error, :binary})
+
+  # Counted before splitting, so a patch of short lines is refused before it
+  # becomes a list of millions of sub-binaries.
+  defp line_count(_bytes, _from, @max_lines), do: {:error, :too_large}
+
+  defp line_count(bytes, from, count) do
+    case :binary.match(bytes, "\n", scope: {from, byte_size(bytes) - from}) do
+      {at, 1} -> line_count(bytes, at + 1, count + 1)
+      :nomatch -> :ok
+    end
+  end
 
   @doc "The paths `diffs` touch, sorted by bytes."
   @spec touched_paths([FileDiff.t()]) :: [String.t()]
