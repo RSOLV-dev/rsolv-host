@@ -244,6 +244,9 @@ defmodule RsolvCore.GitAttributes do
   defp anchor("/" <> rest), do: {true, rest}
   defp anchor(pattern), do: {String.contains?(pattern, "/"), pattern}
 
+  # wildmatch reads any run of stars past the second as part of the one globstar;
+  # an escaped `\*` is consumed by its own clause before it can join a run.
+  defp translate("***" <> rest, acc), do: translate("**" <> rest, acc)
   defp translate("**/" <> rest, acc), do: translate(rest, [acc, "(?:.*/)?"])
   defp translate("/**", acc), do: [acc, "/.*"]
   defp translate("**" <> rest, acc), do: translate(rest, [acc, ".*"])

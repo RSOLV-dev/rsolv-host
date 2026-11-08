@@ -27,6 +27,7 @@ defmodule RsolvCore.GitAttributesVectorsTest do
     {"attr_alone_is_a_pattern", "x"},
     # `**` away from a `/` is any characters, `/` included.
     {"globstar_in_path_not_at_boundary", "d/a/b"},
+    {"escaped_star_before_globstar", "*/d/x"},
     # A trailing `\` is a literal backslash.
     {"trailing_backslash", "x\\"},
     # A later unset doesn't clear a set.

@@ -37,6 +37,18 @@ defmodule RsolvCore.GitAttributesTest do
       assert GitAttributes.filtered?("sub/x", %{"sub" => ~s("x\\000" filter=lfs\n)})
     end
 
+    test "reads a run of three or more stars as a globstar, as wildmatch does" do
+      assert GitAttributes.filtered?("x.png", %{"" => "***/x.png filter=lfs\n"})
+      assert GitAttributes.filtered?("a/b", %{"" => "a/***/b filter=lfs\n"})
+      assert GitAttributes.filtered?("foo1", %{"" => "*****/** filter=lfs\n"})
+    end
+
+    test "keeps an escaped star literal next to a run of stars" do
+      assert GitAttributes.filtered?("*/x", %{"" => "\\***/x filter=lfs\n"})
+      refute GitAttributes.filtered?("x", %{"" => "\\***/x filter=lfs\n"})
+      assert GitAttributes.filtered?("a*b", %{"" => "*\\** filter=lfs\n"})
+    end
+
     test "reads attributes glued to a quoted pattern's closing quote" do
       assert GitAttributes.filtered?("a", %{"" => ~s("a"filter=lfs\n)})
     end

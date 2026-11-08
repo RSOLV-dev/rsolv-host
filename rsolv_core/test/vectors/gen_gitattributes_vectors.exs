@@ -36,6 +36,12 @@ defmodule GenGitAttributesVectors do
       {"globstar_not_at_boundary", %{"" => "a**b filter=lfs\n"}, ~w(ab axb d/axb)},
       {"globstar_in_path_not_at_boundary", %{"" => "d/a**b filter=lfs\n"}, ~w(d/ab d/axb d/a/b)},
       {"triple_star", %{"" => "***.bin filter=lfs\n"}, ~w(a.bin d/a.bin)},
+      {"triple_star_globstar_leading", %{"" => "***/x.png filter=lfs\n"},
+       ~w(x.png d/x.png d/y.png)},
+      {"triple_star_globstar_middle", %{"" => "a/***/b filter=lfs\n"}, ~w(a/b a/x/b a/x/y/b ab)},
+      {"star_run_globstars", %{"" => "*****/** filter=lfs\n"}, ~w(foo1 d/foo1)},
+      {"escaped_star_before_globstar", %{"" => "\\***/x filter=lfs\n"}, ~w(*/x */d/x x d/x)},
+      {"escaped_star_between_stars", %{"" => "*\\** filter=lfs\n"}, ~w(a*b * ab d/a*b a/*/b)},
       {"question_mark", %{"" => "?.c filter=lfs\n"}, ~w(a.c ab.c d/a.c .c)},
       {"question_mark_in_path", %{"" => "d?e/f filter=lfs\n"}, ~w(dxe/f d/e/f)},
       # Escapes
