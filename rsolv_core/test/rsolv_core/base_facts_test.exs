@@ -20,12 +20,28 @@ defmodule RsolvCore.BaseFactsTest do
 
   describe "required_paths/1" do
     test "adds every ancestor directory, sorted and unique" do
-      assert BaseFacts.required_paths(["a/b/c.js", "a/d.js"]) == [
-               "a",
-               "a/b",
-               "a/b/c.js",
-               "a/d.js"
-             ]
+      assert BaseFacts.required_paths(["a/b/c.js", "a/d.js"]) ==
+               {:ok, ["a", "a/b", "a/b/c.js", "a/d.js"]}
+    end
+
+    test "refuses a path deeper than 128 segments, quickly, at the patch caps' size" do
+      deep = for n <- 1..1_000, do: "p#{n}/" <> :binary.copy("a/", 2_040) <> "x.js"
+
+      {micros, result} = :timer.tc(fn -> BaseFacts.required_paths(deep) end)
+
+      assert result == {:error, {:path_too_deep, hd(deep)}}
+      assert micros < 1_000_000
+    end
+
+    test "accepts a path of exactly 128 segments" do
+      path = :binary.copy("a/", 127) <> "x"
+      assert {:ok, paths} = BaseFacts.required_paths([path])
+      assert length(paths) == 128
+    end
+
+    test "refuses more unique paths than base facts may hold" do
+      paths = for n <- 1..100, do: "p#{n}/" <> :binary.copy("a/", 100) <> "x.js"
+      assert BaseFacts.required_paths(paths) == {:error, :too_many_paths}
     end
   end
 

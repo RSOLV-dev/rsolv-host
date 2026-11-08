@@ -37,7 +37,7 @@ defmodule RsolvCore.GitAttributes do
   @enforce_keys [:rules]
   defstruct @enforce_keys
 
-  alias RsolvCore.Patch
+  alias RsolvCore.{BaseFacts, Patch}
 
   @typedoc """
   Compiled attributes: per directory, a matcher for each line that sets
@@ -83,10 +83,7 @@ defmodule RsolvCore.GitAttributes do
 
   @doc "The directories whose `.gitattributes` apply to `path`, the root (`\"\"`) first."
   @spec dirs(String.t()) :: [String.t()]
-  def dirs(path) do
-    segments = path |> String.split("/") |> Enum.drop(-1)
-    ["" | for(n <- 1..length(segments)//1, do: segments |> Enum.take(n) |> Enum.join("/"))]
-  end
+  def dirs(path), do: ["" | BaseFacts.ancestors(path)]
 
   defp relative(path, ""), do: path
 

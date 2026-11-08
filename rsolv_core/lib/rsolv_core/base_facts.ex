@@ -36,21 +36,44 @@ defmodule RsolvCore.BaseFacts do
         }
 
   @max_paths 4_096
+  @max_depth 128
   @max_content_bytes 5 * 1024 * 1024
   @max_attributes_bytes 1024 * 1024
   @regular ["100644", "100755"]
 
   @doc "The ancestor directories of `path`, shallowest first."
   @spec ancestors(String.t()) :: [String.t()]
-  def ancestors(path) do
-    segments = path |> String.split("/") |> Enum.drop(-1)
-    for n <- 1..length(segments)//1, do: segments |> Enum.take(n) |> Enum.join("/")
+  def ancestors(path),
+    do: for({at, 1} <- :binary.matches(path, "/"), do: binary_part(path, 0, at))
+
+  @doc """
+  Every path base facts must cover for `paths`: each one and its ancestors,
+  sorted, unique. A path of more than #{@max_depth} segments, or more than
+  #{@max_paths} paths in all, is refused before the set is built.
+  """
+  @spec required_paths([String.t()]) ::
+          {:ok, [String.t()]} | {:error, {:path_too_deep, String.t()} | :too_many_paths}
+  def required_paths(paths) do
+    paths
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn path, {:ok, required} ->
+      require_path(path, ancestors(path), required)
+    end)
+    |> case do
+      {:ok, required} -> {:ok, required |> MapSet.to_list() |> Enum.sort()}
+      error -> error
+    end
   end
 
-  @doc "Every path base facts must cover for `paths`: each one and its ancestors, sorted, unique."
-  @spec required_paths([String.t()]) :: [String.t()]
-  def required_paths(paths),
-    do: paths |> Enum.flat_map(&[&1 | ancestors(&1)]) |> Enum.uniq() |> Enum.sort()
+  defp require_path(path, ancestors, _required) when length(ancestors) >= @max_depth,
+    do: {:halt, {:error, {:path_too_deep, path}}}
+
+  defp require_path(path, ancestors, required) do
+    required = Enum.into([path | ancestors], required)
+
+    if MapSet.size(required) > @max_paths,
+      do: {:halt, {:error, :too_many_paths}},
+      else: {:cont, {:ok, required}}
+  end
 
   @doc """
   Decodes the JSON form (as `RsolvCore.StrictJson` decoded it) and checks that it
@@ -64,7 +87,8 @@ defmodule RsolvCore.BaseFacts do
       )
       when map_size(json) == 3 and map_size(paths) <= @max_paths and is_list(requested) do
     with true <- Enum.all?(requested, &is_binary/1),
-         true <- paths |> Map.keys() |> Enum.sort() == required_paths(requested),
+         {:ok, required} <- required_paths(requested),
+         true <- paths |> Map.keys() |> Enum.sort() == required,
          {:ok, facts} <- facts(paths),
          true <- consistent?(facts),
          {:ok, attrs} <- attributes(attributes, facts) do
