@@ -149,6 +149,11 @@ defmodule RsolvCore.PatchTest do
       assert Patch.parse(modify("x.js", "@@ -1,2 +1 @@\n-a\n+b\n")) == {:error, :malformed}
     end
 
+    test "refuses a hunk with no lines" do
+      assert Patch.parse(modify("x.js", "@@ -1,0 +1,0 @@\n@@ -1 +1 @@\n-a\n+b\n")) ==
+               {:error, :malformed}
+    end
+
     test "refuses a blank line inside a hunk" do
       assert Patch.parse(modify("x.js", "@@ -1,2 +1,2 @@\n a\n\n")) == {:error, :malformed}
     end

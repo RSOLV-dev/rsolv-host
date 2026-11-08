@@ -271,6 +271,7 @@ defmodule RsolvCore.Patch do
   defp body(["+" <> text | rest], old, new, acc) when new > 0,
     do: body(rest, old, new - 1, [{:add, text, true} | acc])
 
+  defp body(_rest, 0, 0, []), do: {:error, :malformed}
   defp body(rest, 0, 0, acc), do: {:ok, Enum.reverse(acc), rest}
   defp body(_rest, _old, _new, _acc), do: {:error, :malformed}
 end
