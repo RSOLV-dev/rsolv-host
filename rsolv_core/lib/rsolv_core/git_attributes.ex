@@ -211,6 +211,9 @@ defmodule RsolvCore.GitAttributes do
   defp matches?({:path, regex}, relative), do: regex_match?(regex, relative)
 
   # Anything but a clear "no match" (the match limit) counts as a match.
+  # ponytail: the worst case is rules × paths × @match_limit backtracking steps
+  # (1,024 × 1,000 × 100,000); add an aggregate step budget that fails closed if
+  # base attributes ever become attacker-shaped rather than the customer's own.
   defp regex_match?(regex, target),
     do:
       :re.run(target, regex, [:report_errors, {:match_limit, @match_limit}, capture: :none]) !=
@@ -247,6 +250,8 @@ defmodule RsolvCore.GitAttributes do
   defp translate("?" <> rest, acc), do: translate(rest, [acc, "[^/]"])
 
   # Any one character but `/`: a superset of every bracket expression, negated or not.
+  # ponytail: 15 of the vectors' 26 over-approximations; translate the members into
+  # a PCRE class (minus `/`) if that ever refuses real paths.
   defp translate("[" <> rest, acc) do
     case bracket(rest) do
       {:ok, rest} -> translate(rest, [acc, "[^/]"])
