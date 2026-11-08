@@ -32,6 +32,11 @@ defmodule RsolvCore.GitAttributesTest do
       refute GitAttributes.filtered?("src/a.js", attrs)
     end
 
+    test "ends a quoted pattern at an escaped NUL, as git's strlen does" do
+      assert GitAttributes.filtered?("a.txt", %{"" => ~s("*\\000.png" filter=lfs\n)})
+      assert GitAttributes.filtered?("sub/x", %{"sub" => ~s("x\\000" filter=lfs\n)})
+    end
+
     test "reads attributes glued to a quoted pattern's closing quote" do
       assert GitAttributes.filtered?("a", %{"" => ~s("a"filter=lfs\n)})
     end

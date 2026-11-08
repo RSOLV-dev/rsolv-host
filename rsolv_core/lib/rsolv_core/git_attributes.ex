@@ -106,7 +106,8 @@ defmodule RsolvCore.GitAttributes do
   end
 
   # As git's attr.c reads a file: a leading UTF-8 BOM is skipped, lines end at
-  # "\n", blanks are space, tab and "\r", and a pattern may be C-quoted.
+  # "\n", blanks are space, tab and "\r", and a pattern may be C-quoted (and
+  # then ends at its first NUL, since git reads it as a C string).
   defp lines("\uFEFF" <> text), do: lines(text)
 
   defp lines(text) do
@@ -118,7 +119,7 @@ defmodule RsolvCore.GitAttributes do
 
   defp name(~s(") <> _ = line) do
     case Patch.c_unquote(line) do
-      {:ok, name, rest} -> {name, rest}
+      {:ok, name, rest} -> {name |> :binary.split(<<0>>) |> hd(), rest}
       :error -> bare(line)
     end
   end

@@ -119,7 +119,10 @@ defmodule GenGitAttributesVectors do
       {"quoted_octal", %{"" => ~s("\\141.bin" filter=lfs\n)}, ~w(a.bin b.bin)},
       {"quoted_glob", %{"" => ~s("*.bin" filter=lfs\n)}, ~w(x.bin x.txt)},
       {"quoted_unterminated", %{"" => ~s("abc filter=lfs\n)}, [~s("abc), "abc"]},
-      {"quoted_bad_escape", %{"" => ~s("a\\qb" filter=lfs\n)}, [~s("a\\qb"), "aqb"]}
+      {"quoted_bad_escape", %{"" => ~s("a\\qb" filter=lfs\n)}, [~s("a\\qb"), "aqb"]},
+      {"quoted_nul_truncates", %{"" => ~s("*\\000.png" filter=lfs\n)}, ~w(a.txt a.png)},
+      {"quoted_nul_truncates_in_subdirectory", %{"sub" => ~s("x\\000" filter=lfs\n)},
+       ~w(sub/x sub/xy x)}
     ]
   end
 
