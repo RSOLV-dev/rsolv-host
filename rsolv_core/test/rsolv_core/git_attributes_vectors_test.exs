@@ -76,9 +76,20 @@ defmodule RsolvCore.GitAttributesVectorsTest do
 
     test "is exactly what the generator writes from real git", %{tmp_dir: tmp_dir} do
       out = Path.join(tmp_dir, "gitattributes.json")
-      assert {_output, 0} = System.cmd("elixir", [@generator, out], stderr_to_stdout: true)
+      hostile = Path.join(tmp_dir, "attributes")
+      File.write!(hostile, "* filter=hostile\n")
+
+      assert {_output, 0} =
+               System.cmd("elixir", [@generator, out],
+                 env: hostile_git_env("core.attributesFile", hostile),
+                 stderr_to_stdout: true
+               )
 
       assert out |> File.read!() |> JSON.decode!() == @committed |> File.read!() |> JSON.decode!()
     end
   end
+
+  # A caller's git environment, which the generator must not let reach git.
+  defp hostile_git_env(key, value),
+    do: [{"GIT_CONFIG_COUNT", "1"}, {"GIT_CONFIG_KEY_0", key}, {"GIT_CONFIG_VALUE_0", value}]
 end

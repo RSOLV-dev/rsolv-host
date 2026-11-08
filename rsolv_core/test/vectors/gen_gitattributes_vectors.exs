@@ -135,7 +135,7 @@ defmodule GenGitAttributesVectors do
   @git_env [{"GIT_CONFIG_NOSYSTEM", "1"}, {"GIT_CONFIG_GLOBAL", "/dev/null"}]
 
   def run(out) do
-    vectors = Enum.map(cases(), &vector/1)
+    vectors = isolated(fn -> Enum.map(cases(), &vector/1) end)
     File.write!(out, JSON.encode!(%{"cases" => vectors}) <> "\n")
 
     IO.puts(
@@ -143,14 +143,36 @@ defmodule GenGitAttributesVectors do
     )
   end
 
+  # git reads only what the vectors set: no system or user config or attributes,
+  # and nothing a caller's GIT_* environment would change.
+  defp isolated(fun) do
+    home = Path.join(System.tmp_dir!(), "rsolv-vec-home-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(home)
+
+    for {name, _value} <- System.get_env(),
+        String.starts_with?(name, "GIT_"),
+        do: System.delete_env(name)
+
+    System.put_env(%{
+      "HOME" => home,
+      "XDG_CONFIG_HOME" => home,
+      "GIT_ATTR_NOSYSTEM" => "1",
+      "GIT_CONFIG_NOSYSTEM" => "1"
+    })
+
+    try do
+      fun.()
+    after
+      File.rm_rf!(home)
+    end
+  end
+
   defp vector({name, attributes, paths}) do
     dir = Path.join(System.tmp_dir!(), "rsolv-attr-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
 
     try do
-      # HOME and XDG_CONFIG_HOME keep a user's core.attributesFile default out.
-      env = [{"HOME", dir}, {"XDG_CONFIG_HOME", dir} | @git_env]
-      {_out, 0} = System.cmd("git", ["init", "-q", "--template=", dir], env: env)
+      {_out, 0} = System.cmd("git", ["init", "-q", "--template=", dir], env: @git_env)
 
       for {sub, text} <- attributes do
         File.mkdir_p!(Path.join(dir, sub))
@@ -160,7 +182,7 @@ defmodule GenGitAttributesVectors do
       {out, 0} =
         System.cmd("git", ["check-attr", "-z", "filter", "--" | paths],
           cd: dir,
-          env: env,
+          env: @git_env,
           stderr_to_stdout: false
         )
 

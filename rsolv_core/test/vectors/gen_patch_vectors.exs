@@ -14,8 +14,11 @@ defmodule GenPatchVectors do
   ]
 
   def run(out) do
-    accept = Enum.map(accept_cases(), &accept/1)
-    reject = Enum.map(reject_cases(), &reject/1)
+    {accept, reject} =
+      isolated(fn ->
+        {Enum.map(accept_cases(), &accept/1), Enum.map(reject_cases(), &reject/1)}
+      end)
+
     json = JSON.encode!(%{"accept" => accept, "reject" => reject})
     File.write!(out, json <> "\n")
     IO.puts("wrote #{length(accept)} accept and #{length(reject)} reject vectors")
@@ -225,6 +228,30 @@ defmodule GenPatchVectors do
   end
 
   defp tamper(facts, _name), do: facts
+
+  # git reads only what the vectors set: no system or user config or attributes,
+  # and nothing a caller's GIT_* environment would change.
+  defp isolated(fun) do
+    home = Path.join(System.tmp_dir!(), "rsolv-vec-home-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(home)
+
+    for {name, _value} <- System.get_env(),
+        String.starts_with?(name, "GIT_"),
+        do: System.delete_env(name)
+
+    System.put_env(%{
+      "HOME" => home,
+      "XDG_CONFIG_HOME" => home,
+      "GIT_ATTR_NOSYSTEM" => "1",
+      "GIT_CONFIG_NOSYSTEM" => "1"
+    })
+
+    try do
+      fun.()
+    after
+      File.rm_rf!(home)
+    end
+  end
 
   defp in_repo(base, change, fun) do
     dir = Path.join(System.tmp_dir!(), "rsolv-vec-#{System.unique_integer([:positive])}")
