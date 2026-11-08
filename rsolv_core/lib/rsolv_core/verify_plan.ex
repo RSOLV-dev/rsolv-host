@@ -15,8 +15,9 @@ defmodule RsolvCore.VerifyPlan do
   and `-okdir` runs `cat` (RFC-150 acceptance 16). The change set, its digest,
   the RED paths and the RED digest must agree.
 
-  This is defense in depth: the verify job runs the repository's tests, which
-  are attacker code, inside the sandbox anyway.
+  These checks are a best-effort denylist: allowlisted tools still run inline code
+  (`npx node -e`, `python -m timeit`, `bundle exec ruby -e`, `mix run -e`, `mvn -Dexec.executable=`).
+  Containment is the sandbox: the verify job runs the repository's tests, which are attacker code.
   """
 
   alias RsolvCore.{ChangeSet, Text}
