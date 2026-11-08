@@ -7,7 +7,7 @@ defmodule RsolvCore.MixProject do
       version: "0.1.0",
       elixir: "~> 1.18",
       deps: deps(),
-      test_ignore_filters: ["test/vectors/gen_patch_vectors.exs"]
+      test_ignore_filters: [~r{\Atest/vectors/gen_.*\.exs\z}]
     ]
   end
 

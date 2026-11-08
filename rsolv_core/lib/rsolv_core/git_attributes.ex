@@ -2,14 +2,21 @@ defmodule RsolvCore.GitAttributes do
   @moduledoc """
   Whether a path falls under a `filter` attribute (LFS and other clean/smudge
   filters; RFC-150 §4.2) according to the base's `.gitattributes` files on its
-  ancestor chain. It over-approximates on purpose, so it can only reject more:
+  ancestor chain, read as git's attr.c and wildmatch read them, and checked
+  against `git check-attr` by `test/vectors/gitattributes.json`. Only `filter`
+  is checked: the patch is `git diff` output against the work tree, which has
+  already applied `ident`, `eol`/`text` and `working-tree-encoding`, base facts
+  are blobs from `git ls-tree`/`git cat-file`, and the host commits raw blobs.
+
+  It over-approximates on purpose, so it can only reject more:
   - any matching line that sets `filter` (directly, or through a chain of
-    `[attr]` macros defined in any of the files) counts, and a later unset
-    doesn't clear it;
+    `[attr]` macros, from any definition in any of the files) counts, a later
+    unset doesn't clear it, and a line git drops for an invalid attribute
+    name still counts;
   - a bracket expression (ended where git's wildmatch ends it) matches any one
-    character but `/`, and one git can't end matches nothing, as in git;
-  - a quoted pattern, a pattern over 256 bytes or one with more than four `**`
-    matches everything, as does a pattern the regex engine gives up on.
+    character but `/`, and `**` away from a `/` matches `/` too;
+  - a pattern over 256 bytes or with more than four `**` matches everything,
+    as does a pattern the regex engine gives up on.
 
       iex> RsolvCore.GitAttributes.filtered?("assets/logo.png", %{"" => "*.png filter=lfs diff=lfs merge=lfs -text\\n"})
       true
@@ -25,9 +32,12 @@ defmodule RsolvCore.GitAttributes do
   @max_macros 1_024
   @max_macro_depth 64
   @max_rules 1_024
+  @blanks [" ", "\t", "\r"]
 
   @enforce_keys [:rules]
   defstruct @enforce_keys
+
+  alias RsolvCore.Patch
 
   @typedoc """
   Compiled attributes: per directory, a matcher for each line that sets
@@ -98,19 +108,51 @@ defmodule RsolvCore.GitAttributes do
     end
   end
 
+  # As git's attr.c reads a file: a leading UTF-8 BOM is skipped, lines end at
+  # "\n", blanks are space, tab and "\r", and a pattern may be C-quoted.
+  defp lines("\uFEFF" <> text), do: lines(text)
+
   defp lines(text) do
-    text
-    |> String.split(["\r\n", "\n"])
-    |> Enum.map(&String.split(&1, [" ", "\t"], trim: true))
-    |> Enum.reject(&(&1 == [] or String.starts_with?(hd(&1), "#")))
+    for raw <- :binary.split(text, "\n", [:global]),
+        line = skip_blanks(raw),
+        line != "" and not String.starts_with?(line, "#"),
+        do: line |> name() |> entry()
   end
+
+  defp name(~s(") <> _ = line) do
+    case Patch.c_unquote(line) do
+      {:ok, name, rest} -> {name, rest}
+      :error -> bare(line)
+    end
+  end
+
+  defp name(line), do: bare(line)
+
+  defp bare(line) do
+    case :binary.match(line, @blanks) do
+      {at, _} -> {binary_part(line, 0, at), binary_part(line, at, byte_size(line) - at)}
+      :nomatch -> {line, ""}
+    end
+  end
+
+  defp entry({"[attr]" <> macro, rest}) when macro != "" do
+    {name, _rest} = macro |> skip_blanks() |> bare()
+    {:macro, name, attributes(rest)}
+  end
+
+  defp entry({pattern, rest}), do: {:pattern, pattern, attributes(rest)}
+
+  defp attributes(rest), do: String.split(rest, @blanks, trim: true)
+
+  defp skip_blanks(<<c, rest::binary>>) when c in ~c" \t\r", do: skip_blanks(rest)
+  defp skip_blanks(line), do: line
 
   # The macros that set filter through any chain of macros, from any file and
   # any of a macro's definitions: git honours only the root's last definition,
   # so this can only find more. Breadth-first from the macros that set filter
   # directly, over "macro → the macros naming it", so each edge is walked once.
   defp setters(files) do
-    macros = for {_dir, lines} <- files, ["[attr]" <> name | attrs] <- lines, do: {name, attrs}
+    macros = for {_dir, lines} <- files, {:macro, name, attrs} <- lines, do: {name, attrs}
 
     if length(macros) > @max_macros do
       :over_cap
@@ -146,8 +188,7 @@ defmodule RsolvCore.GitAttributes do
       Map.new(files, fn {dir, lines} ->
         {dir,
          for(
-           [pattern | attrs] <- lines,
-           not String.starts_with?(pattern, "[attr]"),
+           {:pattern, pattern, attrs} <- lines,
            Enum.any?(attrs, &(sets_filter?(&1) or MapSet.member?(setters, &1))),
            matcher = matcher(pattern),
            matcher != :never,
@@ -178,12 +219,12 @@ defmodule RsolvCore.GitAttributes do
       :re.run(target, regex, [:report_errors, {:match_limit, @match_limit}, capture: :none]) !=
         :nomatch
 
-  defp matcher(~s(") <> _quoted), do: :any
+  # git never matches a file with a directory-only or a negative pattern.
+  defp matcher("!" <> _negative), do: :never
+  defp matcher(pattern) when binary_part(pattern, byte_size(pattern) - 1, 1) == "/", do: :never
   defp matcher(pattern) when byte_size(pattern) > @max_pattern_bytes, do: :any
 
   defp matcher(pattern) do
-    pattern = if String.ends_with?(pattern, "/"), do: "**/" <> pattern <> "**", else: pattern
-
     if length(String.split(pattern, "**")) - 1 > @max_globstars do
       :any
     else

@@ -26,8 +26,23 @@ defmodule RsolvCore.GitAttributesTest do
       refute GitAttributes.filtered?("x.txt", %{"" => "*.txt -filter !filter text\n"})
     end
 
-    test "treats a quoted pattern that sets filter as matching" do
-      assert GitAttributes.filtered?("src/a.js", %{"" => ~s("odd name" filter=x\n)})
+    test "unquotes a C-quoted pattern as git does" do
+      attrs = %{"" => ~s("odd name" filter=x\n)}
+      assert GitAttributes.filtered?("src/odd name", attrs)
+      refute GitAttributes.filtered?("src/a.js", attrs)
+    end
+
+    test "reads attributes glued to a quoted pattern's closing quote" do
+      assert GitAttributes.filtered?("a", %{"" => ~s("a"filter=lfs\n)})
+    end
+
+    test "reads a lone [attr] as a pattern, not a macro" do
+      assert GitAttributes.filtered?("t", %{"" => "[attr] filter=lfs\n"})
+    end
+
+    test "skips a byte order mark and splits on a carriage return, as git does" do
+      assert GitAttributes.filtered?("a.bin", %{"" => "\uFEFF*.bin filter=lfs\n"})
+      assert GitAttributes.filtered?("a.bin", %{"" => "*.bin\rfilter=lfs\n"})
     end
 
     test "treats a bracket expression as any one character" do

@@ -223,6 +223,12 @@ defmodule RsolvCore.Patch do
 
   defp unquote_name(name), do: {:ok, name}
 
+  @doc false
+  # git's unquote_c_style, also used for C-quoted .gitattributes patterns:
+  # the unquoted bytes and what follows the closing quote.
+  @spec c_unquote(binary()) :: {:ok, binary(), binary()} | :error
+  def c_unquote(bytes), do: quoted(bytes)
+
   # git's C-style quoting: \a \b \t \n \v \f \r \" \\ and three-digit octal.
   defp quoted(~s(") <> rest), do: unescape(rest, [])
   defp quoted(_bare), do: :error
