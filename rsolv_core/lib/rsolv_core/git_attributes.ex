@@ -6,7 +6,8 @@ defmodule RsolvCore.GitAttributes do
   - any matching line that sets `filter` (directly, or through a chain of
     `[attr]` macros defined in any of the files) counts, and a later unset
     doesn't clear it;
-  - a bracket expression matches any one character;
+  - a bracket expression (ended where git's wildmatch ends it) matches any one
+    character but `/`, and one git can't end matches nothing, as in git;
   - a quoted pattern, a pattern over 256 bytes or one with more than four `**`
     matches everything, as does a pattern the regex engine gives up on.
 
@@ -100,7 +101,10 @@ defmodule RsolvCore.GitAttributes do
       {anchored?, pattern} = anchor(pattern)
       target = if anchored?, do: relative, else: Path.basename(relative)
 
-      regex_match?("\\A" <> IO.iodata_to_binary(translate(pattern, [])) <> "\\z", target)
+      case translate(pattern, []) do
+        :never -> false
+        regex -> regex_match?("\\A" <> IO.iodata_to_binary(regex) <> "\\z", target)
+      end
     end
   end
 
@@ -125,14 +129,48 @@ defmodule RsolvCore.GitAttributes do
   defp translate("*" <> rest, acc), do: translate(rest, [acc, "[^/]*"])
   defp translate("?" <> rest, acc), do: translate(rest, [acc, "[^/]"])
 
+  # Any one character but `/`: a superset of every bracket expression, negated or not.
   defp translate("[" <> rest, acc) do
-    case :binary.split(rest, "]") do
-      [_class, rest] -> translate(rest, [acc, "[^/]"])
-      [_unclosed] -> translate(rest, [acc, "\\["])
+    case bracket(rest) do
+      {:ok, rest} -> translate(rest, [acc, "[^/]"])
+      :unterminated -> :never
     end
   end
 
   defp translate(<<?\\, c, rest::binary>>, acc), do: translate(rest, [acc, Regex.escape(<<c>>)])
   defp translate(<<c, rest::binary>>, acc), do: translate(rest, [acc, Regex.escape(<<c>>)])
   defp translate("", acc), do: acc
+
+  # Where git's wildmatch ends a bracket expression: after an optional `!` or
+  # `^`, the first member is never the end (so a leading `]` is literal); `\\`
+  # escapes; a range's end is the next character, even `[`; `[:class:]` is one
+  # member. Git aborts the whole match on an unterminated one.
+  defp bracket(<<negate, rest::binary>>) when negate in ~c"!^", do: member(rest, 0, true)
+  defp bracket(rest), do: member(rest, 0, true)
+
+  defp member("", _prev, _first?), do: :unterminated
+  defp member("]" <> rest, _prev, false), do: {:ok, rest}
+  defp member(<<?\\, c, rest::binary>>, _prev, _first?), do: member(rest, c, false)
+  defp member("\\", _prev, _first?), do: :unterminated
+
+  defp member(<<?-, ?\\, _c, rest::binary>>, prev, _first?) when prev != 0,
+    do: member(rest, 0, false)
+
+  defp member(<<?-, c, rest::binary>>, prev, _first?) when prev != 0 and c != ?],
+    do: member(rest, 0, false)
+
+  defp member("[:" <> rest, _prev, _first?) do
+    case :binary.match(rest, "]") do
+      {at, 1} when at > 0 and binary_part(rest, at - 1, 1) == ":" ->
+        member(binary_part(rest, at + 1, byte_size(rest) - at - 1), 0, false)
+
+      {_at, 1} ->
+        member(":" <> rest, ?[, false)
+
+      :nomatch ->
+        :unterminated
+    end
+  end
+
+  defp member(<<c, rest::binary>>, _prev, _first?), do: member(rest, c, false)
 end

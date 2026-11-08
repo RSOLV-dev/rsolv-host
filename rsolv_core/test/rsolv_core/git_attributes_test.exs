@@ -55,6 +55,30 @@ defmodule RsolvCore.GitAttributesTest do
       assert GitAttributes.filtered?(path, %{"" => pattern <> " filter=x\n"})
     end
 
+    test "matches a POSIX class inside a bracket expression" do
+      assert GitAttributes.filtered?("5", %{"" => "[[:digit:]] filter=lfs\n"})
+    end
+
+    test "reads a ] right after a negation as a member, not the end" do
+      assert GitAttributes.filtered?("a", %{"" => "[!]] filter=lfs\n"})
+    end
+
+    test "reads a leading ] as a member, not the end" do
+      assert GitAttributes.filtered?("]", %{"" => "[]] filter=lfs\n"})
+    end
+
+    test "ends a range at the character after the dash, even a [" do
+      assert GitAttributes.filtered?("a]", %{"" => "[a-[:digit:]] filter=lfs\n"})
+    end
+
+    test "keeps an escaped ] inside a bracket expression" do
+      assert GitAttributes.filtered?("x", %{"" => "[\\]x] filter=lfs\n"})
+    end
+
+    test "never matches through an unterminated bracket, as git doesn't" do
+      refute GitAttributes.filtered?("[abc", %{"" => "[abc filter=lfs\n"})
+    end
+
     test "is false with no attribute files" do
       refute GitAttributes.filtered?("src/a.js", %{})
     end
