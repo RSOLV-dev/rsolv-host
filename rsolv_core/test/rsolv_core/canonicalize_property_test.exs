@@ -47,7 +47,7 @@ defmodule RsolvCore.CanonicalizePropertyTest do
             at <- integer(0..(byte_size(patch) - 1)),
             byte <- integer(0..255)
           ) do
-      <<head::binary-size(at), _old, tail::binary>> = patch
+      <<head::binary-size(^at), _old, tail::binary>> = patch
       mutated = head <> <<byte>> <> tail
       assert match?({:ok, _}, Patch.parse(mutated)) or match?({:error, _}, Patch.parse(mutated))
     end
@@ -70,7 +70,7 @@ defmodule RsolvCore.CanonicalizePropertyTest do
             at <- integer(0..(byte_size(patch) - 1)),
             byte <- integer(0..255)
           ) do
-      <<head::binary-size(at), _old, tail::binary>> = patch
+      <<head::binary-size(^at), _old, tail::binary>> = patch
 
       with {:ok, diffs} <- Patch.parse(head <> <<byte>> <> tail) do
         assert match?({:ok, _entries, _images}, Canonicalize.change_set(diffs, facts)) or
