@@ -160,6 +160,12 @@ defmodule RsolvCore.VerifyPlanTest do
       assert VerifyPlan.decode(plan(%{"prepare" => [argv]})) == {:error, :invalid_plan}
     end
 
+    test "refuses -c inside any executable's cluster of short options" do
+      for argv <- [["npx", "-yc", "echo X"], ["npx", "-Dc", "echo X"]] do
+        assert VerifyPlan.decode(plan(%{"test" => argv})) == {:error, :invalid_plan}
+      end
+    end
+
     test "refuses npx --call" do
       for call <- [["npx", "--call", "id"], ["npx", "--call=id"]] do
         assert VerifyPlan.decode(plan(%{"test" => call})) == {:error, :invalid_plan}

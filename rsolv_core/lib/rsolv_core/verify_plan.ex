@@ -10,13 +10,13 @@ defmodule RsolvCore.VerifyPlan do
   text. Its executable must be one of #{inspect(~w(npx python bundle mix mvn vendor/bin/phpunit cat rm find))}.
   No argument is a shell or `env`, by name or path
   (#{inspect(~w(sh bash dash zsh ksh ash fish busybox env))}); no argument is
-  `-c`, starts with it (`-cCODE`) or is `--call`; python's short-option
-  clusters don't hold `c` (`-Bc`); and every `find` `-exec`, `-execdir`, `-ok`
-  and `-okdir` runs `cat` (RFC-150 acceptance 16). The change set, its digest,
-  the RED paths and the RED digest must agree.
+  `-c`, starts with it (`-cCODE`) or is `--call`; no single-dash argument holds
+  `c` after only letters (`-Bc`, `-yc`, `-Dc`), except for `find`, whose every
+  `-exec`, `-execdir`, `-ok` and `-okdir` runs `cat` (RFC-150 acceptance 16).
+  The change set, its digest, the RED paths and the RED digest must agree.
 
   These checks are a best-effort denylist: allowlisted tools still run inline code
-  (`npx node -e`, `python -m timeit`, `bundle exec ruby -e`, `mix run -e`, `mvn -Dexec.executable=`).
+  (`npx node -e`, `python -m timeit`, `bundle exec ruby -e`, `mix run -e`, `mix cmd`).
   Containment is the sandbox: the verify job runs the repository's tests, which are attacker code.
   """
 
@@ -147,8 +147,8 @@ defmodule RsolvCore.VerifyPlan do
     end)
   end
 
-  defp arguments?("python", args), do: not Enum.any?(args, &(&1 =~ ~r/\A-[A-Za-z]*c/))
-  defp arguments?(_executable, _args), do: true
+  # find has no option clusters, and its -exec family is held to cat above.
+  defp arguments?(_executable, args), do: not Enum.any?(args, &(&1 =~ ~r/\A-[A-Za-z]*c/))
 
   defp report(%{"format" => "exunit_trace", "argv" => nil} = report) when map_size(report) == 2,
     do: {:ok, %{format: "exunit_trace", argv: nil}}
