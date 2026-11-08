@@ -2,7 +2,13 @@ defmodule RsolvCore.MixProject do
   use Mix.Project
 
   def project do
-    [app: :rsolv_core, version: "0.1.0", elixir: "~> 1.18", deps: deps()]
+    [
+      app: :rsolv_core,
+      version: "0.1.0",
+      elixir: "~> 1.18",
+      deps: deps(),
+      test_ignore_filters: [~r{\Atest/vectors/gen_.*\.exs\z}]
+    ]
   end
 
   def application, do: [extra_applications: [:crypto]]
