@@ -84,6 +84,55 @@ defmodule RsolvCore.GitAttributesTest do
     end
   end
 
+  describe "compile/1 and filtered?/2 on macro graphs" do
+    defp chain(n),
+      do:
+        Enum.map_join(1..n//1, &"[attr]m#{&1} m#{&1 - 1}\n") <>
+          "[attr]m0 filter=lfs\n* m#{n}\n"
+
+    test "follows a chain defined before the macro that sets filter" do
+      assert GitAttributes.filtered?("a.txt", %{"" => chain(40)})
+    end
+
+    test "resolves macros once per attribute set, not once per path" do
+      attributes = GitAttributes.compile(%{"" => chain(40) <> "*.js text\n"})
+
+      {micros, results} =
+        :timer.tc(fn ->
+          for n <- 1..1_000, do: GitAttributes.filtered?("d/f#{n}.txt", attributes)
+        end)
+
+      assert Enum.all?(results)
+      assert micros < 1_000_000
+    end
+
+    test "terminates on a cycle that never reaches filter" do
+      refute GitAttributes.filtered?("a", %{"" => "[attr]a b\n[attr]b a\n* a\n"})
+    end
+
+    test "treats a chain deeper than the cap as filtering everything, quickly" do
+      {micros, filtered?} =
+        :timer.tc(fn -> GitAttributes.filtered?("a.txt", %{"" => chain(3_000)}) end)
+
+      assert filtered?
+      assert micros < 1_000_000
+    end
+
+    test "treats more macros than the cap as filtering everything" do
+      text = Enum.map_join(1..5_000, &"[attr]m#{&1} text\n")
+      assert GitAttributes.filtered?("a.js", %{"" => text})
+    end
+
+    test "treats more lines than the cap as filtering everything" do
+      assert GitAttributes.filtered?("a.js", %{"" => :binary.copy("*.c text\n", 60_000)})
+    end
+
+    test "treats more filter lines than the cap as filtering everything" do
+      text = Enum.map_join(1..2_000, &"*.x#{&1} filter=lfs\n")
+      assert GitAttributes.filtered?("a.js", %{"" => text})
+    end
+  end
+
   describe "filtered?/2 on arbitrary attribute bytes" do
     use ExUnitProperties
 

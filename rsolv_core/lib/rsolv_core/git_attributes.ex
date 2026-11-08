@@ -21,27 +21,55 @@ defmodule RsolvCore.GitAttributes do
   @max_pattern_bytes 256
   @max_globstars 4
   @match_limit 100_000
+  @max_lines 50_000
+  @max_macros 1_024
+  @max_macro_depth 64
+  @max_rules 1_024
+
+  @enforce_keys [:rules]
+  defstruct @enforce_keys
+
+  @typedoc """
+  Compiled attributes: per directory, a matcher for each line that sets
+  `filter`; `:all` when the input was over a cap, so every path is filtered.
+  """
+  @type t :: %__MODULE__{rules: %{String.t() => [matcher()]} | :all}
+  @typep matcher :: :any | {:basename | :path, tuple()}
 
   @doc """
-  Whether `path` is filtered, given `attributes`: directory (`""` for the root)
-  → the bytes of that directory's `.gitattributes`.
+  Compiles `attributes` (directory, `""` for the root, → the bytes of that
+  directory's `.gitattributes`) once, for any number of `filtered?/2` calls.
+  Over #{@max_lines} lines, #{@max_macros} macros, a macro chain #{@max_macro_depth}
+  deep or #{@max_rules} lines that set `filter`, every path is filtered.
   """
-  @spec filtered?(String.t(), %{String.t() => binary()}) :: boolean()
-  def filtered?(path, attributes) do
-    # ponytail: re-parses the files and recompiles each pattern per call; for patches near
-    # the 1,000-file cap over large .gitattributes, parse once per change set instead.
-    files = Map.new(attributes, fn {dir, text} -> {dir, lines(text)} end)
-    macros = files |> Map.values() |> Enum.concat() |> macros(MapSet.new())
+  @spec compile(%{String.t() => binary()}) :: t()
+  def compile(attributes) do
+    with {:ok, files} <- parse(attributes),
+         {:ok, setters} <- setters(files),
+         {:ok, rules} <- rules(files, setters) do
+      %__MODULE__{rules: rules}
+    else
+      :over_cap -> %__MODULE__{rules: :all}
+    end
+  end
 
+  @doc """
+  Whether `path` is filtered, given compiled attributes or the raw map
+  `compile/1` takes.
+  """
+  @spec filtered?(String.t(), t() | %{String.t() => binary()}) :: boolean()
+  def filtered?(_path, %__MODULE__{rules: :all}), do: true
+
+  def filtered?(path, %__MODULE__{rules: rules}) do
     path
     |> dirs()
     |> Enum.any?(fn dir ->
-      case Map.fetch(files, dir) do
-        {:ok, lines} -> lines_filter?(lines, macros, relative(path, dir))
-        :error -> false
-      end
+      relative = relative(path, dir)
+      rules |> Map.get(dir, []) |> Enum.any?(&matches?(&1, relative))
     end)
   end
+
+  def filtered?(path, attributes), do: filtered?(path, compile(attributes))
 
   @doc "The directories whose `.gitattributes` apply to `path`, the root (`\"\"`) first."
   @spec dirs(String.t()) :: [String.t()]
@@ -55,6 +83,21 @@ defmodule RsolvCore.GitAttributes do
   defp relative(path, dir),
     do: binary_part(path, byte_size(dir) + 1, byte_size(path) - byte_size(dir) - 1)
 
+  defp parse(attributes) do
+    Enum.reduce_while(attributes, {:ok, %{}, 0}, fn {dir, text}, {:ok, files, count} ->
+      lines = lines(text)
+      count = count + length(lines)
+
+      if count > @max_lines,
+        do: {:halt, :over_cap},
+        else: {:cont, {:ok, Map.put(files, dir, lines), count}}
+    end)
+    |> case do
+      {:ok, files, _count} -> {:ok, files}
+      :over_cap -> :over_cap
+    end
+  end
+
   defp lines(text) do
     text
     |> String.split(["\r\n", "\n"])
@@ -62,61 +105,97 @@ defmodule RsolvCore.GitAttributes do
     |> Enum.reject(&(&1 == [] or String.starts_with?(hd(&1), "#")))
   end
 
-  # Every macro that sets filter, through any chain of macros, from any file:
-  # git honours only the root's definitions, so this can only find more.
-  defp macros(lines, known) do
-    found =
-      for ["[attr]" <> name | attrs] <- lines,
-          sets_filter?(attrs, known),
-          into: known,
-          do: name
+  # The macros that set filter through any chain of macros, from any file and
+  # any of a macro's definitions: git honours only the root's last definition,
+  # so this can only find more. Breadth-first from the macros that set filter
+  # directly, over "macro → the macros naming it", so each edge is walked once.
+  defp setters(files) do
+    macros = for {_dir, lines} <- files, ["[attr]" <> name | attrs] <- lines, do: {name, attrs}
 
-    if MapSet.equal?(found, known), do: known, else: macros(lines, found)
-  end
-
-  defp lines_filter?(lines, macros, relative) do
-    Enum.any?(lines, fn
-      ["[attr]" <> _ | _attrs] -> false
-      [~s(") <> _ | attrs] -> sets_filter?(attrs, macros)
-      [pattern | attrs] -> sets_filter?(attrs, macros) and matches?(pattern, relative)
-    end)
-  end
-
-  defp sets_filter?(attrs, macros) do
-    Enum.any?(attrs, fn
-      "filter" -> true
-      "filter=" <> _driver -> true
-      attr -> MapSet.member?(macros, attr)
-    end)
-  end
-
-  defp matches?(pattern, _relative) when byte_size(pattern) > @max_pattern_bytes, do: true
-
-  defp matches?(pattern, relative) do
-    pattern = if String.ends_with?(pattern, "/"), do: "**/" <> pattern <> "**", else: pattern
-
-    if length(String.split(pattern, "**")) - 1 > @max_globstars do
-      true
+    if length(macros) > @max_macros do
+      :over_cap
     else
-      {anchored?, pattern} = anchor(pattern)
-      target = if anchored?, do: relative, else: Path.basename(relative)
+      direct = for {name, attrs} <- macros, Enum.any?(attrs, &sets_filter?/1), do: name
 
-      case translate(pattern, []) do
-        :never -> false
-        regex -> regex_match?("\\A" <> IO.iodata_to_binary(regex) <> "\\z", target)
-      end
+      named_by =
+        Enum.group_by(
+          for({name, attrs} <- macros, attr <- attrs, bare?(attr), do: {attr, name}),
+          &elem(&1, 0),
+          &elem(&1, 1)
+        )
+
+      reach(direct, MapSet.new(direct), named_by, 0)
     end
   end
 
-  # Anything but a clear "no match" (a compile error, the match limit) counts as a match.
-  defp regex_match?(source, target) do
-    case :re.compile(source) do
-      {:ok, regex} ->
-        :re.run(target, regex, [:report_errors, {:match_limit, @match_limit}, capture: :none]) !=
-          :nomatch
+  defp reach([], seen, _named_by, _depth), do: {:ok, seen}
+  defp reach(_frontier, _seen, _named_by, @max_macro_depth), do: :over_cap
 
-      {:error, _reason} ->
-        true
+  defp reach(frontier, seen, named_by, depth) do
+    next =
+      frontier
+      |> Enum.flat_map(&Map.get(named_by, &1, []))
+      |> Enum.uniq()
+      |> Enum.reject(&MapSet.member?(seen, &1))
+
+    reach(next, MapSet.union(seen, MapSet.new(next)), named_by, depth + 1)
+  end
+
+  defp rules(files, setters) do
+    rules =
+      Map.new(files, fn {dir, lines} ->
+        {dir,
+         for(
+           [pattern | attrs] <- lines,
+           not String.starts_with?(pattern, "[attr]"),
+           Enum.any?(attrs, &(sets_filter?(&1) or MapSet.member?(setters, &1))),
+           matcher = matcher(pattern),
+           matcher != :never,
+           do: matcher
+         )}
+      end)
+
+    if rules |> Map.values() |> Enum.map(&length/1) |> Enum.sum() > @max_rules,
+      do: :over_cap,
+      else: {:ok, rules}
+  end
+
+  defp sets_filter?("filter"), do: true
+  defp sets_filter?("filter=" <> _driver), do: true
+  defp sets_filter?(_attr), do: false
+
+  # An attribute set to true, the only state in which git expands a macro.
+  defp bare?(<<c, _::binary>> = attr) when c not in ~c"-!", do: not String.contains?(attr, "=")
+  defp bare?(_attr), do: false
+
+  defp matches?(:any, _relative), do: true
+  defp matches?({:basename, regex}, relative), do: regex_match?(regex, Path.basename(relative))
+  defp matches?({:path, regex}, relative), do: regex_match?(regex, relative)
+
+  # Anything but a clear "no match" (the match limit) counts as a match.
+  defp regex_match?(regex, target),
+    do:
+      :re.run(target, regex, [:report_errors, {:match_limit, @match_limit}, capture: :none]) !=
+        :nomatch
+
+  defp matcher(~s(") <> _quoted), do: :any
+  defp matcher(pattern) when byte_size(pattern) > @max_pattern_bytes, do: :any
+
+  defp matcher(pattern) do
+    pattern = if String.ends_with?(pattern, "/"), do: "**/" <> pattern <> "**", else: pattern
+
+    if length(String.split(pattern, "**")) - 1 > @max_globstars do
+      :any
+    else
+      {anchored?, pattern} = anchor(pattern)
+
+      with regex when regex != :never <- translate(pattern, []),
+           {:ok, compiled} <- :re.compile(["\\A", regex, "\\z"]) do
+        {if(anchored?, do: :path, else: :basename), compiled}
+      else
+        :never -> :never
+        {:error, _reason} -> :any
+      end
     end
   end
 

@@ -39,10 +39,12 @@ defmodule RsolvCore.Canonicalize do
   @spec change_set([Patch.FileDiff.t()], BaseFacts.t()) ::
           {:ok, [Entry.t()], %{String.t() => binary()}} | {:error, {reason(), String.t() | nil}}
   def change_set(diffs, %BaseFacts{} = facts) do
+    attributes = GitAttributes.compile(facts.attributes)
+
     diffs
     |> Enum.sort_by(& &1.path)
     |> Enum.reduce_while({:ok, [], %{}}, fn diff, {:ok, entries, images} ->
-      case entry(diff, facts) do
+      case entry(diff, facts, attributes) do
         {:ok, entry, nil} ->
           {:cont, {:ok, [entry | entries], images}}
 
@@ -67,10 +69,10 @@ defmodule RsolvCore.Canonicalize do
 
   defp checked(error), do: error
 
-  defp entry(%Patch.FileDiff{path: path, op: op, hunks: hunks}, facts) do
+  defp entry(%Patch.FileDiff{path: path, op: op, hunks: hunks}, facts, attributes) do
     with :ok <- covered(path, facts),
          :ok <- ancestors(path, facts),
-         :ok <- unfiltered(path, facts),
+         :ok <- unfiltered(path, attributes),
          {:ok, fact, base} <- base(op, Map.fetch!(facts.paths, path)),
          {:ok, image} <- apply_hunks(base, hunks) do
       build(op, path, fact, base, image)
@@ -92,9 +94,9 @@ defmodule RsolvCore.Canonicalize do
       else: {:error, :ancestor_not_tree}
   end
 
-  defp unfiltered(path, facts),
+  defp unfiltered(path, attributes),
     do:
-      if(GitAttributes.filtered?(path, facts.attributes),
+      if(GitAttributes.filtered?(path, attributes),
         do: {:error, :filter_attribute},
         else: :ok
       )
