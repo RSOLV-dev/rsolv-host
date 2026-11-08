@@ -66,6 +66,19 @@ defmodule RsolvCore.VerifyPlanTest do
       assert {:ok, %VerifyPlan{framework: "jest", red_paths: ["test/app.test.js"]}} =
                VerifyPlan.decode(plan())
     end
+
+    test "accepts the junit report's find -exec cat" do
+      find = ~w(find target/surefire-reports -maxdepth 1 -name TEST-*.xml -exec cat -- {} +)
+      report = %{"format" => "junit_xml", "argv" => find}
+
+      assert {:ok, %VerifyPlan{report: %{argv: ^find}}} =
+               VerifyPlan.decode(plan(%{"report" => report}))
+    end
+
+    test "keeps long flags and single-dash flags that aren't -c" do
+      argv = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--collect-only"]
+      assert {:ok, %VerifyPlan{test: ^argv}} = VerifyPlan.decode(plan(%{"test" => argv}))
+    end
   end
 
   describe "decode/1 when the plan is refused" do
@@ -82,6 +95,41 @@ defmodule RsolvCore.VerifyPlanTest do
     test "refuses -c anywhere in an argv" do
       assert VerifyPlan.decode(plan(%{"prepare" => [["python", "-c", "print(1)"]]})) ==
                {:error, :invalid_plan}
+    end
+
+    test "refuses find -exec of anything but cat" do
+      for exec <- ~w(-exec -execdir -ok -okdir) do
+        find = ["find", ".", exec, "curl", "x", ";"]
+        assert VerifyPlan.decode(plan(%{"prepare" => [find]})) == {:error, :invalid_plan}
+      end
+    end
+
+    test "refuses find -exec of a shell outside the refused names" do
+      find = ["find", ".", "-exec", "/bin/dash", "p.sh", ";"]
+      assert VerifyPlan.decode(plan(%{"prepare" => [find]})) == {:error, :invalid_plan}
+    end
+
+    test "refuses -c attached to its argument" do
+      argv = ["python", "-c__import__('os').system('id')"]
+      assert VerifyPlan.decode(plan(%{"prepare" => [argv]})) == {:error, :invalid_plan}
+    end
+
+    test "refuses python's -c inside a cluster of short options" do
+      argv = ["python", "-Bc", "import os"]
+      assert VerifyPlan.decode(plan(%{"prepare" => [argv]})) == {:error, :invalid_plan}
+    end
+
+    test "refuses npx --call" do
+      for call <- [["npx", "--call", "id"], ["npx", "--call=id"]] do
+        assert VerifyPlan.decode(plan(%{"test" => call})) == {:error, :invalid_plan}
+      end
+    end
+
+    test "refuses every shell and env by name or path" do
+      for shell <- ~w(sh bash dash zsh ksh ash fish busybox env /usr/bin/env /bin/zsh) do
+        find = ["find", ".", "-exec", "cat", shell, ";"]
+        assert VerifyPlan.decode(plan(%{"prepare" => [find]})) == {:error, :invalid_plan}
+      end
     end
 
     test "refuses an executable outside the allowlist" do

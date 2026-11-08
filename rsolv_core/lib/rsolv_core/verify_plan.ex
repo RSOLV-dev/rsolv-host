@@ -8,9 +8,15 @@ defmodule RsolvCore.VerifyPlan do
 
   Every argv is 1–256 arguments of 1–4096 bytes of `RsolvCore.Text.plain?/1`
   text. Its executable must be one of #{inspect(~w(npx python bundle mix mvn vendor/bin/phpunit cat rm find))}.
-  No argument is `sh`, `bash` or `-c`, or a path to `sh` or `bash` (RFC-150
-  acceptance 16). The change set, its digest, the RED paths and the RED digest
-  must agree.
+  No argument is a shell or `env`, by name or path
+  (#{inspect(~w(sh bash dash zsh ksh ash fish busybox env))}); no argument is
+  `-c`, starts with it (`-cCODE`) or is `--call`; python's short-option
+  clusters don't hold `c` (`-Bc`); and every `find` `-exec`, `-execdir`, `-ok`
+  and `-okdir` runs `cat` (RFC-150 acceptance 16). The change set, its digest,
+  the RED paths and the RED digest must agree.
+
+  This is defense in depth: the verify job runs the repository's tests, which
+  are attacker code, inside the sandbox anyway.
   """
 
   alias RsolvCore.{ChangeSet, Text}
@@ -50,7 +56,8 @@ defmodule RsolvCore.VerifyPlan do
   @frameworks ~w(jest pytest rspec ex_unit junit phpunit)
   @formats ~w(jest_json rspec_json junit_xml exunit_trace)
   @executables ~w(npx python bundle mix mvn vendor/bin/phpunit cat rm find)
-  @refused ~w(sh bash -c)
+  @refused ~w(sh bash dash zsh ksh ash fish busybox env)
+  @find_execs ~w(-exec -execdir -ok -okdir)
   @max_args 256
   @max_arg_bytes 4096
   @max_steps 8
@@ -112,15 +119,35 @@ defmodule RsolvCore.VerifyPlan do
 
   defp steps?(_steps), do: false
 
-  defp argv?([executable | _] = argv) when length(argv) <= @max_args do
+  defp argv?([executable | args] = argv) when length(argv) <= @max_args do
     executable in @executables and
-      Enum.all?(argv, &(is_binary(&1) and byte_size(&1) in 1..@max_arg_bytes and argument?(&1)))
+      Enum.all?(argv, &(is_binary(&1) and byte_size(&1) in 1..@max_arg_bytes and argument?(&1))) and
+      arguments?(executable, args)
   end
 
   defp argv?(_argv), do: false
 
   defp argument?(arg),
-    do: Text.plain?(arg) and arg not in @refused and Path.basename(arg) not in @refused
+    do: Text.plain?(arg) and Path.basename(arg) not in @refused and not inline_code?(arg)
+
+  defp inline_code?("--call"), do: true
+  defp inline_code?("--call=" <> _code), do: true
+  defp inline_code?("--" <> _long), do: false
+  defp inline_code?("-c" <> _code), do: true
+  defp inline_code?(_arg), do: false
+
+  defp arguments?("find", args) do
+    args
+    |> Enum.chunk_every(2, 1)
+    |> Enum.all?(fn
+      [exec, next] when exec in @find_execs -> next == "cat"
+      [exec] when exec in @find_execs -> false
+      _other -> true
+    end)
+  end
+
+  defp arguments?("python", args), do: not Enum.any?(args, &(&1 =~ ~r/\A-[A-Za-z]*c/))
+  defp arguments?(_executable, _args), do: true
 
   defp report(%{"format" => "exunit_trace", "argv" => nil} = report) when map_size(report) == 2,
     do: {:ok, %{format: "exunit_trace", argv: nil}}
