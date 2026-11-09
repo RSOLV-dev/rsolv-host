@@ -27,6 +27,12 @@ defmodule RsolvHost.Sandbox do
           egress: :proxy | :none
         }
 
+  # ponytail: sized for a GitHub-hosted runner (7 GB RAM, 2 to 4 CPUs),
+  # leaving room for the host's VM and the proxy: 4 GiB of memory and no swap,
+  # 2 CPUs, a 1 GiB /tmp. Raise with evidence from a self-hosted runner. The
+  # bind-mounted copy and HOME have no portable disk quota.
+  @limits ["--memory", "4g", "--memory-swap", "4g", "--cpus", "2"]
+  @tmp "/tmp:exec,size=1g"
   @setup_timeout_ms 60_000
   # An image pull can be slow; the sandbox image carries every toolchain.
   @pull_timeout_ms 900_000
@@ -61,7 +67,8 @@ defmodule RsolvHost.Sandbox do
         "--security-opt",
         "no-new-privileges"
       ] ++
-      ["--pids-limit", "4096", "--tmpfs", "/tmp:exec"] ++
+      ["--pids-limit", "4096", "--tmpfs", @tmp] ++
+      @limits ++
       ["-e", "LANG=C.UTF-8", "-e", "CI=true", "-e", "HOME=/opt/home"] ++
       proxy_env(egress, opts.proxy_ip) ++
       ["-v", opts.copy_dir <> ":/work", "-v", opts.home_dir <> ":/opt/home", "-w", "/work"] ++

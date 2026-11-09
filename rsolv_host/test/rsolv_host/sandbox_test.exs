@@ -69,7 +69,8 @@ defmodule RsolvHost.SandboxTest do
                    "--security-opt",
                    "no-new-privileges"
                  ] ++
-                 ["--pids-limit", "4096", "--tmpfs", "/tmp:exec"] ++
+                 ["--pids-limit", "4096", "--tmpfs", "/tmp:exec,size=1g"] ++
+                 ["--memory", "4g", "--memory-swap", "4g", "--cpus", "2"] ++
                  ["-e", "LANG=C.UTF-8", "-e", "CI=true", "-e", "HOME=/opt/home"] ++
                  [
                    "-e",

@@ -114,6 +114,27 @@ defmodule RsolvHost.SandboxDockerTest do
       assert run(sbx, ["sh", "-c", script]).output == "200 200 403 403 "
     end
 
+    test "can't fill its /tmp past 1 GiB, nor use more than 4 GiB of memory and 2 CPUs", %{
+      sbx: sbx
+    } do
+      %{output: output} =
+        run(sbx, ["sh", "-c", "head -c 2G /dev/zero > /tmp/fill; du -m /tmp/fill"], 120_000)
+
+      assert output =~ "No space left on device"
+      assert [_, megabytes] = Regex.run(~r/^(\d+)\s+\/tmp\/fill$/m, output)
+      assert String.to_integer(megabytes) <= 1024
+
+      {limits, 0} =
+        System.cmd("docker", [
+          "inspect",
+          "-f",
+          "{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.NanoCpus}}",
+          sbx.container
+        ])
+
+      assert limits == "4294967296 4294967296 2000000000\n"
+    end
+
     test "has no network at all once disconnected", %{sbx: sbx} do
       assert Sandbox.disconnect(sbx) == :ok
       assert run(sbx, ["curl", "-sS", "-m", "5", "https://api.github.com/zen"]).status != 0
