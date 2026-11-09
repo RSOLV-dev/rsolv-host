@@ -63,4 +63,39 @@ defmodule RsolvHost.Workspace do
 
   defp drop_lock(_file, path),
     do: if(String.ends_with?(path, ".lock"), do: File.rm!(path))
+
+  # ponytail: a tree with more directories than this keeps the rest as the
+  # code under test left them, and its removal may then fail (and warn).
+  @max_restored_dirs 100_000
+
+  @doc """
+  Removes `dir`, a copy or HOME whose sandbox Docker has removed (so nothing
+  changes it meanwhile). It first gives the owner rwx back on every directory
+  beneath it, up to #{@max_restored_dirs}, found with `File.lstat/1`, so a
+  symlink is never followed, chmod'ed or looked through: code under test can
+  leave a directory `chmod 000`. `{:error, path}` names what couldn't be
+  removed.
+  """
+  @spec remove(Path.t()) :: :ok | {:error, Path.t()}
+  def remove(dir) do
+    restore([dir], @max_restored_dirs)
+
+    case File.rm_rf(dir) do
+      {:ok, _removed} -> :ok
+      {:error, _reason, path} -> {:error, path}
+    end
+  end
+
+  defp restore([], _left), do: :ok
+  defp restore(_dirs, 0), do: :ok
+
+  defp restore([dir | rest], left) do
+    with {:ok, %File.Stat{type: :directory, mode: mode}} <- File.lstat(dir),
+         :ok <- File.chmod(dir, Bitwise.bor(mode, 0o700)),
+         {:ok, names} <- File.ls(dir) do
+      restore(Enum.map(names, &Path.join(dir, &1)) ++ rest, left - 1)
+    else
+      _not_a_directory -> restore(rest, left)
+    end
+  end
 end

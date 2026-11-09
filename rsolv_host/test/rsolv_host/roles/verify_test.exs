@@ -321,6 +321,50 @@ defmodule RsolvHost.Roles.VerifyTest do
       assert File.ls!(Path.join(context.tmp_dir, "rsolv")) == ["run-token-verify-7.json"]
     end
 
+    test "removes a copy and home the code under test left unreadable", context do
+      platform(context)
+      rsolv = Path.join(context.tmp_dir, "rsolv")
+
+      # What `mkdir -p d/e && chmod 000 d/e d` leaves, made by the sandbox user (us).
+      locked = fn {"docker", ["exec", "-i", container | _], _} ->
+        for dir <- [container, "home-" <> container] do
+          File.mkdir_p!(Path.join([rsolv, dir, "d/e"]))
+          File.write!(Path.join([rsolv, dir, "d/e/f"]), "x")
+          File.chmod!(Path.join([rsolv, dir, "d/e"]), 0o000)
+          File.chmod!(Path.join([rsolv, dir, "d"]), 0o000)
+        end
+
+        {:ok, %{status: 0, output: "PASS"}}
+      end
+
+      sandbox([{&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "green")), locked}])
+
+      assert run(context) == {:outcome, :verified, false}
+      assert File.ls!(rsolv) == ["run-token-verify-7.json"]
+    end
+
+    test "warns, naming the path, when it can't remove a copy, and keeps the verdict", context do
+      platform(context)
+      rsolv = Path.join(context.tmp_dir, "rsolv")
+      on_exit(fn -> File.chmod(rsolv, 0o700) end)
+
+      # A copy the host can't remove: its parent no longer writable.
+      readonly = fn _call ->
+        File.chmod!(rsolv, 0o500)
+        {:ok, %{status: 0, output: "PASS"}}
+      end
+
+      sandbox([{&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "green")), readonly}])
+
+      assert run(context) == {:outcome, :verified, false}
+
+      {:ok, {_in, out}} = StringIO.close(context.io)
+
+      assert out =~
+               "::warning title=RSOLV::Couldn't remove " <>
+                 Path.join(rsolv, "rsolv-41-2-7-verify-green")
+    end
+
     test "keeps what a sandbox it couldn't remove used, and a retry on the same runner doesn't collide",
          context do
       platform(context)

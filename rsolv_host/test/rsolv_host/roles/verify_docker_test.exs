@@ -118,6 +118,39 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
     end
   end
 
+  describe "removing a copy after its sandbox" do
+    test "removes what the code under test locked with chmod 000", context do
+      %{status: 0} =
+        hostile(context.dir, context.red, """
+        mkdir -p /work/d/e && echo x > /work/d/e/f && chmod 000 /work/d/e /work/d /work/src
+        """)
+
+      assert Workspace.remove(context.red) == :ok
+      refute File.exists?(context.red)
+    end
+
+    test "never changes or removes a directory a planted symlink points to", context do
+      outside = Path.join(context.dir, "outside")
+      File.mkdir_p!(Path.join(outside, "keep"))
+      File.write!(Path.join(outside, "keep/f"), "keep")
+      File.chmod!(outside, 0o500)
+      on_exit(fn -> File.chmod(outside, 0o700) end)
+
+      %{status: 0} =
+        hostile(
+          context.dir,
+          context.red,
+          ~s(ln -s "$1" /work/escape && ln -s "$1/keep" /work/src/k),
+          [outside]
+        )
+
+      assert Workspace.remove(context.red) == :ok
+      refute File.exists?(context.red)
+      assert File.read!(Path.join(outside, "keep/f")) == "keep"
+      assert Bitwise.band(File.lstat!(outside).mode, 0o777) == 0o500
+    end
+  end
+
   describe "a sandbox that plants a hostile .git (acceptance 5a)" do
     test "causes nothing on the host, even if git read its tree", context do
       # A path the planted config can name unquoted, outside every mount.

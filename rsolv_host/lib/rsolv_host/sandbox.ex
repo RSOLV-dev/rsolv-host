@@ -13,7 +13,7 @@ defmodule RsolvHost.Sandbox do
   and nothing runs unfiltered.
   """
 
-  alias RsolvHost.{Egress, Frame}
+  alias RsolvHost.{ActionsLog, Egress, Frame, Workspace}
 
   defstruct [
     :container,
@@ -497,20 +497,34 @@ defmodule RsolvHost.Sandbox do
   @doc """
   Removes the sandbox, its proxy and its network, by the IDs Docker gave
   them, then, once Docker has removed the containers (`:ok`), the HOME and
-  proxy directories it made. Always safe to call.
+  proxy directories it made (`RsolvHost.Workspace.remove/1`; one it can't
+  remove is a `::warning::` on `io`). Always safe to call.
   """
-  @spec stop(t() | nil) :: :ok | :error
-  def stop(nil), do: :ok
+  @spec stop(t() | nil, IO.device()) :: :ok | :error
+  def stop(sbx, io \\ :stdio)
+  def stop(nil, _io), do: :ok
 
-  def stop(sbx) do
+  def stop(sbx, io) do
     removed =
       remove(sbx.exec, ["rm", "-f"], Enum.flat_map([:sandbox, :proxy], &List.wrap(sbx.ids[&1])))
 
     remove(sbx.exec, ["network", "rm"], List.wrap(sbx.ids[:network]))
 
     case removed do
-      :ok -> Enum.each(sbx.dirs, &File.rm_rf/1)
+      :ok -> Enum.each(sbx.dirs, &remove_dir(&1, io))
       :error -> :error
+    end
+  end
+
+  @doc "Removes `dir` (`RsolvHost.Workspace.remove/1`), or writes a `::warning::` naming what's left."
+  @spec remove_dir(Path.t(), IO.device()) :: :ok
+  def remove_dir(dir, io \\ :stdio) do
+    case Workspace.remove(dir) do
+      :ok ->
+        :ok
+
+      {:error, path} ->
+        ActionsLog.warning("RSOLV", "Couldn't remove #{path}; remove it from this runner.", io)
     end
   end
 

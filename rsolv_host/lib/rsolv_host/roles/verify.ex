@@ -278,7 +278,7 @@ defmodule RsolvHost.Roles.Verify do
         try do
           steps(ctx, sbx, plan, side, deadline)
         after
-          with :ok <- Sandbox.stop(sbx), do: File.rm_rf(dir)
+          with :ok <- Sandbox.stop(sbx, ctx.io), do: Sandbox.remove_dir(dir, ctx.io)
         end
 
       {:error, reason} ->
