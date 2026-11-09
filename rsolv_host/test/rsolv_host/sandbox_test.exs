@@ -214,7 +214,7 @@ defmodule RsolvHost.SandboxTest do
       assert [["run", "-d", "--name", "rsolv-41-7-work", "--network", "none" | _]] = docker_args()
     end
 
-    test "when a step fails, names it and removes what it created", %{tmp_dir: dir} do
+    test "when a step fails, names it and removes, by ID, what it created", %{tmp_dir: dir} do
       FakeExec.script([
         {fn {"docker", ["network", "connect" | _], _} -> true end,
          {:ok, %{status: 1, output: "x"}}}
@@ -223,9 +223,19 @@ defmodule RsolvHost.SandboxTest do
       assert Sandbox.start(start_opts(dir)) == {:error, {:sandbox_setup, :proxy_connect}}
 
       assert Enum.take(docker_args(), -2) == [
-               ["rm", "-f", "rsolv-41-7-work", "rsolv-41-7-work-proxy"],
-               ["network", "rm", "rsolv-41-7-net"]
+               ["rm", "-f", FakeExec.docker_id("rsolv-41-7-work-proxy")],
+               ["network", "rm", FakeExec.docker_id("rsolv-41-7-net")]
              ]
+    end
+
+    test "refuses a container Docker gave no ID", %{tmp_dir: dir} do
+      FakeExec.script([
+        {fn {"docker", ["run", "-d", "--name", "rsolv-41-7-work" | _], _} -> true end,
+         {:ok, %{status: 0, output: "Status: Downloaded newer image\n"}}}
+      ])
+
+      assert Sandbox.start(start_opts(dir) ++ [egress: :none]) ==
+               {:error, {:sandbox_setup, :sandbox_run}}
     end
 
     test "when the proxy never answers, fails closed before any sandbox runs", %{tmp_dir: dir} do
@@ -319,15 +329,21 @@ defmodule RsolvHost.SandboxTest do
              ]
     end
 
-    test "stop removes both containers, then the network", %{tmp_dir: dir} do
+    test "stop removes both containers, then the network, by the IDs Docker gave them",
+         %{tmp_dir: dir} do
       script_inspect()
       {:ok, sbx} = Sandbox.start(start_opts(dir))
 
       assert Sandbox.stop(sbx) == :ok
 
       assert Enum.take(docker_args(), -2) == [
-               ["rm", "-f", "rsolv-41-7-work", "rsolv-41-7-work-proxy"],
-               ["network", "rm", "rsolv-41-7-net"]
+               [
+                 "rm",
+                 "-f",
+                 FakeExec.docker_id("rsolv-41-7-work"),
+                 FakeExec.docker_id("rsolv-41-7-work-proxy")
+               ],
+               ["network", "rm", FakeExec.docker_id("rsolv-41-7-net")]
              ]
     end
 

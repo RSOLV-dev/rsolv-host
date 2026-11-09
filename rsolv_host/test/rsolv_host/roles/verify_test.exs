@@ -100,6 +100,7 @@ defmodule RsolvHost.Roles.VerifyTest do
       "GITHUB_WORKSPACE" => workspace,
       "GITHUB_RUN_ID" => "41",
       "GITHUB_RUN_ATTEMPT" => "2",
+      "GITHUB_REPOSITORY" => "acme/app",
       "ACTIONS_ID_TOKEN_REQUEST_URL" => "https://token.actions.example/id?v=1",
       "ACTIONS_ID_TOKEN_REQUEST_TOKEN" => "t"
     }
@@ -288,7 +289,7 @@ defmodule RsolvHost.Roles.VerifyTest do
               File.read!(Path.join(copy, "test/a.test.js"))}
            )
 
-           {:ok, %{status: 0, output: ""}}
+           {:ok, %{status: 0, output: FakeExec.docker_id(Path.basename(copy))}}
          end}
       ])
 
@@ -374,12 +375,17 @@ defmodule RsolvHost.Roles.VerifyTest do
       removed = for {"docker", ["rm", "-f" | names], _} <- docker_calls(), do: names
       networks = for {"docker", ["network", "rm", net], _} <- docker_calls(), do: net
 
+      id = &FakeExec.docker_id/1
+
       assert removed == [
-               ["rsolv-41-2-7-verify-red", "rsolv-41-2-7-verify-red-proxy"],
-               ["rsolv-41-2-7-verify-green", "rsolv-41-2-7-verify-green-proxy"]
+               [id.("rsolv-41-2-7-verify-red"), id.("rsolv-41-2-7-verify-red-proxy")],
+               [id.("rsolv-41-2-7-verify-green"), id.("rsolv-41-2-7-verify-green-proxy")]
              ]
 
-      assert networks == ["rsolv-41-2-7-verify-red-net", "rsolv-41-2-7-verify-green-net"]
+      assert networks == [
+               id.("rsolv-41-2-7-verify-red-net"),
+               id.("rsolv-41-2-7-verify-green-net")
+             ]
     end
 
     test "prints sandbox output only as untrusted text", context do
@@ -405,7 +411,11 @@ defmodule RsolvHost.Roles.VerifyTest do
   end
 
   defp step({"docker", ["network", "disconnect", _net, container], _}, container), do: :disconnect
-  defp step({"docker", ["rm", "-f", container | _], _}, container), do: :remove
+
+  defp step({"docker", ["rm", "-f", id | _], _}, container) do
+    if id == FakeExec.docker_id(container), do: :remove
+  end
+
   defp step(_call, _container), do: nil
 
   describe "run/3 before any sandbox" do
@@ -510,7 +520,8 @@ defmodule RsolvHost.Roles.VerifyTest do
   end
 
   describe "run/3's containers and time" do
-    test "labels each sandbox, proxy and network with the run and attempt", context do
+    test "labels each sandbox, proxy and network with its repository, run, issue and attempt",
+         context do
       platform(context)
       sandbox()
 
@@ -519,30 +530,53 @@ defmodule RsolvHost.Roles.VerifyTest do
       labelled =
         for {"docker", args, _} <- docker_calls(),
             match?(["run" | _], args) or match?(["network", "create" | _], args),
-            do: Enum.drop_while(args, &(&1 != "--label")) |> Enum.take(2)
+            do: for([flag, value] <- Enum.chunk_every(args, 2, 1), flag == "--label", do: value)
 
       assert length(labelled) == 6
-      assert Enum.uniq(labelled) == [["--label", "rsolv.run=41/2"]]
+
+      assert Enum.uniq(labelled) == [
+               ~w(rsolv.attempt=2 rsolv.issue=7 rsolv.repo=acme/app rsolv.run=41)
+             ]
     end
 
-    test "first removes what an earlier attempt of this run left, and nothing else", context do
+    for repository <- ["acme", "acme/app/x", "acme/a b", "acme/app\n", "-x/app"] do
+      test "refuses GITHUB_REPOSITORY #{inspect(repository)}, which labels its containers",
+           context do
+        platform(context)
+        sandbox()
+        env = Map.put(context.env, "GITHUB_REPOSITORY", unquote(repository))
+
+        assert Verify.run(%{issue: 7}, env, deps(context)) ==
+                 {:error, {:missing_env, "GITHUB_REPOSITORY"}}
+
+        assert FakeExec.calls() == []
+      end
+    end
+
+    test "first removes, by ID, what an earlier attempt of this issue left, and nothing else",
+         context do
       platform(context)
 
       sandbox([
         {fn {"docker", ["ps", "-a" | _], _} -> true end,
-         {:ok, %{status: 0, output: "old-red\t41/1\nother-run\t99/1\nthis-attempt\t41/2\n"}}},
+         {:ok, %{status: 0, output: "aaa\t1\nbbb\t2\nccc\t3\nddd\t\n"}}},
         {fn {"docker", ["network", "ls" | _], _} -> true end,
-         {:ok, %{status: 0, output: "old-net\t41/1\nother-net\t9/1\n"}}}
+         {:ok, %{status: 0, output: "nnn\t1\nmmm\t2\n"}}}
       ])
 
       run(context)
 
+      identity =
+        ~w(--filter label=rsolv.repo=acme/app --filter label=rsolv.run=41 --filter label=rsolv.issue=7)
+
       assert [
-               {"docker", ["ps", "-a", "--filter", "label=rsolv.run" | _], _},
-               {"docker", ["rm", "-f", "old-red"], _},
-               {"docker", ["network", "ls", "--filter", "label=rsolv.run" | _], _},
-               {"docker", ["network", "rm", "old-net"], _} | _
+               {"docker", ["ps", "-a" | ps], _},
+               {"docker", ["rm", "-f", "aaa"], _},
+               {"docker", ["network", "ls" | ls], _},
+               {"docker", ["network", "rm", "nnn"], _} | _
              ] = docker_calls()
+
+      assert Enum.take(ps, 6) == identity and Enum.take(ls, 6) == identity
     end
 
     test "fits every sandbox stage in the role's budget, RED in half of it", context do

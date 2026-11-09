@@ -86,6 +86,8 @@ defmodule RsolvHost.Roles.Verify do
   # before the verification is posted.
   @budget_ms 100 * 60 * 1_000
   @reserve_ms 5 * 60 * 1_000
+  # owner/name, as GitHub allows them: label values never carry more.
+  @repository ~r/\A[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}\z/
   @bound ~w(change_set_digest red_digest policy_version)
   @rejections ["issue_rejected", "not_eligible"]
 
@@ -101,6 +103,7 @@ defmodule RsolvHost.Roles.Verify do
 
     with {:ok, run_id} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
          {:ok, attempt} <- env_value(env, "GITHUB_RUN_ATTEMPT", ~r/\A[0-9]{1,5}\z/),
+         {:ok, repository} <- env_value(env, "GITHUB_REPOSITORY", @repository),
          {:ok, workspace} <- env_value(env, "GITHUB_WORKSPACE", ~r/\A\//),
          {:ok, root} <- copies_root(env, workspace),
          deadline = now() + Keyword.get(deps, :budget_ms, @budget_ms),
@@ -115,8 +118,12 @@ defmodule RsolvHost.Roles.Verify do
         root: root,
         deadline: deadline,
         stages: deadline - @reserve_ms,
-        run_id: run_id,
-        label: run_id <> "/" <> attempt,
+        labels: %{
+          "rsolv.repo" => repository,
+          "rsolv.run" => run_id,
+          "rsolv.issue" => Integer.to_string(issue),
+          "rsolv.attempt" => attempt
+        },
         names: "rsolv-#{run_id}-#{attempt}-#{issue}-verify"
       }
 
@@ -227,13 +234,13 @@ defmodule RsolvHost.Roles.Verify do
   end
 
   defp prove(ctx, plan, dirs) do
-    Sandbox.remove_labelled(&stale?(&1, ctx))
-    trap = Sandbox.trap_sigterm(ctx.label)
+    Sandbox.remove_stale(ctx.labels)
+    trap = Sandbox.trap_sigterm()
 
     try do
-      sides(ctx, plan, dirs)
+      ctx |> Map.put(:created, created(trap)) |> sides(plan, dirs)
     after
-      untrap(trap)
+      Sandbox.untrap_sigterm(trap)
     end
   end
 
@@ -248,19 +255,14 @@ defmodule RsolvHost.Roles.Verify do
     end
   end
 
-  # What an earlier attempt of this run left (a runner that stopped it with
-  # SIGKILL); another run's containers may be a concurrent job's.
-  defp stale?(label, ctx),
-    do: label != ctx.label and String.starts_with?(label, ctx.run_id <> "/")
-
-  defp untrap({:ok, id}), do: System.untrap_signal(:sigterm, id)
-  defp untrap({:error, _not_supported}), do: :ok
+  defp created({:ok, %{created: created}}), do: created
+  defp created({:error, _not_trapped}), do: nil
 
   defp side(ctx, plan, dir, side, deadline) do
     name = "#{ctx.names}-#{side}"
 
     [name: name, network: name <> "-net", copy_dir: dir, runner_temp: ctx.env["RUNNER_TEMP"]]
-    |> Keyword.merge(label: ctx.label, deadline: deadline)
+    |> Keyword.merge(labels: ctx.labels, created: ctx.created, deadline: deadline)
     |> Keyword.merge(Keyword.take(ctx.deps, [:probe, :stat]))
     |> Sandbox.start()
     |> case do

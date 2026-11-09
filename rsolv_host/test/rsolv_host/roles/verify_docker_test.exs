@@ -148,24 +148,68 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
     end
   end
 
+  # A container another job could own: same run id, another repo or issue.
+  defp bystander(labels) do
+    args = for {key, value} <- labels, arg <- ["--label", "rsolv.#{key}=#{value}"], do: arg
+
+    {id, 0} =
+      System.cmd("docker", ["run", "-d" | args] ++ ["--entrypoint", "sleep", @image, "300"])
+
+    id = String.trim(id)
+    on_exit(fn -> System.cmd("docker", ["rm", "-f", id], stderr_to_stdout: true) end)
+    id
+  end
+
+  defp alive?(id),
+    do: match?({_, 0}, System.cmd("docker", ["inspect", id], stderr_to_stdout: true))
+
+  defp labels(run, attempt),
+    do: %{
+      "rsolv.repo" => "acme/app",
+      "rsolv.run" => run,
+      "rsolv.issue" => "7",
+      "rsolv.attempt" => attempt
+    }
+
+  describe "removing what an earlier attempt left" do
+    test "removes only this repository's run and issue, at a lower attempt", _context do
+      run = "#{System.unique_integer([:positive])}"
+      mine = %{repo: "acme/app", run: run, issue: "7"}
+
+      earlier = bystander(Map.put(mine, :attempt, "1"))
+      sibling = bystander(%{mine | issue: "8"} |> Map.put(:attempt, "1"))
+      other_repo = bystander(%{mine | repo: "other/app"} |> Map.put(:attempt, "1"))
+      current = bystander(Map.put(mine, :attempt, "2"))
+      later = bystander(Map.put(mine, :attempt, "3"))
+
+      assert Sandbox.remove_stale(labels(run, "2"), Exec) == :ok
+
+      refute alive?(earlier)
+      assert Enum.all?([sibling, other_repo, current, later], &alive?/1)
+    end
+  end
+
   describe "a job the runner stops with SIGTERM" do
     # The reviewer's killed.exs, as a test: a separate VM, stopped mid-step.
-    test "removes this attempt's sandbox, proxy and network, and nothing else", context do
-      id = System.unique_integer([:positive])
-      label = "#{id}/1"
-      name = "rsolv-test-killed-#{id}"
-      bystander = "rsolv-test-bystander-#{id}"
-
-      {_, 0} =
-        System.cmd("docker", ["network", "create", "--label", "rsolv.run=#{id}9/1", bystander])
+    test "removes the sandbox, proxy and network it made, and nothing it didn't", context do
+      run = "#{System.unique_integer([:positive])}"
+      name = "rsolv-test-killed-#{run}"
+      mine = %{repo: "acme/app", run: run, issue: "7", attempt: "1"}
+      twin = bystander(mine)
+      sibling = bystander(%{mine | issue: "8"})
+      other_repo = bystander(%{mine | repo: "other/app"})
 
       on_exit(fn ->
-        Sandbox.remove_labelled(&(&1 == label), Exec)
-        System.cmd("docker", ["network", "rm", bystander], stderr_to_stdout: true)
+        for kind <- [[], ["network"]],
+            do:
+              System.cmd("docker", kind ++ ["rm", "-f", name <> "-net", name, name <> "-proxy"],
+                stderr_to_stdout: true
+              )
       end)
 
       script = """
       Application.put_env(:rsolv_host, :proxy_image, #{inspect(Application.fetch_env!(:rsolv_host, :proxy_image))})
+      {:ok, trap} = RsolvHost.Sandbox.trap_sigterm(RsolvHost.Exec)
 
       {:ok, sbx} =
         RsolvHost.Sandbox.start(
@@ -174,11 +218,11 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
           copy_dir: #{inspect(context.red)},
           runner_temp: #{inspect(context.dir)},
           image: #{inspect(@image)},
-          label: #{inspect(label)},
+          labels: #{inspect(labels(run, "1"))},
+          created: trap.created,
           exec: RsolvHost.Exec
         )
 
-      {:ok, _id} = RsolvHost.Sandbox.trap_sigterm(#{inspect(label)}, RsolvHost.Exec)
       IO.puts("ready " <> System.pid())
 
       try do
@@ -208,15 +252,8 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
       assert status == 4
       refute output =~ "after ran"
 
-      for list <- [["ps", "-a"], ["network", "ls"]] do
-        {listed, 0} =
-          System.cmd("docker", list ++ ["-q", "--filter", "label=rsolv.run=" <> label])
-
-        assert listed == "", inspect(list)
-      end
-
-      assert {_, 0} =
-               System.cmd("docker", ["network", "inspect", bystander], stderr_to_stdout: true)
+      for made <- [name, name <> "-proxy", name <> "-net"], do: refute(alive?(made), made)
+      assert Enum.all?([twin, sibling, other_repo], &alive?/1)
     end
   end
 

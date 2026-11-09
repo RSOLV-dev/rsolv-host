@@ -162,7 +162,8 @@ defmodule RsolvHost.Roles.WorkTest do
 
       assert Base.decode64!(patch) == @patch
 
-      assert {"docker", ["network", "rm", "rsolv-41-7-net"], _} = List.last(calls)
+      assert {"docker", ["network", "rm", net], _} = List.last(calls)
+      assert net == FakeExec.docker_id("rsolv-41-7-net")
     end
 
     test "prints the bootstrap log only as untrusted text", context do
@@ -419,7 +420,8 @@ defmodule RsolvHost.Roles.WorkTest do
       sandbox(bootstrap: fn _call -> raise "boom" end)
 
       assert_raise RuntimeError, fn -> Work.run(%{issue: 7}, context.env, deps(context)) end
-      assert {"docker", ["network", "rm", "rsolv-41-7-net"], _} = List.last(FakeExec.calls())
+      assert {"docker", ["network", "rm", net], _} = List.last(FakeExec.calls())
+      assert net == FakeExec.docker_id("rsolv-41-7-net")
     end
   end
 
