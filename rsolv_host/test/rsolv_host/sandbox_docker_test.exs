@@ -162,6 +162,26 @@ defmodule RsolvHost.SandboxDockerTest do
       assert running == "false\n"
     end
 
+    test "is killed when it hides what it wrote in a directory the host can't read", %{sbx: sbx} do
+      {:ok, used} = Sandbox.disk_used(sbx)
+      on_exit(fn -> File.chmod(Path.join(sbx.copy_dir, "d"), 0o700) end)
+
+      result =
+        Sandbox.watched(sbx, used + 5 * 1024 ** 3, 300, fn ->
+          Sandbox.exec(
+            sbx,
+            [
+              "sh",
+              "-c",
+              "mkdir /work/d && head -c 100M /dev/zero > /work/d/big && chmod 000 /work/d && sleep 20"
+            ],
+            timeout_ms: 60_000
+          )
+        end)
+
+      assert result == {:error, :disk_limit}
+    end
+
     test "has no network at all once disconnected", %{sbx: sbx} do
       assert Sandbox.disconnect(sbx) == :ok
       assert run(sbx, ["curl", "-sS", "-m", "5", "https://api.github.com/zen"]).status != 0

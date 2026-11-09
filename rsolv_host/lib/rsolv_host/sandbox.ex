@@ -397,15 +397,18 @@ defmodule RsolvHost.Sandbox do
   @doc """
   The bytes the sandbox's writable mounts (its copy and HOME) use on disk:
   `du -s -c -x -P -B1`, which follows no symlink, stays on one filesystem,
-  reads no file content and counts a hardlinked file once. A file vanishing
-  mid-walk makes du complain but still total; no total within 30 s is
-  `:error`.
+  reads no file content and counts a hardlinked file once. Anything but a
+  total from a du that read everything within 30 s is `:error`: a directory
+  the sandbox made unreadable would hide what's beneath it.
+
+  ponytail: a file the project removes mid-walk also fails du, so a churning
+  install can be stopped as over budget; retry the measure if that shows up.
   """
   @spec disk_used(t()) :: {:ok, non_neg_integer()} | :error
   def disk_used(%__MODULE__{dirs: [home | _]} = sbx) do
     args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, home]
 
-    with {:ok, %{output: output}} <-
+    with {:ok, %{status: 0, output: output}} <-
            sbx.exec.run("du", args, timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024),
          [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output) do
       {:ok, String.to_integer(total)}

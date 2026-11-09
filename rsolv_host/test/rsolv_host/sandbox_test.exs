@@ -277,6 +277,35 @@ defmodule RsolvHost.SandboxTest do
     end
   end
 
+  describe "disk_used/1" do
+    setup %{tmp_dir: dir} do
+      %{
+        sbx: %Sandbox{
+          container: "s",
+          copy_dir: Path.join(dir, "c"),
+          dirs: [Path.join(dir, "h")],
+          exec: FakeExec
+        }
+      }
+    end
+
+    test "is du's total when du read everything", %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("10\t/c\n5\t/h\n15\ttotal\n")}])
+
+      assert Sandbox.disk_used(sbx) == {:ok, 15}
+    end
+
+    test "is no measure when du couldn't read everything, whatever total it printed", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         {:ok,
+          %{status: 1, output: "du: cannot read directory '/c/d': Permission denied\n15\ttotal\n"}}}
+      ])
+
+      assert Sandbox.disk_used(sbx) == :error
+    end
+  end
+
   describe "exec/3" do
     test "runs the argv under coreutils timeout, with a host deadline beyond it", %{tmp_dir: dir} do
       script_inspect()
