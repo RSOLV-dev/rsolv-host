@@ -24,7 +24,8 @@ defmodule RsolvHost.BaseFactsReader do
   together by a byte and an entry budget, and every git call by what's left
   of one deadline. Past any of them the base is too large to verify
   (`base_facts_too_large`); only one git call past its own time limit, with
-  the deadline still ahead, is `base_read_timeout` (transient). From each
+  the deadline still ahead, is `base_read_timeout`. Both are exit 2: the
+  checkout is local, so a retry reads the same repository as slowly. From each
   listing the walk keeps only the entries it looks up and `.gitattributes`.
   """
 

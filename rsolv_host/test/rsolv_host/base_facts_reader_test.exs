@@ -317,7 +317,8 @@ defmodule RsolvHost.BaseFactsReaderTest do
       assert result == {:error, :base_facts_too_large}
     end
 
-    test "one git call past its own time limit is transient (exit 3)", %{tmp_dir: dir, base: base} do
+    test "one git call past its own time limit is a base too slow to read (exit 2, not retried)",
+         %{tmp_dir: dir, base: base} do
       FakeExec.script([
         {fn {"env", args, _} -> "rev-parse" in args end,
          {:ok, %{status: 0, output: base <> "\n"}}},
@@ -327,7 +328,7 @@ defmodule RsolvHost.BaseFactsReaderTest do
       result = BaseFactsReader.read(dir, base, ["f.js"])
 
       assert result == {:error, :base_read_timeout}
-      assert RsolvHost.Outcome.exit_code(result) == 3
+      assert RsolvHost.Outcome.exit_code(result) == 2
     end
   end
 

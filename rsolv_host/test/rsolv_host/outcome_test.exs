@@ -137,6 +137,7 @@ defmodule RsolvHost.OutcomeTest do
       for {reason, code} <- [
             {:verify_error, 4},
             {:verify_timed_out, 2},
+            {:base_read_timeout, 2},
             {:base_read_failed, 4},
             {{:sandbox, :bootstrap}, 4},
             {:checkout_not_base, 2},
@@ -160,6 +161,7 @@ defmodule RsolvHost.OutcomeTest do
       for {reason, text} <- [
             {:verify_error, "could not finish verifying"},
             {:verify_timed_out, "ran past their time limit"},
+            {:base_read_timeout, "took too long to read"},
             {:too_many_touched_paths, "than RSOLV verifies"},
             {:touched_path_too_deep, "than RSOLV verifies"},
             {:checkout_not_base, "isn't the commit RSOLV scanned"},

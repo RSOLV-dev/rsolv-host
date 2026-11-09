@@ -88,7 +88,8 @@ defmodule RsolvHost.Outcome do
   def classify({:platform, 413, _code}), do: :configuration
   def classify(:verify_error), do: :sandbox
   def classify(:base_read_failed), do: :sandbox
-  def classify(:base_read_timeout), do: :transient
+  # Local git on the job's own checkout: a repository that slow stays that slow.
+  def classify(:base_read_timeout), do: :configuration
   def classify(:invalid_touched_paths), do: :transient
 
   def classify({:platform, 409, "already_exchanged"}), do: :transient
@@ -221,6 +222,10 @@ defmodule RsolvHost.Outcome do
       "The verify job's checkout isn't the commit RSOLV scanned (or has no .git directory). Use RSOLV's reusable verify workflow unmodified."
 
   defp message(:base_facts_too_large, _class), do: too_large()
+
+  defp message(:base_read_timeout, _class),
+    do:
+      "The base commit took too long to read with git on this runner (a single git call ran past its time limit), so RSOLV can't verify this fix; nothing will be published."
 
   defp message(reason, _class) when reason in [:too_many_touched_paths, :touched_path_too_deep],
     do:
