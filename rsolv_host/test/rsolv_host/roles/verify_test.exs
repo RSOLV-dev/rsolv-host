@@ -269,18 +269,65 @@ defmodule RsolvHost.Roles.VerifyTest do
     test "gives RED the base and the RED snapshot, GREEN the whole change set, and leaves the checkout alone",
          context do
       platform(context)
+      test = self()
+
+      sandbox([
+        {fn {"docker", ["run", "-d", "--name", "rsolv-41-2-7-verify-" <> side | _], _} ->
+           side in ["red", "green"]
+         end,
+         fn {"docker", args, _} ->
+           [copy] =
+             for mount <- args,
+                 String.ends_with?(mount, ":/work"),
+                 do: String.trim_trailing(mount, ":/work")
+
+           send(
+             test,
+             {:copy, Path.basename(copy), File.read!(Path.join(copy, "src/a.js")),
+              File.read!(Path.join(copy, "test/a.test.js"))}
+           )
+
+           {:ok, %{status: 0, output: ""}}
+         end}
+      ])
+
+      run(context)
+
+      assert_received {:copy, "rsolv-41-2-7-verify-red", @source, @test}
+      assert_received {:copy, "rsolv-41-2-7-verify-green", @fixed, @test}
+      assert File.read!(Path.join(context.workspace, "src/a.js")) == @source
+      refute File.exists?(Path.join(context.workspace, "test"))
+    end
+
+    test "names its copies, homes and containers by the run attempt, and removes them once their sandboxes are gone",
+         context do
+      platform(context)
       sandbox()
 
       run(context)
 
-      red = Path.join([context.tmp_dir, "rsolv", "verify-red"])
-      green = Path.join([context.tmp_dir, "rsolv", "verify-green"])
-      assert File.read!(Path.join(red, "src/a.js")) == @source
-      assert File.read!(Path.join(red, "test/a.test.js")) == @test
-      assert File.read!(Path.join(green, "src/a.js")) == @fixed
-      assert File.read!(Path.join(green, "test/a.test.js")) == @test
-      assert File.read!(Path.join(context.workspace, "src/a.js")) == @source
-      refute File.exists?(Path.join(context.workspace, "test"))
+      assert ["rsolv-41-2-7-verify-red", "rsolv-41-2-7-verify-green"] =
+               for(
+                 {"docker", ["run", "-d", "--name", name | _], _} <- docker_calls(),
+                 not String.ends_with?(name, "-proxy"),
+                 do: name
+               )
+
+      # Only the run token's hand-off file, which the CLI discards, is left.
+      assert File.ls!(Path.join(context.tmp_dir, "rsolv")) == ["run-token-verify-7.json"]
+    end
+
+    test "keeps what a sandbox it couldn't remove used, and a retry on the same runner doesn't collide",
+         context do
+      platform(context)
+      sandbox([{fn {"docker", ["rm", "-f" | _], _} -> true end, {:ok, %{status: 1, output: ""}}}])
+
+      assert run(context) == {:outcome, :verified, false}
+      kept = File.ls!(Path.join(context.tmp_dir, "rsolv"))
+      assert "rsolv-41-2-7-verify-red" in kept and "home-rsolv-41-2-7-verify-red" in kept
+
+      env = Map.put(context.env, "GITHUB_RUN_ATTEMPT", "3")
+      assert Verify.run(%{issue: 7}, env, deps(context)) == {:outcome, :verified, false}
     end
 
     test "runs no git and copies nothing once the first sandbox has started (acceptance 5a)",
@@ -304,7 +351,7 @@ defmodule RsolvHost.Roles.VerifyTest do
       run(context)
 
       for side <- ["red", "green"] do
-        container = "rsolv-41-7-verify-" <> side
+        container = "rsolv-41-2-7-verify-" <> side
 
         steps =
           for {"docker", args, _} = call <- docker_calls(),
@@ -327,11 +374,11 @@ defmodule RsolvHost.Roles.VerifyTest do
       networks = for {"docker", ["network", "rm", net], _} <- docker_calls(), do: net
 
       assert removed == [
-               ["rsolv-41-7-verify-red", "rsolv-41-7-verify-red-proxy"],
-               ["rsolv-41-7-verify-green", "rsolv-41-7-verify-green-proxy"]
+               ["rsolv-41-2-7-verify-red", "rsolv-41-2-7-verify-red-proxy"],
+               ["rsolv-41-2-7-verify-green", "rsolv-41-2-7-verify-green-proxy"]
              ]
 
-      assert networks == ["rsolv-41-7-verify-red-net", "rsolv-41-7-verify-green-net"]
+      assert networks == ["rsolv-41-2-7-verify-red-net", "rsolv-41-2-7-verify-green-net"]
     end
 
     test "prints sandbox output only as untrusted text", context do

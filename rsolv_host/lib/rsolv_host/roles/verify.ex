@@ -12,13 +12,14 @@ defmodule RsolvHost.Roles.Verify do
      it names the change set policy accepted, and the post-images, checked
      against its change set (`RsolvHost.PostImages`);
   4. the RED copy (base plus the RED snapshot) and the GREEN copy (base plus
-     the change set), under `$RUNNER_TEMP/rsolv`, written no-follow
-     (`RsolvHost.Copies`).
+     the change set), under `$RUNNER_TEMP/rsolv`, named by the run attempt
+     and written no-follow (`RsolvHost.Copies`).
 
   Then RED and GREEN each run in a fresh sandbox: bootstrap and `install`
   behind the proxy, disconnect, then `prepare`, `test` and the report
   offline. The host never builds a command, and never runs git or opens a
-  path in a tree a sandbox has mounted.
+  path in a tree a sandbox has mounted; it removes a copy only once Docker
+  has removed its sandbox.
 
   The verdicts are outcomes (exit 0): `verified`, `verify_failed` and
   `rejected` (by policy, or for want of a plan). What the code under test
@@ -116,7 +117,7 @@ defmodule RsolvHost.Roles.Verify do
         stages: deadline - @reserve_ms,
         run_id: run_id,
         label: run_id <> "/" <> attempt,
-        names: "rsolv-#{run_id}-#{issue}-verify"
+        names: "rsolv-#{run_id}-#{attempt}-#{issue}-verify"
       }
 
       try do
@@ -211,7 +212,11 @@ defmodule RsolvHost.Roles.Verify do
 
   defp copies(ctx, plan, images) do
     {:ok, red} = VerifyPlan.red(plan.change_set, plan.red_paths)
-    dirs = %{red: Path.join(ctx.root, "verify-red"), green: Path.join(ctx.root, "verify-green")}
+
+    dirs = %{
+      red: Path.join(ctx.root, ctx.names <> "-red"),
+      green: Path.join(ctx.root, ctx.names <> "-green")
+    }
 
     with :ok <- Workspace.copy(ctx.workspace, dirs.red),
          :ok <- Workspace.copy(ctx.workspace, dirs.green),
@@ -262,7 +267,7 @@ defmodule RsolvHost.Roles.Verify do
         try do
           steps(ctx, sbx, plan, side, deadline)
         after
-          Sandbox.stop(sbx)
+          with :ok <- Sandbox.stop(sbx), do: File.rm_rf(dir)
         end
 
       {:error, reason} ->

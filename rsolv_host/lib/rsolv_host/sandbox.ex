@@ -15,7 +15,7 @@ defmodule RsolvHost.Sandbox do
 
   alias RsolvHost.{Egress, Frame}
 
-  defstruct [:container, :network, :proxy, :exec, :label, :deadline, egress: :proxy]
+  defstruct [:container, :network, :proxy, :exec, :label, :deadline, dirs: [], egress: :proxy]
 
   @type t :: %__MODULE__{
           container: String.t(),
@@ -24,6 +24,7 @@ defmodule RsolvHost.Sandbox do
           exec: module(),
           label: String.t() | nil,
           deadline: integer() | nil,
+          dirs: [Path.t()],
           egress: :proxy | :none
         }
 
@@ -115,7 +116,10 @@ defmodule RsolvHost.Sandbox do
 
     egress = Keyword.get(opts, :egress, :proxy)
 
+    rsolv = Path.join(Keyword.fetch!(opts, :runner_temp), "rsolv")
+
     sbx = %__MODULE__{
+      dirs: Enum.map(["home-", "proxy-"], &Path.join(rsolv, &1 <> Keyword.fetch!(opts, :name))),
       container: Keyword.fetch!(opts, :name),
       network: if(egress == :proxy, do: Keyword.fetch!(opts, :network)),
       proxy: if(egress == :proxy, do: Keyword.fetch!(opts, :name) <> "-proxy"),
@@ -336,12 +340,16 @@ defmodule RsolvHost.Sandbox do
   def disconnect(sbx),
     do: step(sbx, :network_disconnect, ["network", "disconnect", sbx.network, sbx.container])
 
-  @doc "Removes the sandbox, its proxy and its network. Always safe to call."
-  @spec stop(t() | nil) :: :ok
+  @doc """
+  Removes the sandbox, its proxy and its network, then, once Docker has
+  removed the containers (`:ok`), the HOME and proxy directories it made.
+  Always safe to call.
+  """
+  @spec stop(t() | nil) :: :ok | :error
   def stop(nil), do: :ok
 
   def stop(sbx) do
-    _ =
+    removed =
       sbx.exec.run("docker", ["rm", "-f" | Enum.reject([sbx.container, sbx.proxy], &is_nil/1)],
         timeout_ms: @setup_timeout_ms
       )
@@ -349,7 +357,10 @@ defmodule RsolvHost.Sandbox do
     if sbx.network,
       do: sbx.exec.run("docker", ["network", "rm", sbx.network], timeout_ms: @setup_timeout_ms)
 
-    :ok
+    case removed do
+      {:ok, %{status: 0}} -> Enum.each(sbx.dirs, &File.rm_rf/1)
+      _not_removed -> :error
+    end
   end
 
   @doc """
