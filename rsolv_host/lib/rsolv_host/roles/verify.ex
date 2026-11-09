@@ -122,6 +122,7 @@ defmodule RsolvHost.Roles.Verify do
     else
       {:outcome, _outcome, _has_patch} = rejected -> rejected
       {:error, {:platform, 409, code}} when code in @rejections -> {:outcome, :rejected, false}
+      {:error, :digest_mismatch} -> {:error, :invalid_plan}
       {:ok, _malformed} -> {:error, :malformed_response}
       error -> error
     end
@@ -240,16 +241,26 @@ defmodule RsolvHost.Roles.Verify do
 
     Enum.reduce_while(argvs, :ok, fn argv, :ok ->
       case timed(sbx, argv, deadline, @step_max_bytes) do
-        {:ok, 0, output} -> {:cont, log(ctx, output)}
-        {:ok, _status, output} -> {:halt, install_failed(log(ctx, output), side)}
-        {:error, :output_too_large} -> {:halt, install_failed(:ok, side)}
-        {:error, :timeout} -> {:halt, {:verify_error, "timeout", :verify_error}}
-        {:error, reason} -> {:halt, {:verify_error, "sandbox", {:sandbox, reason}}}
+        {:ok, status, output} ->
+          log(ctx, output)
+          step_done(status, side)
+
+        {:error, :output_too_large} ->
+          step_done(:output_too_large, side)
+
+        {:error, :timeout} ->
+          {:halt, {:verify_error, "timeout", :verify_error}}
+
+        {:error, reason} ->
+          {:halt, {:verify_error, "sandbox", {:sandbox, reason}}}
       end
     end)
   end
 
-  defp install_failed(:ok, side), do: {:verify_error, "install_failed_" <> side, :verify_error}
+  defp step_done(0, _side), do: {:cont, :ok}
+
+  defp step_done(_failed, side),
+    do: {:halt, {:verify_error, "install_failed_" <> side, :verify_error}}
 
   defp offline(sbx) do
     case Sandbox.disconnect(sbx) do

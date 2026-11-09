@@ -375,8 +375,20 @@ defmodule RsolvHost.Roles.VerifyTest do
       platform(context, %{"post-images" => {200, %{files: %{"src/a.js" => Base.encode64("x")}}}})
       sandbox()
 
-      assert run(context) == {:error, :digest_mismatch}
+      assert run(context) == {:error, :invalid_plan}
       assert docker_calls() == []
+    end
+
+    test "refuses to make its copies inside the checkout", context do
+      platform(context)
+      sandbox()
+      env = Map.put(context.env, "RUNNER_TEMP", Path.join(context.workspace, "tmp"))
+
+      assert Verify.run(%{issue: 7}, env, deps(context)) ==
+               {:error, {:missing_env, "RUNNER_TEMP"}}
+
+      assert FakeExec.calls() == []
+      refute_received {:request, _name, _body}
     end
 
     test "refuses a touched path before any git", context do
