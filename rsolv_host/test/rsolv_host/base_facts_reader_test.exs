@@ -230,6 +230,26 @@ defmodule RsolvHost.BaseFactsReaderTest do
     end
   end
 
+  describe "read/4 with more touched paths than RsolvCore.BaseFacts allows" do
+    for {label, paths, reason} <- [
+          {"more than 4,096 paths with their directories", for(i <- 1..4_097, do: "f#{i}.js"),
+           :too_many_touched_paths},
+          {"a path deeper than 128 segments", [String.duplicate("d/", 128) <> "f.js"],
+           :touched_path_too_deep}
+        ] do
+      test "refuses #{label}, before any git call, as a deterministic error (exit 2)" do
+        FakeExec.script([])
+
+        result =
+          BaseFactsReader.read("/nonexistent", String.duplicate("b", 40), unquote(paths))
+
+        assert result == {:error, unquote(reason)}
+        assert RsolvHost.Outcome.exit_code(result) == 2
+        assert FakeExec.calls() == []
+      end
+    end
+  end
+
   describe "read/4's git" do
     setup %{tmp_dir: dir} do
       File.mkdir_p!(Path.join(dir, ".git"))
@@ -298,6 +318,20 @@ defmodule RsolvHost.BaseFactsReaderTest do
       scripted(base, "warning: something\n100644 blob x 1\ta.js\0", @source)
 
       assert BaseFactsReader.read(dir, base, ["a.js"]) == {:error, :base_read_failed}
+    end
+
+    test "a directory listing over its cap is base facts too large (exit 2), not a failed read",
+         %{tmp_dir: dir, base: base} do
+      FakeExec.script([
+        {fn {"env", args, _} -> "rev-parse" in args end,
+         {:ok, %{status: 0, output: base <> "\n"}}},
+        {fn {"env", args, _} -> "ls-tree" in args end, {:error, :output_too_large}}
+      ])
+
+      result = BaseFactsReader.read(dir, base, ["a.js"])
+
+      assert result == {:error, :base_facts_too_large}
+      assert RsolvHost.Outcome.exit_code(result) == 2
     end
 
     test "refuses a failed git", %{tmp_dir: dir, base: base} do

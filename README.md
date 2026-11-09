@@ -72,7 +72,7 @@ What falls in each class:
   any redirect, which is never followed), a signed decision refused or expired, a target branch
   that no longer contains the scanned commit, a fix branch or pull request that already holds
   something else, a fix touching `.github/`, a verify checkout that isn't the scanned commit,
-  base files too large to verify, a verify plan this host refuses, an issue already published
+  base files or touched paths too many or too large to verify, a verify plan this host refuses, an issue already published
   or rejected, the project's tests running past their time limit in the verify job.
 - **3, transient:** network failures, 429 and 5xx, a run token that expired or a token keeper
   that stopped answering, the platform or GitHub breaking the protocol (a malformed answer or

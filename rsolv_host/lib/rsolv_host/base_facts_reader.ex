@@ -40,7 +40,12 @@ defmodule RsolvHost.BaseFactsReader do
   @timeout_ms 120_000
 
   @type error ::
-          :invalid_touched_paths | :checkout_not_base | :base_read_failed | :base_facts_too_large
+          :invalid_touched_paths
+          | :too_many_touched_paths
+          | :touched_path_too_deep
+          | :checkout_not_base
+          | :base_read_failed
+          | :base_facts_too_large
 
   @doc """
   Base facts for `paths` at `base_sha`, from the checkout at `dir` (absolute),
@@ -64,12 +69,15 @@ defmodule RsolvHost.BaseFactsReader do
     end
   end
 
+  # Too many or too deep is the fix's size, so asking again won't change it.
   defp required(paths) when is_list(paths) do
     with true <- Enum.all?(paths, &ChangeSet.valid_path?/1),
          {:ok, required} <- BaseFacts.required_paths(paths) do
       {:ok, required}
     else
-      _invalid -> {:error, :invalid_touched_paths}
+      false -> {:error, :invalid_touched_paths}
+      {:error, :too_many_paths} -> {:error, :too_many_touched_paths}
+      {:error, {:path_too_deep, _path}} -> {:error, :touched_path_too_deep}
     end
   end
 
@@ -98,6 +106,7 @@ defmodule RsolvHost.BaseFactsReader do
 
       case exec.run("env", argv, timeout_ms: @timeout_ms, max_bytes: max_bytes) do
         {:ok, %{status: 0, output: output}} -> {:ok, output}
+        {:error, :output_too_large} -> {:error, :base_facts_too_large}
         _failed -> {:error, :base_read_failed}
       end
     end

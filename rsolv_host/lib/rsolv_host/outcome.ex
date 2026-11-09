@@ -82,6 +82,8 @@ defmodule RsolvHost.Outcome do
   def classify(:base_facts_too_large), do: :configuration
   def classify(:invalid_plan), do: :configuration
   def classify(:verify_timed_out), do: :configuration
+  def classify(:too_many_touched_paths), do: :configuration
+  def classify(:touched_path_too_deep), do: :configuration
   def classify({:platform, 409, code}) when code in @ended, do: :configuration
   def classify({:platform, 413, _code}), do: :configuration
   def classify(:verify_error), do: :sandbox
@@ -218,6 +220,10 @@ defmodule RsolvHost.Outcome do
       "The verify job's checkout isn't the commit RSOLV scanned (or has no .git directory). Use RSOLV's reusable verify workflow unmodified."
 
   defp message(:base_facts_too_large, _class), do: too_large()
+
+  defp message(reason, _class) when reason in [:too_many_touched_paths, :touched_path_too_deep],
+    do:
+      "This fix touches more files and directories (over 4,096) or deeper paths (over 128 levels) than RSOLV verifies; nothing will be published."
 
   defp message({:platform, 413, _code}, _class), do: too_large()
 
