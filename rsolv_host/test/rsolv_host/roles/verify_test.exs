@@ -99,6 +99,7 @@ defmodule RsolvHost.Roles.VerifyTest do
       "RUNNER_TEMP" => dir,
       "GITHUB_WORKSPACE" => workspace,
       "GITHUB_RUN_ID" => "41",
+      "GITHUB_RUN_ATTEMPT" => "2",
       "ACTIONS_ID_TOKEN_REQUEST_URL" => "https://token.actions.example/id?v=1",
       "ACTIONS_ID_TOKEN_REQUEST_TOKEN" => "t"
     }
@@ -398,6 +399,15 @@ defmodule RsolvHost.Roles.VerifyTest do
       refute_received {:request, _name, _body}
     end
 
+    test "needs the run attempt, which names its containers", context do
+      platform(context)
+      sandbox()
+      env = Map.delete(context.env, "GITHUB_RUN_ATTEMPT")
+
+      assert Verify.run(%{issue: 7}, env, deps(context)) ==
+               {:error, {:missing_env, "GITHUB_RUN_ATTEMPT"}}
+    end
+
     test "refuses a touched path before any git", context do
       platform(context, %{"touched-paths" => {200, %{paths: ["../x"], work_attempt: 1}}})
       sandbox()
@@ -448,6 +458,67 @@ defmodule RsolvHost.Roles.VerifyTest do
         assert Outcome.exit_code(result) == 3
         assert System.monotonic_time(:millisecond) - start < 3_000
       end
+    end
+  end
+
+  describe "run/3's containers and time" do
+    test "labels each sandbox, proxy and network with the run and attempt", context do
+      platform(context)
+      sandbox()
+
+      run(context)
+
+      labelled =
+        for {"docker", args, _} <- docker_calls(),
+            match?(["run" | _], args) or match?(["network", "create" | _], args),
+            do: Enum.drop_while(args, &(&1 != "--label")) |> Enum.take(2)
+
+      assert length(labelled) == 6
+      assert Enum.uniq(labelled) == [["--label", "rsolv.run=41/2"]]
+    end
+
+    test "first removes what an earlier attempt of this run left, and nothing else", context do
+      platform(context)
+
+      sandbox([
+        {fn {"docker", ["ps", "-a" | _], _} -> true end,
+         {:ok, %{status: 0, output: "old-red\t41/1\nother-run\t99/1\nthis-attempt\t41/2\n"}}},
+        {fn {"docker", ["network", "ls" | _], _} -> true end,
+         {:ok, %{status: 0, output: "old-net\t41/1\nother-net\t9/1\n"}}}
+      ])
+
+      run(context)
+
+      assert [
+               {"docker", ["ps", "-a", "--filter", "label=rsolv.run" | _], _},
+               {"docker", ["rm", "-f", "old-red"], _},
+               {"docker", ["network", "ls", "--filter", "label=rsolv.run" | _], _},
+               {"docker", ["network", "rm", "old-net"], _} | _
+             ] = docker_calls()
+    end
+
+    test "fits every sandbox stage in the role's budget, RED in half of it", context do
+      platform(context)
+      sandbox()
+      # Five minutes are kept for removing the sandboxes and reporting.
+      budget_ms = 5 * 60_000 + 60_000
+
+      Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: budget_ms])
+
+      limits =
+        for {"docker", ["exec", "-i", container, "timeout", "-k", _, s | _], opts} <-
+              docker_calls(),
+            do: {String.ends_with?(container, "-red"), String.to_integer(s), opts[:timeout_ms]}
+
+      assert length(limits) == 8
+
+      for {red?, seconds, host_ms} <- limits do
+        assert seconds <= if(red?, do: 30, else: 60)
+        assert host_ms < (seconds + 1) * 1_000 + 30_000
+      end
+
+      assert for({"docker", ["run" | _], opts} <- docker_calls(), do: opts[:timeout_ms])
+             |> Enum.all?(&(&1 <= 60_000))
     end
   end
 

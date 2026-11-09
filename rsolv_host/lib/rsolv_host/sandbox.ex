@@ -15,13 +15,15 @@ defmodule RsolvHost.Sandbox do
 
   alias RsolvHost.{Egress, Frame}
 
-  defstruct [:container, :network, :proxy, :exec, egress: :proxy]
+  defstruct [:container, :network, :proxy, :exec, :label, :deadline, egress: :proxy]
 
   @type t :: %__MODULE__{
           container: String.t(),
           network: String.t() | nil,
           proxy: String.t() | nil,
           exec: module(),
+          label: String.t() | nil,
+          deadline: integer() | nil,
           egress: :proxy | :none
         }
 
@@ -34,7 +36,7 @@ defmodule RsolvHost.Sandbox do
   @doc """
   The `docker run` argv for the sandbox. `opts` has `:name`, `:network`,
   `:copy_dir`, `:home_dir`, `:uid`, `:gid`, `:proxy_ip`, `:image` and
-  optionally `:egress`.
+  optionally `:egress` and `:label` (`rsolv.run`'s value).
   """
   @spec run_args(map()) :: [String.t()]
   def run_args(opts) do
@@ -50,6 +52,7 @@ defmodule RsolvHost.Sandbox do
       "--dns",
       "127.0.0.1"
     ] ++
+      label(Map.get(opts, :label)) ++
       [
         "--user",
         "#{opts.uid}:#{opts.gid}",
@@ -64,6 +67,9 @@ defmodule RsolvHost.Sandbox do
       ["-v", opts.copy_dir <> ":/work", "-v", opts.home_dir <> ":/opt/home", "-w", "/work"] ++
       ["--entrypoint", "sleep", opts.image, "86400"]
   end
+
+  defp label(nil), do: []
+  defp label(value), do: ["--label", "rsolv.run=" <> value]
 
   defp network(:proxy, network), do: network
   defp network(:none, _network), do: "none"
@@ -88,7 +94,10 @@ defmodule RsolvHost.Sandbox do
   sandbox user), `:runner_temp`,
   `:egress` (`:proxy` or `:none`), `:image` (default: the pinned sandbox
   image), `:probe` (the proxy readiness check, `fn ip -> :ok | :error end`),
-  `:stat` (how the copy is stat'ed, default `File.stat!/1`) and `:exec`.
+  `:stat` (how the copy is stat'ed, default `File.stat!/1`), `:exec`,
+  `:label` (the `rsolv.run` label on its containers and network, for
+  `remove_labelled/2`) and `:deadline` (monotonic milliseconds: no setup step
+  runs past it).
   """
   @spec start(keyword()) ::
           {:ok, t()}
@@ -104,6 +113,8 @@ defmodule RsolvHost.Sandbox do
       network: if(egress == :proxy, do: Keyword.fetch!(opts, :network)),
       proxy: if(egress == :proxy, do: Keyword.fetch!(opts, :name) <> "-proxy"),
       exec: Keyword.get_lazy(opts, :exec, &RsolvHost.exec/0),
+      label: Keyword.get(opts, :label),
+      deadline: Keyword.get(opts, :deadline),
       egress: egress
     }
 
@@ -128,7 +139,8 @@ defmodule RsolvHost.Sandbox do
                gid: gid,
                proxy_ip: proxy_ip,
                image: image,
-               egress: egress
+               egress: egress,
+               label: sbx.label
              }),
              @pull_timeout_ms
            ) do
@@ -192,12 +204,18 @@ defmodule RsolvHost.Sandbox do
     File.write!(allowlist, Egress.allowlist())
     proxy_image = Application.fetch_env!(:rsolv_host, :proxy_image)
 
-    with :ok <- step(sbx, :network_create, ["network", "create", "--internal", sbx.network]),
+    with :ok <-
+           step(
+             sbx,
+             :network_create,
+             ["network", "create", "--internal" | label(sbx.label)] ++ [sbx.network]
+           ),
          :ok <-
            step(
              sbx,
              :proxy_run,
-             ["run", "-d", "--name", sbx.proxy, "-v", conf <> ":/etc/squid/squid.conf:ro"] ++
+             ["run", "-d", "--name", sbx.proxy | label(sbx.label)] ++
+               ["-v", conf <> ":/etc/squid/squid.conf:ro"] ++
                ["-v", allowlist <> ":/etc/squid/allowlist.txt:ro", proxy_image],
              @pull_timeout_ms
            ),
@@ -250,12 +268,17 @@ defmodule RsolvHost.Sandbox do
   end
 
   defp docker(sbx, name, args, timeout_ms) do
-    case sbx.exec.run("docker", args, timeout_ms: timeout_ms) do
+    case sbx.exec.run("docker", args, timeout_ms: within(timeout_ms, sbx.deadline)) do
       {:ok, %{status: 0, output: output}} -> {:ok, output}
       {:error, :enoent} -> {:error, {:sandbox, :enoent}}
       _failed -> {:error, {:sandbox_setup, name}}
     end
   end
+
+  defp within(timeout_ms, nil), do: timeout_ms
+
+  defp within(timeout_ms, deadline),
+    do: timeout_ms |> min(deadline - System.monotonic_time(:millisecond)) |> max(0)
 
   @doc """
   Runs `argv` in the sandbox as `docker exec -i <container> timeout -k 10 <s>
@@ -320,5 +343,59 @@ defmodule RsolvHost.Sandbox do
       do: sbx.exec.run("docker", ["network", "rm", sbx.network], timeout_ms: @setup_timeout_ms)
 
     :ok
+  end
+
+  @doc """
+  Traps SIGTERM, which the runner sends when it stops a job (cancelled, or
+  past its `timeout-minutes`): the VM would then stop without running any
+  `after`, leaving the sandboxes running. The trap suspends the calling
+  process, so it can't act on a sandbox vanishing (post a verify error),
+  removes the containers and network labelled `label`, and halts with exit
+  code 4. Undo it with `System.untrap_signal(:sigterm, id)`.
+  """
+  @spec trap_sigterm(String.t(), module()) :: {:ok, term()} | {:error, term()}
+  def trap_sigterm(label, exec \\ RsolvHost.exec()) do
+    caller = self()
+
+    System.trap_signal(:sigterm, fn ->
+      suspend(caller)
+      remove_labelled(&(&1 == label), exec)
+      System.halt(4)
+    end)
+  end
+
+  defp suspend(pid) do
+    :erlang.suspend_process(pid)
+  rescue
+    ArgumentError -> false
+  end
+
+  @doc """
+  Removes every container, then every network, whose `rsolv.run` label
+  `select` accepts. Best effort: a failed `docker` call removes nothing more.
+  """
+  @spec remove_labelled((String.t() -> boolean()), module()) :: :ok
+  def remove_labelled(select, exec \\ RsolvHost.exec()) do
+    remove(exec, ["ps", "-a"], "{{.Names}}", ["rm", "-f"], select)
+    remove(exec, ["network", "ls"], "{{.Name}}", ["network", "rm"], select)
+  end
+
+  defp remove(exec, list, name, remove, select) do
+    format = name <> "\t{{.Label \"rsolv.run\"}}"
+    args = list ++ ["--filter", "label=rsolv.run", "--format", format]
+
+    with {:ok, %{status: 0, output: output}} <-
+           exec.run("docker", args, timeout_ms: @setup_timeout_ms),
+         [_ | _] = names <- labelled(output, select),
+         do: exec.run("docker", remove ++ names, timeout_ms: @setup_timeout_ms)
+
+    :ok
+  end
+
+  defp labelled(output, select) do
+    for line <- String.split(output, "\n", trim: true),
+        [name, value] <- [String.split(line, "\t")],
+        select.(value),
+        do: name
   end
 end

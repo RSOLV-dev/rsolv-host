@@ -63,7 +63,28 @@ defmodule RsolvHost.Roles.Verify do
   @timeout_statuses [124, 137]
   # A test the host killed for its output: KILL's status.
   @killed_status 137
-  @budget_ms 95 * 60 * 1_000
+  # The role's time (RFC-150 §5), under `rsolv-verify.yml`'s
+  # `timeout-minutes: 120`, in minutes:
+  #
+  #     job setup before the role (checkout, host download and check)  10
+  #   + the role's budget: every platform request ends by it           100
+  #   + margin                                                          10
+  #   = 120
+  #
+  # Before any sandbox, nothing needs clamping: the token exchange and four
+  # platform calls (each at most 4 attempts of 30 s connect and 120 s
+  # receive, and 3 waits of at most 60 s: 13), the base-facts read (5) and
+  # two copies (10 each) take at most 90, before the sandboxes' deadline at
+  # 95 (`@reserve_ms` before the budget). RED gets half of what's left when
+  # it starts and GREEN the rest, and every sandbox stage's own limit
+  # (setup and image pulls, bootstrap 15, install up to 60, prepare 5, test
+  # up to 60, report 1) is clamped to its side's deadline: unclamped, one
+  # side could take 170. Past a deadline a step ends within timeout's 10 s
+  # KILL grace and the host's 30 s, a report within 41 s more, and removing
+  # the sandbox takes at most 2 minutes: 3.5, inside the 5-minute reserve
+  # before the verification is posted.
+  @budget_ms 100 * 60 * 1_000
+  @reserve_ms 5 * 60 * 1_000
   @bound ~w(change_set_digest red_digest policy_version)
   @rejections ["issue_rejected", "not_eligible"]
 
@@ -78,8 +99,10 @@ defmodule RsolvHost.Roles.Verify do
     io = Keyword.get(deps, :io, :stdio)
 
     with {:ok, run_id} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
+         {:ok, attempt} <- env_value(env, "GITHUB_RUN_ATTEMPT", ~r/\A[0-9]{1,5}\z/),
          {:ok, workspace} <- env_value(env, "GITHUB_WORKSPACE", ~r/\A\//),
          {:ok, root} <- copies_root(env, workspace),
+         deadline = now() + Keyword.get(deps, :budget_ms, @budget_ms),
          {:ok, keeper} <- TokenKeeper.start(role: :verify, issue: issue, env: env, io: io) do
       ctx = %{
         issue: issue,
@@ -89,7 +112,10 @@ defmodule RsolvHost.Roles.Verify do
         keeper: keeper,
         workspace: workspace,
         root: root,
-        deadline: now() + Keyword.get(deps, :budget_ms, @budget_ms),
+        deadline: deadline,
+        stages: deadline - @reserve_ms,
+        run_id: run_id,
+        label: run_id <> "/" <> attempt,
         names: "rsolv-#{run_id}-#{issue}-verify"
       }
 
@@ -195,24 +221,46 @@ defmodule RsolvHost.Roles.Verify do
   end
 
   defp prove(ctx, plan, dirs) do
-    with {:ok, red} <- side(ctx, plan, dirs.red, "red"),
-         {:ok, green} <- side(ctx, plan, dirs.green, "green") do
+    Sandbox.remove_labelled(&stale?(&1, ctx))
+    trap = Sandbox.trap_sigterm(ctx.label)
+
+    try do
+      sides(ctx, plan, dirs)
+    after
+      untrap(trap)
+    end
+  end
+
+  defp sides(ctx, plan, dirs) do
+    red_deadline = now() + div(ctx.stages - now(), 2)
+
+    with {:ok, red} <- side(ctx, plan, dirs.red, "red", red_deadline),
+         {:ok, green} <- side(ctx, plan, dirs.green, "green", ctx.stages) do
       report(ctx, plan, %{"red" => red, "green" => green}, :verify_timed_out)
     else
       {:verify_error, kind, reason} -> report(ctx, plan, %{"error" => kind}, reason)
     end
   end
 
-  defp side(ctx, plan, dir, side) do
+  # What an earlier attempt of this run left (a runner that stopped it with
+  # SIGKILL); another run's containers may be a concurrent job's.
+  defp stale?(label, ctx),
+    do: label != ctx.label and String.starts_with?(label, ctx.run_id <> "/")
+
+  defp untrap({:ok, id}), do: System.untrap_signal(:sigterm, id)
+  defp untrap({:error, _not_supported}), do: :ok
+
+  defp side(ctx, plan, dir, side, deadline) do
     name = "#{ctx.names}-#{side}"
 
     [name: name, network: name <> "-net", copy_dir: dir, runner_temp: ctx.env["RUNNER_TEMP"]]
+    |> Keyword.merge(label: ctx.label, deadline: deadline)
     |> Keyword.merge(Keyword.take(ctx.deps, [:probe, :stat]))
     |> Sandbox.start()
     |> case do
       {:ok, sbx} ->
         try do
-          steps(ctx, sbx, plan, side)
+          steps(ctx, sbx, plan, side, deadline)
         after
           Sandbox.stop(sbx)
         end
@@ -222,21 +270,24 @@ defmodule RsolvHost.Roles.Verify do
     end
   end
 
-  defp steps(ctx, sbx, plan, side) do
-    with :ok <- bootstrap(ctx, sbx),
-         :ok <- run_steps(ctx, sbx, plan.install, plan.install_timeout_s * 1_000, side),
+  defp steps(ctx, sbx, plan, side, deadline) do
+    install = min(now() + plan.install_timeout_s * 1_000, deadline)
+
+    with :ok <- bootstrap(ctx, sbx, deadline),
+         :ok <- run_steps(ctx, sbx, plan.install, install, side),
          :ok <- offline(sbx),
-         :ok <- run_steps(ctx, sbx, plan.prepare, @prepare_timeout_ms, side),
-         do: test(ctx, sbx, plan)
+         :ok <-
+           run_steps(ctx, sbx, plan.prepare, min(now() + @prepare_timeout_ms, deadline), side),
+         do: test(ctx, sbx, plan, deadline)
   end
 
   # Bootstrap sets up the sandbox's own toolchains, so its failure is the
   # sandbox's (retryable), never the project's install failing under the fix.
-  defp bootstrap(ctx, sbx) do
+  defp bootstrap(ctx, sbx, deadline) do
     with {:ok, %{status: 0, output: output}} <-
            Sandbox.exec(sbx, ["rsolv-sandbox", "bootstrap"],
              input: Sandbox.bootstrap_input(ctx.env["RSOLV_EXACT_RUNTIME_VERSIONS"]),
-             timeout_ms: @bootstrap_timeout_ms,
+             timeout_ms: min(@bootstrap_timeout_ms, deadline - now()),
              max_bytes: @bootstrap_max_bytes
            ),
          %{"ok" => true, "log_tail" => tail} = result when is_binary(tail) <-
@@ -249,9 +300,7 @@ defmodule RsolvHost.Roles.Verify do
   end
 
   # One deadline for all of a stage's steps.
-  defp run_steps(ctx, sbx, argvs, budget_ms, side) do
-    deadline = now() + budget_ms
-
+  defp run_steps(ctx, sbx, argvs, deadline, side) do
     Enum.reduce_while(argvs, :ok, fn argv, :ok ->
       case timed(sbx, argv, deadline, @step_max_bytes) do
         {:ok, status, output} ->
@@ -282,11 +331,16 @@ defmodule RsolvHost.Roles.Verify do
     end
   end
 
-  defp test(ctx, sbx, plan) do
-    case timed(sbx, plan.test, now() + plan.test_timeout_s * 1_000, @test_max_bytes) do
+  defp test(ctx, sbx, plan, deadline) do
+    case timed(
+           sbx,
+           plan.test,
+           min(now() + plan.test_timeout_s * 1_000, deadline),
+           @test_max_bytes
+         ) do
       {:ok, status, output} ->
         log(ctx, output)
-        {:ok, side_result(status, false, report_bytes(sbx, plan, output))}
+        {:ok, side_result(status, false, report_bytes(sbx, plan, output, deadline))}
 
       {:timed_out, status} ->
         {:ok, side_result(status, true, "")}
@@ -325,16 +379,16 @@ defmodule RsolvHost.Roles.Verify do
   defp timed_out({:error, :timeout}, _late), do: {:timed_out, 124}
   defp timed_out(error, _late), do: error
 
-  defp report_bytes(_sbx, %{report: %{argv: nil}}, output)
+  defp report_bytes(_sbx, %{report: %{argv: nil}}, output, _deadline)
        when byte_size(output) <= @report_max_bytes,
        do: output
 
-  defp report_bytes(_sbx, %{report: %{argv: nil}}, _output), do: ""
+  defp report_bytes(_sbx, %{report: %{argv: nil}}, _output, _deadline), do: ""
 
-  defp report_bytes(sbx, %{report: %{argv: argv}}, _output) do
-    case Sandbox.exec(sbx, argv, timeout_ms: @report_timeout_ms, max_bytes: @report_max_bytes) do
-      {:ok, %{status: 0, output: bytes}} -> bytes
-      _missing_or_too_large -> ""
+  defp report_bytes(sbx, %{report: %{argv: argv}}, _output, deadline) do
+    case timed(sbx, argv, min(now() + @report_timeout_ms, deadline), @report_max_bytes) do
+      {:ok, 0, bytes} -> bytes
+      _missing_late_or_too_large -> ""
     end
   end
 

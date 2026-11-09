@@ -147,4 +147,100 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
       assert File.exists?(marker)
     end
   end
+
+  describe "a job the runner stops with SIGTERM" do
+    # The reviewer's killed.exs, as a test: a separate VM, stopped mid-step.
+    test "removes this attempt's sandbox, proxy and network, and nothing else", context do
+      id = System.unique_integer([:positive])
+      label = "#{id}/1"
+      name = "rsolv-test-killed-#{id}"
+      bystander = "rsolv-test-bystander-#{id}"
+
+      {_, 0} =
+        System.cmd("docker", ["network", "create", "--label", "rsolv.run=#{id}9/1", bystander])
+
+      on_exit(fn ->
+        Sandbox.remove_labelled(&(&1 == label), Exec)
+        System.cmd("docker", ["network", "rm", bystander], stderr_to_stdout: true)
+      end)
+
+      script = """
+      Application.put_env(:rsolv_host, :proxy_image, #{inspect(Application.fetch_env!(:rsolv_host, :proxy_image))})
+
+      {:ok, sbx} =
+        RsolvHost.Sandbox.start(
+          name: #{inspect(name)},
+          network: #{inspect(name <> "-net")},
+          copy_dir: #{inspect(context.red)},
+          runner_temp: #{inspect(context.dir)},
+          image: #{inspect(@image)},
+          label: #{inspect(label)},
+          exec: RsolvHost.Exec
+        )
+
+      {:ok, _id} = RsolvHost.Sandbox.trap_sigterm(#{inspect(label)}, RsolvHost.Exec)
+      IO.puts("ready " <> System.pid())
+
+      try do
+        RsolvHost.Sandbox.exec(sbx, ["sleep", "300"], timeout_ms: 300_000)
+      after
+        IO.puts("after ran")
+      end
+      """
+
+      ebin =
+        for dir <- Path.wildcard(Path.join(Mix.Project.build_path(), "lib/*/ebin")),
+            arg <- ["-pa", dir],
+            do: arg
+
+      port =
+        Port.open({:spawn_executable, System.find_executable("elixir")}, [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          args: ebin ++ ["-e", script]
+        ])
+
+      pid = ready(port, "")
+      {_, 0} = System.cmd("kill", ["-TERM", pid])
+
+      assert {status, output} = exited(port, "")
+      assert status == 4
+      refute output =~ "after ran"
+
+      for list <- [["ps", "-a"], ["network", "ls"]] do
+        {listed, 0} =
+          System.cmd("docker", list ++ ["-q", "--filter", "label=rsolv.run=" <> label])
+
+        assert listed == "", inspect(list)
+      end
+
+      assert {_, 0} =
+               System.cmd("docker", ["network", "inspect", bystander], stderr_to_stdout: true)
+    end
+  end
+
+  defp ready(port, acc) do
+    receive do
+      {^port, {:data, data}} ->
+        case Regex.run(~r/ready (\d+)/, acc <> data) do
+          [_, pid] -> pid
+          nil -> ready(port, acc <> data)
+        end
+
+      {^port, {:exit_status, status}} ->
+        flunk("the VM exited #{status} before it was ready: #{acc}")
+    after
+      300_000 -> flunk("the VM never became ready: #{acc}")
+    end
+  end
+
+  defp exited(port, acc) do
+    receive do
+      {^port, {:data, data}} -> exited(port, acc <> data)
+      {^port, {:exit_status, status}} -> {status, acc}
+    after
+      120_000 -> flunk("the VM didn't stop after SIGTERM: #{acc}")
+    end
+  end
 end
