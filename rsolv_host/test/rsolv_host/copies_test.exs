@@ -84,6 +84,29 @@ defmodule RsolvHost.CopiesTest do
       assert File.read!(target) == "keep"
     end
 
+    test "replaces a hardlinked file with a new one, never writing through to the other link",
+         %{tmp_dir: dir} do
+      outside = Path.join(dir, "outside.js")
+      copy = Path.join(dir, "copy")
+      File.write!(outside, "keep")
+      File.chmod!(outside, 0o755)
+      File.mkdir_p!(copy)
+      File.ln!(outside, Path.join(copy, "a.js"))
+
+      assert Copies.write_images(copy, [modify("a.js")], %{"a.js" => "new"}) == :ok
+
+      assert File.read!(outside) == "keep"
+      assert File.read!(Path.join(copy, "a.js")) == "new"
+      assert %File.Stat{links: 1, type: :regular} = File.lstat!(Path.join(copy, "a.js"))
+      assert Bitwise.band(File.stat!(Path.join(copy, "a.js")).mode, 0o777) == 0o755
+      assert File.ls!(copy) == ["a.js"]
+    end
+
+    test "gives an add its mode", %{tmp_dir: dir} do
+      assert Copies.write_images(dir, [add("a.js")], %{"a.js" => "x"}) == :ok
+      assert Bitwise.band(File.stat!(Path.join(dir, "a.js")).mode, 0o777) == 0o644
+    end
+
     test "refuses to delete through a symlinked parent", %{tmp_dir: dir} do
       outside = Path.join(dir, "outside")
       copy = Path.join(dir, "copy")

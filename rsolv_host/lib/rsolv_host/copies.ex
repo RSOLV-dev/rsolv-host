@@ -6,6 +6,9 @@ defmodule RsolvHost.Copies do
   existing ancestor must be a real directory (`File.lstat/1`, never
   followed), and the file itself a regular file or absent, so nothing is
   written or deleted through a symlink, over a directory or beneath a file.
+  An add or modify writes a new file beside the target (`O_EXCL`), renames
+  it into place and checks it again with `File.lstat/1`, so a hardlink to a
+  file outside the copy is replaced, never written through.
   """
 
   alias RsolvCore.{BaseFacts, ChangeSet}
@@ -30,9 +33,24 @@ defmodule RsolvHost.Copies do
     with {:ok, %File.Stat{type: :regular}} <- File.lstat(target), do: File.rm(target)
   end
 
-  defp write(target, %Entry{path: path}, images) do
-    with :ok <- writable(File.lstat(target)), do: File.write(target, Map.fetch!(images, path))
+  defp write(target, %Entry{path: path, mode: mode}, images) do
+    temp = Path.join(Path.dirname(target), ".rsolv-#{System.unique_integer([:positive])}.tmp")
+
+    with :ok <- writable(File.lstat(target)),
+         :ok <- File.write(temp, Map.fetch!(images, path), [:exclusive]),
+         :ok <- File.chmod(temp, file_mode(mode)),
+         :ok <- File.rename(temp, target),
+         {:ok, %File.Stat{type: :regular, links: 1}} <- File.lstat(target) do
+      :ok
+    else
+      _unsafe ->
+        File.rm(temp)
+        :error
+    end
   end
+
+  defp file_mode("100755"), do: 0o755
+  defp file_mode("100644"), do: 0o644
 
   defp writable({:error, :enoent}), do: :ok
   defp writable({:ok, %File.Stat{type: :regular}}), do: :ok
