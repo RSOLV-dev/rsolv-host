@@ -37,6 +37,7 @@ defmodule RsolvHost.Roles.Verify do
     ActionsLog,
     BaseFactsReader,
     Copies,
+    Http,
     Outcome,
     Platform,
     PostImages,
@@ -62,10 +63,16 @@ defmodule RsolvHost.Roles.Verify do
   @timeout_statuses [124, 137]
   # A test the host killed for its output: KILL's status.
   @killed_status 137
+  @budget_ms 95 * 60 * 1_000
   @bound ~w(change_set_digest red_digest policy_version)
   @rejections ["issue_rejected", "not_eligible"]
 
-  @doc "Runs the role. `deps`: `:io`, `:probe` and `:stat` (passed to `RsolvHost.Sandbox.start/1`)."
+  @doc """
+  Runs the role. `deps`: `:io`, `:probe` and `:stat` (passed to
+  `RsolvHost.Sandbox.start/1`), and `:budget_ms`, the role's deadline: every
+  platform request, retries and their waits included, ends by it
+  (`RsolvHost.Http.deadline/3`), or the role ends `session_timeout`.
+  """
   @spec run(map(), map(), keyword()) :: Outcome.result()
   def run(%{issue: issue}, env, deps \\ []) do
     io = Keyword.get(deps, :io, :stdio)
@@ -82,6 +89,7 @@ defmodule RsolvHost.Roles.Verify do
         keeper: keeper,
         workspace: workspace,
         root: root,
+        deadline: now() + Keyword.get(deps, :budget_ms, @budget_ms),
         names: "rsolv-#{run_id}-#{issue}-verify"
       }
 
@@ -150,6 +158,7 @@ defmodule RsolvHost.Roles.Verify do
 
   defp call(ctx, fun, args) do
     with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(ctx.keeper),
+         req = Http.deadline(req, ctx.deadline, :session_timeout),
          do: apply(Platform, fun, [req, raw, ctx.run, ctx.issue | args])
   end
 

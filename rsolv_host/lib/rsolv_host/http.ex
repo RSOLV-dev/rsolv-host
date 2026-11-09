@@ -70,12 +70,14 @@ defmodule RsolvHost.Http do
   def failure(%Req.TransportError{reason: reason}), do: {:transport, reason}
   def failure(_exception), do: {:transport, :request_failed}
 
+  @max_retry_after_ms 60_000
+
   @doc """
   A `Req` retry decision: `false`, or the wait before repeating a request that
   `repeatable?` and whose failure is `transient?/1`. The wait is the server's
-  `Retry-After` on 429 and 503, otherwise 1, 2, then 4 seconds (the
-  `:retry_base_ms` setting times 2^attempt), and never more than what's left
-  before the request's deadline.
+  `Retry-After` on 429 and 503 (at most 60 seconds), otherwise 1, 2, then 4
+  seconds (the `:retry_base_ms` setting times 2^attempt), and never more than
+  what's left before the request's deadline.
   """
   @spec retry(Req.Request.t(), Req.Response.t() | Exception.t(), boolean()) ::
           false | {:delay, non_neg_integer()}
@@ -86,7 +88,7 @@ defmodule RsolvHost.Http do
   end
 
   defp wait(req, %Req.Response{status: status} = response) when status in [429, 503],
-    do: Req.Response.get_retry_after(response) || backoff(req)
+    do: min(Req.Response.get_retry_after(response) || backoff(req), @max_retry_after_ms)
 
   defp wait(req, _result), do: backoff(req)
 

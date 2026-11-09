@@ -384,6 +384,15 @@ defmodule RsolvHost.PlatformTest do
       end
     end
 
+    test "waits a server's Retry-After, but never more than 60 seconds" do
+      req = %Req.Request{method: :get, url: URI.parse("https://api.rsolv.ai./api/v1/x")}
+
+      for {retry_after, wait} <- [{"5", 5_000}, {"86400", 60_000}] do
+        response = Req.Response.new(status: 503, headers: [{"retry-after", retry_after}])
+        assert Platform.retry(req, response) == {:delay, wait}
+      end
+    end
+
     test "a request that may have been carried out is never repeated" do
       answer([:closed, 200])
 

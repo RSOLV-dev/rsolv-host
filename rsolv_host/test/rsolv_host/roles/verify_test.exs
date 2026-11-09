@@ -107,7 +107,7 @@ defmodule RsolvHost.Roles.VerifyTest do
   end
 
   # The platform's verify endpoints; `answers` replaces any of them with
-  # `{status, json}`. Every request is sent to the test as {:request, name, body}.
+  # `{status, json}`, or `:busy` (503 with a day's Retry-After). Every request is sent to the test as {:request, name, body}.
   defp platform(context, answers \\ %{}) do
     test = self()
 
@@ -130,6 +130,13 @@ defmodule RsolvHost.Roles.VerifyTest do
           answer(conn, method, name, answers[name], test)
       end
     end)
+  end
+
+  defp answer(conn, _method, _name, :busy, _test) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "86400")
+    |> Plug.Conn.put_status(503)
+    |> Req.Test.json(%{error: "busy"})
   end
 
   defp answer(conn, method, name, {status, json}, test) do
@@ -425,6 +432,22 @@ defmodule RsolvHost.Roles.VerifyTest do
       result = run(context)
       assert result == {:error, {:platform, 409, "issue_not_open"}}
       assert Outcome.exit_code(result) == 2
+    end
+  end
+
+  describe "run/3's deadline" do
+    for name <- ~w(touched-paths base-facts verify-plan post-images verification) do
+      test "#{name} answering 503 with a day's Retry-After ends at the role's deadline, transient (exit 3)",
+           context do
+        platform(context, %{unquote(name) => :busy})
+        sandbox()
+        start = System.monotonic_time(:millisecond)
+
+        result = Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: 1_500])
+
+        assert Outcome.exit_code(result) == 3
+        assert System.monotonic_time(:millisecond) - start < 3_000
+      end
     end
   end
 
