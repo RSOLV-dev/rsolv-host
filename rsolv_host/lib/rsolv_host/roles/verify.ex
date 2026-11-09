@@ -184,9 +184,10 @@ defmodule RsolvHost.Roles.Verify do
   end
 
   defp call(ctx, fun, args) do
-    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(ctx.keeper),
-         req = Http.deadline(req, ctx.deadline, :session_timeout),
-         do: apply(Platform, fun, [req, raw, ctx.run, ctx.issue | args])
+    with {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(ctx.keeper) do
+      req = Http.deadline(req, ctx.deadline, :session_timeout)
+      apply(Platform, fun, [req, raw, ctx.run, ctx.issue | args])
+    end
   end
 
   defp touched_paths(ctx) do

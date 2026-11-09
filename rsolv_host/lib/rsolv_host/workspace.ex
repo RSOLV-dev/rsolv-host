@@ -51,13 +51,16 @@ defmodule RsolvHost.Workspace do
   defp sanitize(_not_a_directory, _git), do: :ok
 
   defp drop_locks(dir) do
-    for {:ok, names} <- [File.ls(dir)], name <- names, path = Path.join(dir, name) do
-      case File.lstat!(path) do
-        %File.Stat{type: :directory} -> drop_locks(path)
-        _file -> if String.ends_with?(name, ".lock"), do: File.rm!(path)
-      end
-    end
+    for {:ok, names} <- [File.ls(dir)],
+        name <- names,
+        path = Path.join(dir, name),
+        do: drop_lock(File.lstat!(path), path)
 
     :ok
   end
+
+  defp drop_lock(%File.Stat{type: :directory}, path), do: drop_locks(path)
+
+  defp drop_lock(_file, path),
+    do: if(String.ends_with?(path, ".lock"), do: File.rm!(path))
 end

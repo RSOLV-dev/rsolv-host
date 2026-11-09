@@ -108,7 +108,8 @@ defmodule RsolvHost.Roles.VerifyTest do
   end
 
   # The platform's verify endpoints; `answers` replaces any of them with
-  # `{status, json}`, or `:busy` (503 with a day's Retry-After). Every request is sent to the test as {:request, name, body}.
+  # `{status, json}`, or `:busy` (503 with a day's Retry-After). Every
+  # request is sent to the test as {:request, name, body}.
   defp platform(context, answers \\ %{}) do
     test = self()
 
