@@ -135,6 +135,33 @@ defmodule RsolvHost.SandboxDockerTest do
       assert limits == "4294967296 4294967296 2000000000\n"
     end
 
+    test "is killed once its copy and home pass their disk budget, which ends the step as disk_limit",
+         %{sbx: sbx} do
+      {:ok, used} = Sandbox.disk_used(sbx)
+      started = System.monotonic_time(:millisecond)
+
+      result =
+        Sandbox.watched(sbx, used + 50 * 1024 * 1024, 500, fn ->
+          Sandbox.exec(
+            sbx,
+            [
+              "sh",
+              "-c",
+              "head -c 300M /dev/zero > /work/big; head -c 300M /dev/zero > /opt/home/big; sleep 60"
+            ],
+            timeout_ms: 90_000
+          )
+        end)
+
+      assert result == {:error, :disk_limit}
+      assert System.monotonic_time(:millisecond) - started < 30_000
+
+      {running, 0} =
+        System.cmd("docker", ["inspect", "-f", "{{.State.Running}}", sbx.ids.sandbox])
+
+      assert running == "false\n"
+    end
+
     test "has no network at all once disconnected", %{sbx: sbx} do
       assert Sandbox.disconnect(sbx) == :ok
       assert run(sbx, ["curl", "-sS", "-m", "5", "https://api.github.com/zen"]).status != 0

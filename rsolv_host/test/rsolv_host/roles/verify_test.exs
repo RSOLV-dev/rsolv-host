@@ -179,6 +179,8 @@ defmodule RsolvHost.Roles.VerifyTest do
       overrides ++
         [
           {fn {exe, _, _} -> exe in ["env", "cp"] end, real},
+          {fn {"du", _, _} -> true end,
+           {:ok, %{status: 0, output: "4096\t/c\n4096\t/h\n8192\ttotal\n"}}},
           {fn {"docker", ["inspect", "-f", t, _], _} -> t =~ "bridge" end,
            {:ok, %{status: 0, output: "172.17.0.5"}}},
           {fn {"docker", ["inspect" | _], _} -> true end,
@@ -332,7 +334,7 @@ defmodule RsolvHost.Roles.VerifyTest do
       assert Verify.run(%{issue: 7}, env, deps(context)) == {:outcome, :verified, false}
     end
 
-    test "runs no git and copies nothing once the first sandbox has started (acceptance 5a)",
+    test "runs no git and copies nothing once the first sandbox has started, only du (acceptance 5a)",
          context do
       platform(context)
       sandbox()
@@ -343,7 +345,9 @@ defmodule RsolvHost.Roles.VerifyTest do
         Enum.drop_while(FakeExec.calls(), &(not match?({"docker", ["run" | _], _}, &1)))
 
       assert after_first_sandbox != []
-      assert for({exe, _, _} <- after_first_sandbox, exe != "docker", do: exe) == []
+
+      assert for({exe, _, _} <- after_first_sandbox, exe != "docker", do: exe) |> Enum.uniq() ==
+               ["du"]
     end
 
     test "installs online, then disconnects, then tests offline, on each side", context do
@@ -601,6 +605,69 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       assert for({"docker", ["run" | _], opts} <- docker_calls(), do: opts[:timeout_ms])
              |> Enum.all?(&(&1 <= 60_000))
+    end
+  end
+
+  describe "run/3's disk budget" do
+    defp du(bytes), do: {:ok, %{status: 0, output: "#{bytes}\t/c\n0\t/h\n#{bytes}\ttotal\n"}}
+
+    test "measures the copy and its home with a no-follow du, after bootstrap", context do
+      platform(context)
+      sandbox()
+
+      run(context)
+
+      assert [{"du", args, opts} | _] = for({"du", _, _} = call <- FakeExec.calls(), do: call)
+      copy = Path.join([context.tmp_dir, "rsolv", "rsolv-41-2-7-verify-red"])
+      home = Path.join([context.tmp_dir, "rsolv", "home-rsolv-41-2-7-verify-red"])
+      assert args == ["-s", "-c", "-x", "-P", "-B1", "--", copy, home]
+      assert opts[:timeout_ms] <= 30_000
+    end
+
+    test "a side writing past its budget is killed, and is a side result with an empty report",
+         context do
+      platform(context, %{
+        "verification" => {200, %{verification: "failed", reasons: ["unparseable_report_red"]}}
+      })
+
+      polls = :counters.new(1, [])
+
+      sandbox([
+        {fn {"du", _, _} -> true end,
+         fn _call ->
+           :counters.add(polls, 1, 1)
+           # The baseline, then 5 GiB and one byte more.
+           if :counters.get(polls, 1) == 1, do: du(1_000), else: du(1_000 + 5 * 1024 ** 3 + 1)
+         end},
+        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")),
+         fn _call ->
+           Process.sleep(300)
+           {:ok, %{status: 137, output: ""}}
+         end}
+      ])
+
+      result = Verify.run(%{issue: 7}, context.env, deps(context) ++ [disk_poll_ms: 20])
+
+      assert result == {:outcome, :verify_failed, false}
+
+      assert_received {:request, "verification",
+                       %{"red" => %{"exit_code" => 137, "timed_out" => false, "report" => ""}}}
+
+      red = FakeExec.docker_id("rsolv-41-2-7-verify-red")
+      assert Enum.any?(docker_calls(), &match?({"docker", ["kill", ^red], _}, &1))
+
+      {:ok, {_in, out}} = StringIO.close(context.io)
+      assert out =~ "disk_limit"
+    end
+
+    test "a side within its budget is never killed", context do
+      platform(context)
+      sandbox()
+
+      assert Verify.run(%{issue: 7}, context.env, deps(context) ++ [disk_poll_ms: 5]) ==
+               {:outcome, :verified, false}
+
+      refute Enum.any?(docker_calls(), &match?({"docker", ["kill" | _], _}, &1))
     end
   end
 

@@ -18,8 +18,10 @@ defmodule RsolvHost.Roles.Verify do
   Then RED and GREEN each run in a fresh sandbox: bootstrap and `install`
   behind the proxy, disconnect, then `prepare`, `test` and the report
   offline. The host never builds a command, and never runs git or opens a
-  path in a tree a sandbox has mounted; it removes a copy only once Docker
-  has removed its sandbox.
+  path in a tree a sandbox has mounted: only the disk watchdog's `du` walks
+  one, following no symlink and reading no content (`RsolvHost.Sandbox.watched/4`),
+  and a side past its disk budget is that side's result, like an output
+  flood. It removes a copy only once Docker has removed its sandbox.
 
   The verdicts are outcomes (exit 0): `verified`, `verify_failed` and
   `rejected` (by policy, or for want of a plan). What the code under test
@@ -62,8 +64,13 @@ defmodule RsolvHost.Roles.Verify do
   @log_tail_bytes 64 * 1024
   # `timeout`'s status when it stopped a step: TERM, then KILL.
   @timeout_statuses [124, 137]
-  # A test the host killed for its output: KILL's status.
+  # A test the host killed for its output or its disk: KILL's status.
   @killed_status 137
+  # ponytail: the project's steps may grow the copy and HOME by 5 GiB past
+  # what they use after bootstrap, measured every 5 s (`Sandbox.watched/4`
+  # names the overshoot). A GitHub-hosted runner has about 14 GB free.
+  @disk_allowance_bytes 5 * 1024 * 1024 * 1024
+  @disk_poll_ms 5_000
   # The role's time (RFC-150 §5), under `rsolv-verify.yml`'s
   # `timeout-minutes: 120`, in minutes:
   #
@@ -81,9 +88,9 @@ defmodule RsolvHost.Roles.Verify do
   # (setup and image pulls, bootstrap 15, install up to 60, prepare 5, test
   # up to 60, report 1) is clamped to its side's deadline: unclamped, one
   # side could take 170. Past a deadline a step ends within timeout's 10 s
-  # KILL grace and the host's 30 s, a report within 41 s more, and removing
-  # the sandbox takes at most 2 minutes: 3.5, inside the 5-minute reserve
-  # before the verification is posted.
+  # KILL grace and the host's 30 s, a report within 41 s more, the disk
+  # baseline's du takes at most 30 s, and removing the sandbox at most 2
+  # minutes: 4, inside the 5-minute reserve before the verification is posted.
   @budget_ms 100 * 60 * 1_000
   @reserve_ms 5 * 60 * 1_000
   # owner/name, as GitHub allows them: label values never carry more.
@@ -278,16 +285,46 @@ defmodule RsolvHost.Roles.Verify do
     end
   end
 
+  # The project's steps run under the disk watchdog, from what the copy and
+  # HOME use once bootstrap has set up the toolchains.
   defp steps(ctx, sbx, plan, side, deadline) do
-    install = min(now() + plan.install_timeout_s * 1_000, deadline)
+    with :ok <- bootstrap(ctx, sbx, deadline) do
+      sbx
+      |> Sandbox.disk_used()
+      |> watched(ctx, sbx, fn -> project(ctx, sbx, plan, side, deadline) end)
+      |> disk_limited(ctx, side)
+    end
+  end
 
-    with :ok <- bootstrap(ctx, sbx, deadline),
-         :ok <- run_steps(ctx, sbx, plan.install, install, side),
+  defp watched({:ok, used}, ctx, sbx, fun) do
+    poll_ms = Keyword.get(ctx.deps, :disk_poll_ms, @disk_poll_ms)
+    Sandbox.watched(sbx, used + @disk_allowance_bytes, poll_ms, fun)
+  end
+
+  defp watched(:error, _ctx, _sbx, _fun), do: {:error, :disk_limit}
+
+  defp project(ctx, sbx, plan, side, deadline) do
+    install = min(now() + plan.install_timeout_s * 1_000, deadline)
+    prepare = fn -> min(now() + @prepare_timeout_ms, deadline) end
+
+    with :ok <- run_steps(ctx, sbx, plan.install, install, side),
          :ok <- offline(sbx),
-         :ok <-
-           run_steps(ctx, sbx, plan.prepare, min(now() + @prepare_timeout_ms, deadline), side),
+         :ok <- run_steps(ctx, sbx, plan.prepare, prepare.(), side),
          do: test(ctx, sbx, plan, deadline)
   end
+
+  # Judged as an output flood: the side's result, with an empty report.
+  defp disk_limited({:error, :disk_limit}, ctx, side) do
+    ActionsLog.warning(
+      "RSOLV",
+      "The #{side} sandbox wrote past its disk budget and was stopped (disk_limit).",
+      ctx.io
+    )
+
+    {:ok, side_result(@killed_status, false, "")}
+  end
+
+  defp disk_limited(result, _ctx, _side), do: result
 
   # Bootstrap sets up the sandbox's own toolchains, so its failure is the
   # sandbox's (retryable), never the project's install failing under the fix.

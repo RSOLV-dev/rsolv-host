@@ -23,6 +23,7 @@ defmodule RsolvHost.Sandbox do
     :exec,
     :deadline,
     :created,
+    :copy_dir,
     labels: %{},
     ids: %{},
     dirs: [],
@@ -37,6 +38,7 @@ defmodule RsolvHost.Sandbox do
           exec: module(),
           deadline: integer() | nil,
           created: pid() | nil,
+          copy_dir: Path.t() | nil,
           labels: %{String.t() => String.t()},
           ids: %{optional(:sandbox | :proxy | :network) => String.t()},
           dirs: [Path.t()],
@@ -50,6 +52,7 @@ defmodule RsolvHost.Sandbox do
   @limits ["--memory", "4g", "--memory-swap", "4g", "--cpus", "2"]
   @tmp "/tmp:exec,size=1g"
   @setup_timeout_ms 60_000
+  @du_timeout_ms 30_000
   # An image pull can be slow; the sandbox image carries every toolchain.
   @pull_timeout_ms 900_000
   @kill_after_s "10"
@@ -137,6 +140,7 @@ defmodule RsolvHost.Sandbox do
     sbx = %__MODULE__{
       dirs: Enum.map(["home-", "proxy-"], &Path.join(rsolv, &1 <> Keyword.fetch!(opts, :name))),
       container: Keyword.fetch!(opts, :name),
+      copy_dir: Keyword.fetch!(opts, :copy_dir),
       network: if(egress == :proxy, do: Keyword.fetch!(opts, :network)),
       proxy: if(egress == :proxy, do: Keyword.fetch!(opts, :name) <> "-proxy"),
       exec: Keyword.get_lazy(opts, :exec, &RsolvHost.exec/0),
@@ -389,6 +393,72 @@ defmodule RsolvHost.Sandbox do
   @spec bootstrap_input(String.t() | nil) :: binary()
   def bootstrap_input("true"), do: Frame.encode(%{"exact_runtime_versions" => true})
   def bootstrap_input(_unset), do: "0\n"
+
+  @doc """
+  The bytes the sandbox's writable mounts (its copy and HOME) use on disk:
+  `du -s -c -x -P -B1`, which follows no symlink, stays on one filesystem,
+  reads no file content and counts a hardlinked file once. A file vanishing
+  mid-walk makes du complain but still total; no total within 30 s is
+  `:error`.
+  """
+  @spec disk_used(t()) :: {:ok, non_neg_integer()} | :error
+  def disk_used(%__MODULE__{dirs: [home | _]} = sbx) do
+    args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, home]
+
+    with {:ok, %{output: output}} <-
+           sbx.exec.run("du", args, timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024),
+         [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output) do
+      {:ok, String.to_integer(total)}
+    else
+      _no_total -> :error
+    end
+  end
+
+  @doc """
+  Runs `fun` (the sandbox's steps) while a watchdog measures `disk_used/1`
+  every `poll_ms`: past `max_bytes`, or with no measure, it kills the
+  sandbox, and the answer is `{:error, :disk_limit}` whatever `fun` returned.
+  The bind mounts have no portable quota, so this is the bound.
+
+  ponytail: a burst between two polls overshoots by whatever it writes in
+  `poll_ms` (plus du's own time); a hard bound needs a quota (xfs project
+  quotas, btrfs subvolumes) or a size-limited loop device per copy.
+  """
+  @spec watched(t(), non_neg_integer(), pos_integer(), (-> result)) ::
+          result | {:error, :disk_limit}
+        when result: term()
+  def watched(sbx, max_bytes, poll_ms, fun) do
+    role = self()
+    ref = make_ref()
+    {:ok, watchdog} = Task.start_link(fn -> watch(sbx, max_bytes, poll_ms, {role, ref}) end)
+
+    try do
+      fun.()
+    after
+      Process.unlink(watchdog)
+      Process.exit(watchdog, :kill)
+    end
+    |> then(fn result ->
+      receive do
+        {^ref, :disk_limit} -> {:error, :disk_limit}
+      after
+        0 -> result
+      end
+    end)
+  end
+
+  defp watch(sbx, max_bytes, poll_ms, {role, ref} = tell) do
+    Process.sleep(poll_ms)
+
+    case disk_used(sbx) do
+      {:ok, used} when used <= max_bytes ->
+        watch(sbx, max_bytes, poll_ms, tell)
+
+      _over_or_unmeasured ->
+        send(role, {ref, :disk_limit})
+        sbx.exec.run("docker", ["kill", sbx.ids.sandbox], timeout_ms: @setup_timeout_ms)
+    end
+  end
 
   @doc "Takes the sandbox off the proxy's network: from here on it has no network."
   @spec disconnect(t()) :: :ok | {:error, term()}
