@@ -153,7 +153,8 @@ defmodule RsolvHost.Roles.ScanTest do
                        }}
 
       assert outputs(context) == "pipeline_run_id=#{@run}\nissues=[7]\n"
-      assert {"docker", ["rm", "-f", "rsolv-41-scan"], _} = List.last(FakeExec.calls())
+      assert {"docker", ["rm", "-f", id], _} = List.last(FakeExec.calls())
+      assert id == FakeExec.docker_id("rsolv-41-scan")
     end
 
     test "with no findings, registers nothing and outputs no issues", context do

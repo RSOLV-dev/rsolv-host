@@ -3,7 +3,9 @@ defmodule RsolvHost.FakeExec do
   A scripted `RsolvHost.Exec` for tests. A test installs rules with `script/1`;
   each call is recorded and answered by the first rule whose matcher returns
   true for `{executable, args, opts}` (a matcher whose clauses don't match is a
-  miss). An unmatched `run/3` exits 0 with no output.
+  miss). An unmatched `run/3` exits 0 with no output, except that `docker run
+  -d` and `docker network create` print an ID, as Docker does
+  (`docker_id/1` of the container's or network's name).
 
   State belongs to the test process (found through `$callers`), so tests using
   it stay `async: true`.
@@ -33,7 +35,15 @@ defmodule RsolvHost.FakeExec do
   @impl true
   @doc false
   def run(executable, args, opts),
-    do: answer({executable, args, opts}, {:ok, %{status: 0, output: ""}})
+    do: answer({executable, args, opts}, {:ok, %{status: 0, output: created(executable, args)}})
+
+  @doc "The ID the fake gives the container or network named `name`."
+  @spec docker_id(String.t()) :: String.t()
+  def docker_id(name), do: :crypto.hash(:sha256, name) |> Base.encode16(case: :lower)
+
+  defp created("docker", ["run", "-d", "--name", name | _]), do: docker_id(name) <> "\n"
+  defp created("docker", ["network", "create" | args]), do: docker_id(List.last(args)) <> "\n"
+  defp created(_executable, _args), do: ""
 
   @impl true
   @doc false

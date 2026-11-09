@@ -24,6 +24,12 @@ defmodule RsolvHost.CLITest do
       assert out =~ "usage: rsolv-host"
     end
 
+    test "when verify has no --issue, prints usage naming it and exits 2" do
+      out = capture_io(fn -> assert CLI.main(["verify"], @env, @root) == 2 end)
+
+      assert out =~ "verify --issue N"
+    end
+
     test "when the command is Burrito's maintenance, exits 2" do
       capture_io(fn -> assert CLI.main(["maintenance", "uninstall"], @env, @root) == 2 end)
     end
@@ -164,8 +170,8 @@ defmodule RsolvHost.CLITest do
   end
 
   describe "commands/0" do
-    test "is exactly the five roles and leaves maintenance to Burrito" do
-      assert CLI.commands() == ~w(publish scan selftest version work)
+    test "is exactly the six commands and leaves maintenance to Burrito" do
+      assert CLI.commands() == ~w(publish scan selftest verify version work)
       refute "maintenance" in CLI.commands()
     end
   end

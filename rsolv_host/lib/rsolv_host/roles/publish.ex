@@ -14,8 +14,8 @@ defmodule RsolvHost.Roles.Publish do
   workflow for a fresh decision.
   """
 
-  alias RsolvCore.{ChangeSet, Decision}
-  alias RsolvHost.{GitHub, GitTree, Http, Oidc, Platform, TokenKeeper}
+  alias RsolvCore.Decision
+  alias RsolvHost.{GitHub, GitTree, Http, Oidc, Platform, PostImages, TokenKeeper}
 
   @doc "Runs the role. `deps`: `:io`."
   @spec run(map(), map(), keyword()) :: :ok | {:error, term()}
@@ -163,32 +163,14 @@ defmodule RsolvHost.Roles.Publish do
 
   defp sha256(text), do: :sha256 |> :crypto.hash(text) |> Base.encode16(case: :lower)
 
-  # Exactly one post-image per add and modify, each hashing to its new blob SHA.
   defp post_images(ctx, change_set) do
-    wanted =
-      for %{op: op} = e <- change_set, op != :delete, into: %{}, do: {e.path, e.new_blob_sha}
-
     with {:ok, req, raw} <- platform(ctx),
-         {:ok, %{"files" => %{} = files}} <- Platform.post_images(req, raw, ctx.run, ctx.issue),
-         true <- files |> Map.keys() |> Enum.sort() == wanted |> Map.keys() |> Enum.sort(),
-         {:ok, images} <- decode_images(files, wanted) do
-      {:ok, images}
+         {:ok, %{"files" => files}} <- Platform.post_images(req, raw, ctx.run, ctx.issue) do
+      PostImages.checked(files, change_set)
     else
       {:error, _reason} = error -> error
       _mismatch -> {:error, :digest_mismatch}
     end
-  end
-
-  defp decode_images(files, wanted) do
-    Enum.reduce_while(files, {:ok, %{}}, fn {path, encoded}, {:ok, acc} ->
-      with true <- is_binary(encoded),
-           {:ok, bytes} <- Base.decode64(encoded),
-           true <- ChangeSet.blob_sha(bytes) == wanted[path] do
-        {:cont, {:ok, Map.put(acc, path, bytes)}}
-      else
-        _mismatch -> {:halt, {:error, :digest_mismatch}}
-      end
-    end)
   end
 
   # RFC-150 §3: the signed base must be reachable from the target's head before

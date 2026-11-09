@@ -1,24 +1,26 @@
 defmodule RsolvHost.CLI do
   @moduledoc """
   The command line: `rsolv-host scan [--max-issues N]`, `work --issue N
-  [--resume]`, `publish --issue N`, `version` and `selftest`. The preflight runs
+  [--resume]`, `verify --issue N`, `publish --issue N`, `version` and
+  `selftest`. The preflight runs
   first, for every command, because the first invocation extracts the release.
   """
 
   alias RsolvHost.{Outcome, Platform, Preflight, TokenKeeper}
 
-  @usage "usage: rsolv-host scan [--max-issues N] | work --issue N [--resume] | publish --issue N | version | selftest [--online]"
+  @usage "usage: rsolv-host scan [--max-issues N] | work --issue N [--resume] | verify --issue N | publish --issue N | version | selftest [--online]"
 
   # name => {run function, OptionParser strict spec, required options}
   @commands %{
     "publish" => {{RsolvHost.Roles.Publish, :run}, [issue: :integer], [:issue]},
     "scan" => {{RsolvHost.Roles.Scan, :run}, [max_issues: :integer], []},
     "selftest" => {{__MODULE__, :selftest}, [online: :boolean], []},
+    "verify" => {{RsolvHost.Roles.Verify, :run}, [issue: :integer], [:issue]},
     "version" => {{__MODULE__, :version}, [], []},
     "work" => {{RsolvHost.Roles.Work, :run}, [issue: :integer, resume: :boolean], [:issue]}
   }
 
-  @roles %{"publish" => :publish, "scan" => :scan, "work" => :work}
+  @roles %{"publish" => :publish, "scan" => :scan, "verify" => :verify, "work" => :work}
 
   @doc "The command names, sorted. Burrito's wrapper owns `maintenance`, so it isn't one."
   @spec commands() :: [String.t()]

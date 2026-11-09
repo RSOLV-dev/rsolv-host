@@ -114,6 +114,99 @@ defmodule RsolvHost.SandboxDockerTest do
       assert run(sbx, ["sh", "-c", script]).output == "200 200 403 403 "
     end
 
+    test "can't fill its /tmp past 1 GiB, nor use more than 4 GiB of memory and 2 CPUs", %{
+      sbx: sbx
+    } do
+      %{output: output} =
+        run(sbx, ["sh", "-c", "head -c 2G /dev/zero > /tmp/fill; du -m /tmp/fill"], 120_000)
+
+      assert output =~ "No space left on device"
+      assert [_, megabytes] = Regex.run(~r/^(\d+)\s+\/tmp\/fill$/m, output)
+      assert String.to_integer(megabytes) <= 1024
+
+      {limits, 0} =
+        System.cmd("docker", [
+          "inspect",
+          "-f",
+          "{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.NanoCpus}}",
+          sbx.container
+        ])
+
+      assert limits == "4294967296 4294967296 2000000000\n"
+    end
+
+    test "is killed once its copy and home pass their disk budget, which ends the step as disk_limit",
+         %{sbx: sbx} do
+      {:ok, used} = Sandbox.disk_used(sbx)
+      started = System.monotonic_time(:millisecond)
+
+      result =
+        Sandbox.watched(sbx, used + 50 * 1024 * 1024, 500, fn ->
+          Sandbox.exec(
+            sbx,
+            [
+              "sh",
+              "-c",
+              "head -c 300M /dev/zero > /work/big; head -c 300M /dev/zero > /opt/home/big; sleep 60"
+            ],
+            timeout_ms: 90_000
+          )
+        end)
+
+      assert result == {:error, :disk_limit}
+      assert System.monotonic_time(:millisecond) - started < 30_000
+
+      {running, 0} =
+        System.cmd("docker", ["inspect", "-f", "{{.State.Running}}", sbx.ids.sandbox])
+
+      assert running == "false\n"
+    end
+
+    test "a step that writes past its budget and ends before the next poll is still disk_limit",
+         %{sbx: sbx} do
+      {:ok, used} = Sandbox.disk_used(sbx)
+
+      result =
+        Sandbox.watched(sbx, used + 50 * 1024 * 1024, 60_000, fn ->
+          Sandbox.exec(sbx, ["sh", "-c", "head -c 100M /dev/zero > /work/big"],
+            timeout_ms: 60_000
+          )
+        end)
+
+      assert result == {:error, :disk_limit}
+    end
+
+    test "a step that ends within its budget keeps its own result", %{sbx: sbx} do
+      {:ok, used} = Sandbox.disk_used(sbx)
+
+      assert {:ok, %{status: 0}} =
+               Sandbox.watched(sbx, used + 50 * 1024 * 1024, 60_000, fn ->
+                 Sandbox.exec(sbx, ["sh", "-c", "head -c 1M /dev/zero > /work/small"],
+                   timeout_ms: 60_000
+                 )
+               end)
+    end
+
+    test "is killed when it hides what it wrote in a directory the host can't read", %{sbx: sbx} do
+      {:ok, used} = Sandbox.disk_used(sbx)
+      on_exit(fn -> File.chmod(Path.join(sbx.copy_dir, "d"), 0o700) end)
+
+      result =
+        Sandbox.watched(sbx, used + 5 * 1024 ** 3, 300, fn ->
+          Sandbox.exec(
+            sbx,
+            [
+              "sh",
+              "-c",
+              "mkdir /work/d && head -c 100M /dev/zero > /work/d/big && chmod 000 /work/d && sleep 20"
+            ],
+            timeout_ms: 60_000
+          )
+        end)
+
+      assert result == {:error, :disk_limit}
+    end
+
     test "has no network at all once disconnected", %{sbx: sbx} do
       assert Sandbox.disconnect(sbx) == :ok
       assert run(sbx, ["curl", "-sS", "-m", "5", "https://api.github.com/zen"]).status != 0

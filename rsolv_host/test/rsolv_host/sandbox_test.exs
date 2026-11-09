@@ -69,7 +69,8 @@ defmodule RsolvHost.SandboxTest do
                    "--security-opt",
                    "no-new-privileges"
                  ] ++
-                 ["--pids-limit", "4096", "--tmpfs", "/tmp:exec"] ++
+                 ["--pids-limit", "4096", "--tmpfs", "/tmp:exec,size=1g"] ++
+                 ["--memory", "4g", "--memory-swap", "4g", "--cpus", "2"] ++
                  ["-e", "LANG=C.UTF-8", "-e", "CI=true", "-e", "HOME=/opt/home"] ++
                  [
                    "-e",
@@ -213,7 +214,7 @@ defmodule RsolvHost.SandboxTest do
       assert [["run", "-d", "--name", "rsolv-41-7-work", "--network", "none" | _]] = docker_args()
     end
 
-    test "when a step fails, names it and removes what it created", %{tmp_dir: dir} do
+    test "when a step fails, names it and removes, by ID, what it created", %{tmp_dir: dir} do
       FakeExec.script([
         {fn {"docker", ["network", "connect" | _], _} -> true end,
          {:ok, %{status: 1, output: "x"}}}
@@ -222,9 +223,19 @@ defmodule RsolvHost.SandboxTest do
       assert Sandbox.start(start_opts(dir)) == {:error, {:sandbox_setup, :proxy_connect}}
 
       assert Enum.take(docker_args(), -2) == [
-               ["rm", "-f", "rsolv-41-7-work", "rsolv-41-7-work-proxy"],
-               ["network", "rm", "rsolv-41-7-net"]
+               ["rm", "-f", FakeExec.docker_id("rsolv-41-7-work-proxy")],
+               ["network", "rm", FakeExec.docker_id("rsolv-41-7-net")]
              ]
+    end
+
+    test "refuses a container Docker gave no ID", %{tmp_dir: dir} do
+      FakeExec.script([
+        {fn {"docker", ["run", "-d", "--name", "rsolv-41-7-work" | _], _} -> true end,
+         {:ok, %{status: 0, output: "Status: Downloaded newer image\n"}}}
+      ])
+
+      assert Sandbox.start(start_opts(dir) ++ [egress: :none]) ==
+               {:error, {:sandbox_setup, :sandbox_run}}
     end
 
     test "when the proxy never answers, fails closed before any sandbox runs", %{tmp_dir: dir} do
@@ -263,6 +274,74 @@ defmodule RsolvHost.SandboxTest do
       assert uid == File.stat!(opts[:copy_dir]).uid
       assert Bitwise.band(mode, 0o777) == 0o700
       assert (home <> ":/opt/home") in List.last(docker_args())
+    end
+  end
+
+  describe "disk_used/1" do
+    setup %{tmp_dir: dir} do
+      %{
+        sbx: %Sandbox{
+          container: "s",
+          copy_dir: Path.join(dir, "c"),
+          dirs: [Path.join(dir, "h")],
+          exec: FakeExec
+        }
+      }
+    end
+
+    test "is du's total when du read everything", %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("10\t/c\n5\t/h\n15\ttotal\n")}])
+
+      assert Sandbox.disk_used(sbx) == {:ok, 15}
+    end
+
+    test "is no measure when du couldn't read everything, whatever total it printed", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         {:ok,
+          %{status: 1, output: "du: cannot read directory '/c/d': Permission denied\n15\ttotal\n"}}}
+      ])
+
+      assert Sandbox.disk_used(sbx) == :error
+    end
+  end
+
+  describe "watched/4" do
+    setup %{tmp_dir: dir} do
+      %{
+        sbx: %Sandbox{
+          container: "s",
+          copy_dir: Path.join(dir, "c"),
+          dirs: [Path.join(dir, "h")],
+          ids: %{sandbox: "i"},
+          exec: FakeExec
+        }
+      }
+    end
+
+    test "measures once more when the step ends, before any poll, and refuses a total over budget",
+         %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("101\ttotal\n")}])
+
+      assert Sandbox.watched(sbx, 100, 60_000, fn -> :done end) == {:error, :disk_limit}
+    end
+
+    test "waits for a measure in flight when the step ends", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         fn _call ->
+           Process.sleep(300)
+           ok("101\ttotal\n")
+         end}
+      ])
+
+      assert Sandbox.watched(sbx, 100, 10, fn -> Process.sleep(50) end) == {:error, :disk_limit}
+    end
+
+    test "keeps the step's result within budget", %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("100\ttotal\n")}])
+
+      assert Sandbox.watched(sbx, 100, 60_000, fn -> :done end) == :done
     end
   end
 
@@ -318,15 +397,21 @@ defmodule RsolvHost.SandboxTest do
              ]
     end
 
-    test "stop removes both containers, then the network", %{tmp_dir: dir} do
+    test "stop removes both containers, then the network, by the IDs Docker gave them",
+         %{tmp_dir: dir} do
       script_inspect()
       {:ok, sbx} = Sandbox.start(start_opts(dir))
 
       assert Sandbox.stop(sbx) == :ok
 
       assert Enum.take(docker_args(), -2) == [
-               ["rm", "-f", "rsolv-41-7-work", "rsolv-41-7-work-proxy"],
-               ["network", "rm", "rsolv-41-7-net"]
+               [
+                 "rm",
+                 "-f",
+                 FakeExec.docker_id("rsolv-41-7-work"),
+                 FakeExec.docker_id("rsolv-41-7-work-proxy")
+               ],
+               ["network", "rm", FakeExec.docker_id("rsolv-41-7-net")]
              ]
     end
 

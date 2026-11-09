@@ -132,6 +132,50 @@ defmodule RsolvHost.OutcomeTest do
     end
   end
 
+  describe "the verify role's reasons" do
+    test "each exits by its class" do
+      for {reason, code} <- [
+            {:verify_error, 4},
+            {:verify_timed_out, 2},
+            {:base_read_timeout, 2},
+            {:base_read_failed, 4},
+            {{:sandbox, :bootstrap}, 4},
+            {:checkout_not_base, 2},
+            {:base_facts_too_large, 2},
+            {:invalid_plan, 2},
+            {{:platform, 409, "issue_terminal"}, 2},
+            {{:platform, 409, "issue_not_open"}, 2},
+            {{:platform, 413, "base_facts_too_large"}, 2},
+            {:invalid_touched_paths, 3}
+          ] do
+        assert Outcome.exit_code({:error, reason}) == code, inspect(reason)
+      end
+    end
+
+    test "verify verdicts are outcomes" do
+      for outcome <- [:verified, :verify_failed, :rejected],
+          do: assert(Outcome.exit_code({:outcome, outcome, false}) == 0)
+    end
+
+    test "name what happened" do
+      for {reason, text} <- [
+            {:verify_error, "could not finish verifying"},
+            {:verify_timed_out, "ran past their time limit"},
+            {:base_read_timeout, "took too long to read"},
+            {:too_many_touched_paths, "than RSOLV verifies"},
+            {:touched_path_too_deep, "than RSOLV verifies"},
+            {:checkout_not_base, "isn't the commit RSOLV scanned"},
+            {:base_facts_too_large, "too large for RSOLV to verify"},
+            {:base_read_failed, "Reading the base commit with git failed"},
+            {:invalid_plan, "verify plan"},
+            {{:platform, 409, "issue_terminal"}, "already published or rejected"},
+            {{:platform, 413, nil}, "too large for RSOLV to verify"}
+          ] do
+        assert capture(&Outcome.annotate(reason, &1)) =~ text, inspect(reason)
+      end
+    end
+  end
+
   describe "exit_code/1" do
     test "a role that finished, or any model outcome, exits 0" do
       assert Outcome.exit_code(:ok) == 0
@@ -235,6 +279,38 @@ defmodule RsolvHost.OutcomeTest do
 
       assert File.read!(output) == "outcome=mitigated\nhas_patch=true\n"
       assert out == ""
+    end
+
+    test "when the fix failed verification, writes a notice", %{output: output, summary: summary} do
+      out =
+        capture(fn io ->
+          Outcome.report({:outcome, :verify_failed, false},
+            issue: 7,
+            io: io,
+            output: output,
+            summary: summary
+          )
+        end)
+
+      assert File.read!(output) == "outcome=verify_failed\nhas_patch=false\n"
+
+      assert out ==
+               "::notice title=RSOLV::The fix for issue #7 did not pass verification; nothing will be published.\n"
+    end
+
+    test "when policy rejected the fix, writes a notice", %{output: output, summary: summary} do
+      out =
+        capture(fn io ->
+          Outcome.report({:outcome, :rejected, false},
+            issue: 7,
+            io: io,
+            output: output,
+            summary: summary
+          )
+        end)
+
+      assert out ==
+               "::notice title=RSOLV::RSOLV rejected the fix for issue #7 (by policy, or no runnable test); nothing will be published.\n"
     end
 
     test "writes the summary header only once", %{output: output, summary: summary} do

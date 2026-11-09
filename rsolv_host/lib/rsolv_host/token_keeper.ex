@@ -51,7 +51,7 @@ defmodule RsolvHost.TokenKeeper do
   @call_timeout_ms 15_000
   @oidc_env ~w(ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN)
 
-  @type role :: :scan | :work | :publish
+  @type role :: :scan | :work | :verify | :publish
   @type served :: %{
           raw: String.t(),
           binding: map(),

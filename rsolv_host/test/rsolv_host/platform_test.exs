@@ -258,16 +258,21 @@ defmodule RsolvHost.PlatformTest do
                Platform.session_status(req(), @token, :validation, "s1")
     end
 
-    test "upload_result/5 posts the patch base64-encoded" do
+    test "upload_result/6 posts the patch and the red patch base64-encoded" do
       stub(fn conn ->
         assert {conn.method, conn.request_path} ==
                  {"POST", "/api/v1/runs/#{@run}/issues/7/results"}
 
-        assert body(conn) == %{"issue_number" => 7, "patch" => Base.encode64(<<0, 1, 2>>)}
+        assert body(conn) == %{
+                 "issue_number" => 7,
+                 "patch" => Base.encode64(<<0, 1, 2>>),
+                 "red_patch" => Base.encode64(<<3>>)
+               }
+
         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{patch_bytes: 3})
       end)
 
-      assert Platform.upload_result(req(), @token, @run, 7, <<0, 1, 2>>) == :ok
+      assert Platform.upload_result(req(), @token, @run, 7, <<0, 1, 2>>, <<3>>) == :ok
     end
 
     test "the scan calls reach their routes" do
@@ -305,6 +310,37 @@ defmodule RsolvHost.PlatformTest do
       assert Platform.decision(req(), @token, @run, 7) == {:ok, ~s({"decision":{}})}
       assert {:ok, %{"files" => %{"a" => "eA=="}}} = Platform.post_images(req(), @token, @run, 7)
       assert Platform.published(req(), @token, @run, 7, %{decision_id: "d1"}) == :ok
+    end
+
+    test "the verify calls reach their routes" do
+      test = self()
+
+      stub(fn conn ->
+        body = if conn.method == "POST", do: body(conn)
+        send(test, {:called, conn.method, conn.request_path, body})
+        Req.Test.json(conn, %{ok: true})
+      end)
+
+      prefix = "/api/v1/runs/#{@run}/issues/7/"
+      assert {:ok, %{"ok" => true}} = Platform.touched_paths(req(), @token, @run, 7)
+      assert_received {:called, "GET", path, nil}
+      assert path == prefix <> "touched-paths"
+
+      assert {:ok, %{"ok" => true}} =
+               Platform.base_facts(req(), @token, @run, 7, %{"base_sha" => "b"})
+
+      assert_received {:called, "POST", path, %{"base_sha" => "b"}}
+      assert path == prefix <> "base-facts"
+
+      assert {:ok, %{"ok" => true}} = Platform.verify_plan(req(), @token, @run, 7)
+      assert_received {:called, "GET", path, nil}
+      assert path == prefix <> "verify-plan"
+
+      assert {:ok, %{"ok" => true}} =
+               Platform.verification(req(), @token, @run, 7, %{"error" => "timeout"})
+
+      assert_received {:called, "POST", path, %{"error" => "timeout"}}
+      assert path == prefix <> "verification"
     end
 
     test "a response body over the cap is refused" do
@@ -348,6 +384,15 @@ defmodule RsolvHost.PlatformTest do
       end
     end
 
+    test "waits a server's Retry-After, but never more than 60 seconds" do
+      req = %Req.Request{method: :get, url: URI.parse("https://api.rsolv.ai./api/v1/x")}
+
+      for {retry_after, wait} <- [{"5", 5_000}, {"86400", 60_000}] do
+        response = Req.Response.new(status: 503, headers: [{"retry-after", retry_after}])
+        assert Platform.retry(req, response) == {:delay, wait}
+      end
+    end
+
     test "a request that may have been carried out is never repeated" do
       answer([:closed, 200])
 
@@ -369,14 +414,18 @@ defmodule RsolvHost.PlatformTest do
       end
     end
 
-    test "a read, a tool response or a result upload is repeated after a transient failure" do
+    test "a read, a tool response, a result upload, base facts or a verification is repeated after a transient failure" do
       for {path, call} <- [
             {"/api/v1/validation/status/s1",
              fn -> Platform.session_status(req(), @token, :validation, "s1") end},
             {"/api/v1/validation/tool_response/s1",
              fn -> Platform.tool_response(req(), @token, :validation, "s1", %{}) end},
             {"/api/v1/runs/#{@run}/issues/7/results",
-             fn -> Platform.upload_result(req(), @token, @run, 7, "x") end}
+             fn -> Platform.upload_result(req(), @token, @run, 7, "x", "r") end},
+            {"/api/v1/runs/#{@run}/issues/7/base-facts",
+             fn -> Platform.base_facts(req(), @token, @run, 7, %{}) end},
+            {"/api/v1/runs/#{@run}/issues/7/verification",
+             fn -> Platform.verification(req(), @token, @run, 7, %{}) end}
           ] do
         answer([503, 200])
 
