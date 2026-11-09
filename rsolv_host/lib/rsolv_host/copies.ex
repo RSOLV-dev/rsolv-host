@@ -6,9 +6,10 @@ defmodule RsolvHost.Copies do
   existing ancestor must be a real directory (`File.lstat/1`, never
   followed), and the file itself a regular file or absent, so nothing is
   written or deleted through a symlink, over a directory or beneath a file.
-  An add or modify writes a new file beside the target (`O_EXCL`), renames
-  it into place and checks it again with `File.lstat/1`, so a hardlink to a
-  file outside the copy is replaced, never written through.
+  An add creates its file `O_EXCL`; a modify writes a new file in the copy's
+  root and renames it into place, so a hardlink to a file outside the
+  copy is replaced, never written through. Either is then checked again
+  with `File.lstat/1`.
   """
 
   alias RsolvCore.{BaseFacts, ChangeSet}
@@ -21,7 +22,7 @@ defmodule RsolvHost.Copies do
     Enum.reduce_while(entries, :ok, fn %Entry{path: path} = entry, :ok ->
       with true <- ChangeSet.valid_path?(path),
            :ok <- parents(dir, entry),
-           :ok <- write(Path.join(dir, path), entry, images) do
+           :ok <- write(dir, Path.join(dir, path), entry, images) do
         {:cont, :ok}
       else
         _unsafe -> {:halt, {:error, {:unsafe_path, path}}}
@@ -29,32 +30,46 @@ defmodule RsolvHost.Copies do
     end)
   end
 
-  defp write(target, %Entry{op: :delete}, _images) do
+  defp write(_dir, target, %Entry{op: :delete}, _images) do
     with {:ok, %File.Stat{type: :regular}} <- File.lstat(target), do: File.rm(target)
   end
 
-  defp write(target, %Entry{path: path, mode: mode}, images) do
-    temp = Path.join(Path.dirname(target), ".rsolv-#{System.unique_integer([:positive])}.tmp")
+  defp write(dir, target, %Entry{path: path, mode: mode}, images) do
+    bytes = Map.fetch!(images, path)
 
-    with :ok <- writable(File.lstat(target)),
-         :ok <- File.write(temp, Map.fetch!(images, path), [:exclusive]),
-         :ok <- File.chmod(temp, file_mode(mode)),
-         :ok <- File.rename(temp, target),
-         {:ok, %File.Stat{type: :regular, links: 1}} <- File.lstat(target) do
-      :ok
-    else
-      _unsafe ->
-        File.rm(temp)
-        :error
+    with :ok <- replace(File.lstat(target), dir, target, bytes, file_mode(mode)),
+         {:ok, %File.Stat{type: :regular, links: 1}} <- File.lstat(target),
+         do: :ok
+  end
+
+  # O_EXCL: nothing already at the path is followed or reused.
+  defp replace({:error, :enoent}, _dir, target, bytes, mode), do: create(target, bytes, mode)
+
+  # A new file renamed over the old one, so a hardlink is never written
+  # through. It's made in the copy's root, which is the host's own and on
+  # the same filesystem, so making or removing it can't be redirected.
+  # ponytail: a parent swapped for a symlink between the checks and the
+  # rename still redirects the rename; only dirfd-relative calls (openat,
+  # renameat, a NIF) close that, and no hostile process runs on the host
+  # before the first sandbox.
+  defp replace({:ok, %File.Stat{type: :regular}}, dir, target, bytes, mode) do
+    temp = Path.join(dir, ".rsolv-#{System.unique_integer([:positive])}.tmp")
+
+    with {:error, _reason} = error <-
+           with(:ok <- create(temp, bytes, mode), do: File.rename(temp, target)) do
+      File.rm(temp)
+      error
     end
+  end
+
+  defp replace(_other, _dir, _target, _bytes, _mode), do: :error
+
+  defp create(path, bytes, mode) do
+    with :ok <- File.write(path, bytes, [:exclusive]), do: File.chmod(path, mode)
   end
 
   defp file_mode("100755"), do: 0o755
   defp file_mode("100644"), do: 0o644
-
-  defp writable({:error, :enoent}), do: :ok
-  defp writable({:ok, %File.Stat{type: :regular}}), do: :ok
-  defp writable(_other), do: :error
 
   # A delete's directories must exist; an add's are made as needed.
   defp parents(dir, %Entry{path: path, op: op}) do
