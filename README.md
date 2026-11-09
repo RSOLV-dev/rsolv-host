@@ -73,7 +73,7 @@ What falls in each class:
   that no longer contains the scanned commit, a fix branch or pull request that already holds
   something else, a fix touching `.github/`, a verify checkout that isn't the scanned commit,
   base files too large to verify, a verify plan this host refuses, an issue already published
-  or rejected.
+  or rejected, the project's tests running past their time limit in the verify job.
 - **3, transient:** network failures, 429 and 5xx, a run token that expired or a token keeper
   that stopped answering, the platform or GitHub breaking the protocol (a malformed answer or
   event stream, or a touched path that isn't a safe repository path), a session past its time
@@ -82,8 +82,8 @@ What falls in each class:
   writable, the sandbox breaking its CLI contract: a malformed or oversized frame, more frames or
   issues than allowed, an issue it didn't file, a malformed patch. The scanner's stdout and stderr
   share the frame channel, so `rsolv-sandbox scan` must write nothing to stderr. In the verify
-  job: git failing to read the base commit, and a verify error (a step out of time, or a sandbox
-  failure), which a new attempt may retry.
+  job: git failing to read the base commit, and a verify error (a sandbox failure, or the
+  project's install failing without the fix), which a new attempt may retry.
 
 The `work` role writes the step outputs `outcome` and `has_patch` (`true` or `false`), and a
 job-summary row. `outcome` is one of:

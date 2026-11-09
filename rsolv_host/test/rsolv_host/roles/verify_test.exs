@@ -429,25 +429,94 @@ defmodule RsolvHost.Roles.VerifyTest do
   end
 
   describe "run/3 verify errors" do
-    test "a RED test past its time limit is reported as a timeout, and GREEN never runs",
+    test "a RED test past its time limit is a timed-out side, GREEN still runs, and the platform's verify error isn't retried",
          context do
       platform(context, %{
-        "verification" => {200, %{verification: "verify_error", reasons: ["timeout"]}}
+        "verification" => {200, %{verification: "verify_error", reasons: ["timeout_red"]}}
       })
 
-      sandbox([{&(runs?(&1, "npx") and "jest" in elem(&1, 1)), {:error, :timeout}}])
+      sandbox([
+        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")), {:error, :timeout}}
+      ])
 
       result = run(context)
 
-      assert_received {:request, "verification", %{"error" => "timeout"} = body}
-      assert map_size(body) == 4
-      assert result == {:error, :verify_error}
-      assert Outcome.exit_code(result) == 4
+      assert_received {:request, "verification", %{"red" => red, "green" => green}}
+      assert red == %{"exit_code" => 124, "timed_out" => true, "report" => ""}
+      assert %{"exit_code" => 0, "timed_out" => false} = green
+      assert result == {:error, :verify_timed_out}
+      assert Outcome.exit_code(result) == 2
+    end
 
-      refute Enum.any?(
-               docker_calls(),
-               &match?({"docker", ["run", "-d", "--name", "rsolv-41-7-verify-green" | _], _}, &1)
-             )
+    test "a RED test stopped by its time limit keeps the status timeout gave it", context do
+      platform(context, %{
+        "verify-plan" => {200, Map.put(plan(), "test_timeout_s", 1)},
+        "verification" => {200, %{verification: "verify_error", reasons: ["timeout_red"]}}
+      })
+
+      sandbox([
+        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")),
+         fn _call ->
+           Process.sleep(1_100)
+           {:ok, %{status: 137, output: ""}}
+         end}
+      ])
+
+      run(context)
+
+      assert_received {:request, "verification",
+                       %{"red" => %{"exit_code" => 137, "timed_out" => true, "report" => ""}}}
+    end
+
+    test "a test whose output passes its cap is a side with an empty report, which the platform fails",
+         context do
+      platform(context, %{
+        "verification" => {200, %{verification: "failed", reasons: ["unparseable_report_red"]}}
+      })
+
+      sandbox([
+        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")),
+         {:error, :output_too_large}}
+      ])
+
+      assert run(context) == {:outcome, :verify_failed, false}
+
+      assert_received {:request, "verification",
+                       %{"red" => %{"exit_code" => 137, "timed_out" => false, "report" => ""}}}
+    end
+
+    for {label, answer} <- [
+          {"past its time limit", {:error, :timeout}},
+          {"over its output cap", {:error, :output_too_large}}
+        ] do
+      test "an install #{label} is the side's install failure, never a timeout", context do
+        platform(context, %{
+          "verification" => {200, %{verification: "failed", reasons: ["install_failed_green"]}}
+        })
+
+        sandbox([
+          {&(runs?(&1, "npx") and "--yes" in elem(&1, 1) and side?(&1, "green")),
+           unquote(Macro.escape(answer))}
+        ])
+
+        assert run(context) == {:outcome, :verify_failed, false}
+        assert_received {:request, "verification", %{"error" => "install_failed_green"}}
+      end
+    end
+
+    test "a docker exec that fails is a sandbox error (exit 4)", context do
+      platform(context, %{
+        "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+      })
+
+      sandbox([
+        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")), {:error, :enoent}}
+      ])
+
+      result = run(context)
+
+      assert_received {:request, "verification", %{"error" => "sandbox"}}
+      assert Outcome.exit_code(result) == 4
     end
 
     test "a test that exits 124 inside its time limit is an ordinary failure", context do

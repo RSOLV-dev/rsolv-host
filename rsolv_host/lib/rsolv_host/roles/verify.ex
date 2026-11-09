@@ -21,9 +21,14 @@ defmodule RsolvHost.Roles.Verify do
   path in a tree a sandbox has mounted.
 
   The verdicts are outcomes (exit 0): `verified`, `verify_failed` and
-  `rejected` (by policy, or for want of a plan). A step past its time limit,
-  or a sandbox that fails, is reported as a verify error, which a new
-  attempt may retry; the role then exits 4.
+  `rejected` (by policy, or for want of a plan). What the code under test
+  decides is never a verify error: a test past its time limit or its output
+  cap is that side's result (`timed_out`, or an empty report), and an install
+  or prepare step that fails, times out or floods its output is the side's
+  install failure. A test that timed out is the platform's verify error,
+  which the role ends as `verify_timed_out` (exit 2): running it again would
+  time out again. Only the sandbox failing (Docker, the image, bootstrap) is
+  reported as a verify error, which a new attempt may retry (exit 4).
   """
 
   alias RsolvCore.{BaseFacts, VerifyPlan}
@@ -55,6 +60,8 @@ defmodule RsolvHost.Roles.Verify do
   @log_tail_bytes 64 * 1024
   # `timeout`'s status when it stopped a step: TERM, then KILL.
   @timeout_statuses [124, 137]
+  # A test the host killed for its output: KILL's status.
+  @killed_status 137
   @bound ~w(change_set_digest red_digest policy_version)
   @rejections ["issue_rejected", "not_eligible"]
 
@@ -181,7 +188,7 @@ defmodule RsolvHost.Roles.Verify do
   defp prove(ctx, plan, dirs) do
     with {:ok, red} <- side(ctx, plan, dirs.red, "red"),
          {:ok, green} <- side(ctx, plan, dirs.green, "green") do
-      report(ctx, plan, %{"red" => red, "green" => green}, :verify_error)
+      report(ctx, plan, %{"red" => red, "green" => green}, :verify_timed_out)
     else
       {:verify_error, kind, reason} -> report(ctx, plan, %{"error" => kind}, reason)
     end
@@ -211,10 +218,7 @@ defmodule RsolvHost.Roles.Verify do
          :ok <- run_steps(ctx, sbx, plan.install, plan.install_timeout_s * 1_000, side),
          :ok <- offline(sbx),
          :ok <- run_steps(ctx, sbx, plan.prepare, @prepare_timeout_ms, side),
-         {:ok, status, output} <- test(ctx, sbx, plan) do
-      report = sbx |> report_bytes(plan, output) |> Base.encode64()
-      {:ok, %{"exit_code" => status, "timed_out" => false, "report" => report}}
-    end
+         do: test(ctx, sbx, plan)
   end
 
   # Bootstrap sets up the sandbox's own toolchains, so its failure is the
@@ -245,11 +249,11 @@ defmodule RsolvHost.Roles.Verify do
           log(ctx, output)
           step_done(status, side)
 
+        {:timed_out, _status} ->
+          step_done(:timed_out, side)
+
         {:error, :output_too_large} ->
           step_done(:output_too_large, side)
-
-        {:error, :timeout} ->
-          {:halt, {:verify_error, "timeout", :verify_error}}
 
         {:error, reason} ->
           {:halt, {:verify_error, "sandbox", {:sandbox, reason}}}
@@ -273,26 +277,32 @@ defmodule RsolvHost.Roles.Verify do
     case timed(sbx, plan.test, now() + plan.test_timeout_s * 1_000, @test_max_bytes) do
       {:ok, status, output} ->
         log(ctx, output)
-        {:ok, status, output}
+        {:ok, side_result(status, false, report_bytes(sbx, plan, output))}
 
-      {:error, :timeout} ->
-        {:verify_error, "timeout", :verify_error}
+      {:timed_out, status} ->
+        {:ok, side_result(status, true, "")}
+
+      {:error, :output_too_large} ->
+        {:ok, side_result(@killed_status, false, "")}
 
       {:error, reason} ->
         {:verify_error, "sandbox", {:sandbox, reason}}
     end
   end
 
+  defp side_result(status, timed_out, report),
+    do: %{"exit_code" => status, "timed_out" => timed_out, "report" => Base.encode64(report)}
+
   # Runs `argv` with what's left before `deadline`, in whole seconds (the
   # sandbox's `timeout` takes seconds). A step stopped by `timeout` once its
-  # time was up is `{:error, :timeout}`; the same status any earlier is the
-  # step's own.
+  # time was up, or by the host past its grace, is `{:timed_out, status}`;
+  # the same status any earlier is the step's own.
   defp timed(sbx, argv, deadline, max_bytes) do
     start = now()
     limit_ms = div(deadline - start, 1_000) * 1_000
 
     if limit_ms < 1_000 do
-      {:error, :timeout}
+      {:timed_out, 124}
     else
       result = Sandbox.exec(sbx, argv, timeout_ms: limit_ms, max_bytes: max_bytes)
       timed_out(result, now() - start >= limit_ms)
@@ -300,9 +310,10 @@ defmodule RsolvHost.Roles.Verify do
   end
 
   defp timed_out({:ok, %{status: status}}, true) when status in @timeout_statuses,
-    do: {:error, :timeout}
+    do: {:timed_out, status}
 
   defp timed_out({:ok, %{status: status, output: output}}, _late), do: {:ok, status, output}
+  defp timed_out({:error, :timeout}, _late), do: {:timed_out, 124}
   defp timed_out(error, _late), do: error
 
   defp report_bytes(_sbx, %{report: %{argv: nil}}, output)

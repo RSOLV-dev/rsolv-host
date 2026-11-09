@@ -81,6 +81,7 @@ defmodule RsolvHost.Outcome do
   def classify(:checkout_not_base), do: :configuration
   def classify(:base_facts_too_large), do: :configuration
   def classify(:invalid_plan), do: :configuration
+  def classify(:verify_timed_out), do: :configuration
   def classify({:platform, 409, code}) when code in @ended, do: :configuration
   def classify({:platform, 413, _code}), do: :configuration
   def classify(:verify_error), do: :sandbox
@@ -224,6 +225,10 @@ defmodule RsolvHost.Outcome do
     do:
       "This rsolv-host refused the RSOLV platform's verify plan and ran nothing. Update to the current RSOLV workflow release; if this repeats, contact RSOLV support."
 
+  defp message(:verify_timed_out, _class),
+    do:
+      "The project's tests ran past their time limit, so RSOLV couldn't verify this fix; running them again would too. Nothing will be published."
+
   defp message({:platform, 409, code}, _class) when code in @ended,
     do: "This issue is already published or rejected; there is nothing left to do for it."
 
@@ -246,7 +251,7 @@ defmodule RsolvHost.Outcome do
 
   defp message(:verify_error, _class),
     do:
-      "RSOLV could not finish verifying this fix (a step ran out of time, or the sandbox failed). Re-run the issue's workflow."
+      "RSOLV could not finish verifying this fix (the sandbox failed, or the project's install failed without the fix). Re-run the issue's workflow."
 
   defp message(:base_read_failed, _class),
     do:

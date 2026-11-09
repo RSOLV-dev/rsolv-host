@@ -136,6 +136,7 @@ defmodule RsolvHost.OutcomeTest do
     test "each exits by its class" do
       for {reason, code} <- [
             {:verify_error, 4},
+            {:verify_timed_out, 2},
             {:base_read_failed, 4},
             {{:sandbox, :bootstrap}, 4},
             {:checkout_not_base, 2},
@@ -158,6 +159,7 @@ defmodule RsolvHost.OutcomeTest do
     test "name what happened" do
       for {reason, text} <- [
             {:verify_error, "could not finish verifying"},
+            {:verify_timed_out, "ran past their time limit"},
             {:checkout_not_base, "isn't the commit RSOLV scanned"},
             {:base_facts_too_large, "too large for RSOLV to verify"},
             {:base_read_failed, "Reading the base commit with git failed"},
