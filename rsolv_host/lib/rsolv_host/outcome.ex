@@ -88,6 +88,7 @@ defmodule RsolvHost.Outcome do
   def classify({:platform, 413, _code}), do: :configuration
   def classify(:verify_error), do: :sandbox
   def classify(:base_read_failed), do: :sandbox
+  def classify(:base_read_timeout), do: :transient
   def classify(:invalid_touched_paths), do: :transient
 
   def classify({:platform, 409, "already_exchanged"}), do: :transient

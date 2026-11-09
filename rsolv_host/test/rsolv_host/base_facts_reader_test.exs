@@ -250,6 +250,87 @@ defmodule RsolvHost.BaseFactsReaderTest do
     end
   end
 
+  describe "read/4's aggregate budgets" do
+    setup %{tmp_dir: dir} do
+      File.mkdir_p!(Path.join(dir, ".git"))
+      %{base: String.duplicate("b", 40)}
+    end
+
+    # ls-tree answers `listing.(tree_sha)`, honouring max_bytes as RsolvHost.Exec does.
+    defp listings(base, listing) do
+      FakeExec.script([
+        {fn {"env", args, _} -> "rev-parse" in args end,
+         {:ok, %{status: 0, output: base <> "\n"}}},
+        {fn {"env", args, _} -> "ls-tree" in args end,
+         fn {"env", args, opts} ->
+           output = listing.(List.last(args))
+
+           if byte_size(output) > opts[:max_bytes],
+             do: {:error, :output_too_large},
+             else: {:ok, %{status: 0, output: output}}
+         end}
+      ])
+    end
+
+    defp tree(name, padding),
+      do: "040000 tree #{String.duplicate("a", 40)} #{String.duplicate(" ", padding)}-\t#{name}\0"
+
+    test "all listings together share one 64 MiB budget", %{tmp_dir: dir, base: base} do
+      listings(base, fn _sha -> tree("d", 15 * 1024 * 1024) end)
+
+      result = BaseFactsReader.read(dir, base, ["d/d/d/d/f.js"])
+
+      assert result == {:error, :base_facts_too_large}
+      assert RsolvHost.Outcome.exit_code(result) == 2
+
+      mib = 1024 * 1024
+      listing = byte_size(tree("d", 15 * mib))
+
+      assert for({"env", args, opts} <- FakeExec.calls(), "ls-tree" in args, do: opts[:max_bytes]) ==
+               [16 * mib, 16 * mib, 16 * mib, 16 * mib, 64 * mib - 4 * listing]
+    end
+
+    test "all listings together hold at most 500,000 entries", %{tmp_dir: dir, base: base} do
+      blob = "100644 blob #{String.duplicate("c", 40)} 1\t"
+      many = for i <- 1..200_000, into: "", do: blob <> "f#{i}\0"
+      listings(base, fn _sha -> tree("d", 0) <> many end)
+
+      assert BaseFactsReader.read(dir, base, ["d/d/d/f.js"]) == {:error, :base_facts_too_large}
+    end
+
+    test "a read past its whole deadline is base facts too large", %{tmp_dir: dir, base: base} do
+      FakeExec.script([
+        {fn {"env", args, _} -> "rev-parse" in args end,
+         {:ok, %{status: 0, output: base <> "\n"}}},
+        {fn {"env", args, _} -> "ls-tree" in args end,
+         fn {"env", _args, opts} ->
+           Process.sleep(min(opts[:timeout_ms], 200))
+
+           if opts[:timeout_ms] < 200,
+             do: {:error, :timeout},
+             else: {:ok, %{status: 0, output: tree("d", 0)}}
+         end}
+      ])
+
+      result = BaseFactsReader.read(dir, base, ["d/d/d/d/d/f.js"], budget_ms: 500)
+
+      assert result == {:error, :base_facts_too_large}
+    end
+
+    test "one git call past its own time limit is transient (exit 3)", %{tmp_dir: dir, base: base} do
+      FakeExec.script([
+        {fn {"env", args, _} -> "rev-parse" in args end,
+         {:ok, %{status: 0, output: base <> "\n"}}},
+        {fn {"env", args, _} -> "ls-tree" in args end, {:error, :timeout}}
+      ])
+
+      result = BaseFactsReader.read(dir, base, ["f.js"])
+
+      assert result == {:error, :base_read_timeout}
+      assert RsolvHost.Outcome.exit_code(result) == 3
+    end
+  end
+
   describe "read/4's git" do
     setup %{tmp_dir: dir} do
       File.mkdir_p!(Path.join(dir, ".git"))

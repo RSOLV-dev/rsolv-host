@@ -19,6 +19,13 @@ defmodule RsolvHost.BaseFactsReader do
   `ls-tree` and `cat-file blob`: no diff, filter or textconv. stderr is merged
   into the output (`RsolvHost.Exec`), so a stray warning breaks the strict
   parse and the read fails closed.
+
+  The whole read is bounded: each listing by its own cap, all listings
+  together by a byte and an entry budget, and every git call by what's left
+  of one deadline. Past any of them the base is too large to verify
+  (`base_facts_too_large`); only one git call past its own time limit, with
+  the deadline still ahead, is `base_read_timeout` (transient). From each
+  listing the walk keeps only the entries it looks up and `.gitattributes`.
   """
 
   alias RsolvCore.{BaseFacts, ChangeSet}
@@ -37,7 +44,14 @@ defmodule RsolvHost.BaseFactsReader do
   # ponytail: one directory's listing (about 80 bytes an entry, so 200,000
   # entries); a bigger directory fails closed. Raise with evidence.
   @max_listing_bytes 16 * 1024 * 1024
+  # ponytail: all listings together. 40 touched paths (the platform's cap)
+  # 128 deep through 101 directories of 4,800 entries (485,000 entries, 33 MB
+  # of listings) peak at 7 MiB of BEAM memory over the baseline (measured,
+  # rsolv-host PR #9); raise both with evidence.
+  @max_listings_bytes 64 * 1024 * 1024
+  @max_entries 500_000
   @timeout_ms 120_000
+  @budget_ms 300_000
 
   @type error ::
           :invalid_touched_paths
@@ -45,18 +59,21 @@ defmodule RsolvHost.BaseFactsReader do
           | :touched_path_too_deep
           | :checkout_not_base
           | :base_read_failed
+          | :base_read_timeout
           | :base_facts_too_large
 
   @doc """
   Base facts for `paths` at `base_sha`, from the checkout at `dir` (absolute),
-  whose `HEAD` must be `base_sha`. Option: `:exec`.
+  whose `HEAD` must be `base_sha`. Options: `:exec`, and `:budget_ms`, the
+  whole read's deadline (5 minutes by default).
   """
   @spec read(Path.t(), String.t(), term(), keyword()) :: {:ok, BaseFacts.t()} | {:error, error()}
   def read(dir, base_sha, paths, opts \\ []) do
     with {:ok, required} <- required(paths),
          {:ok, git_dir} <- git_dir(dir),
          {:ok, git} <- git(),
-         run = runner(Keyword.get_lazy(opts, :exec, &RsolvHost.exec/0), git, git_dir),
+         deadline = now() + Keyword.get(opts, :budget_ms, @budget_ms),
+         run = runner(Keyword.get_lazy(opts, :exec, &RsolvHost.exec/0), git, git_dir, deadline),
          {:ok, ^base_sha} <- head(run),
          {:ok, walked} <- walk(run, base_sha, required),
          reads = reads(walked),
@@ -100,17 +117,25 @@ defmodule RsolvHost.BaseFactsReader do
     end
   end
 
-  defp runner(exec, git, git_dir) do
+  defp runner(exec, git, git_dir, deadline) do
     fn args, max_bytes ->
       argv = ["-i" | @git_env] ++ [git, "--git-dir=" <> git_dir | @overrides] ++ args
+      timeout_ms = min(@timeout_ms, deadline - now())
 
-      case exec.run("env", argv, timeout_ms: @timeout_ms, max_bytes: max_bytes) do
-        {:ok, %{status: 0, output: output}} -> {:ok, output}
-        {:error, :output_too_large} -> {:error, :base_facts_too_large}
-        _failed -> {:error, :base_read_failed}
-      end
+      if timeout_ms > 0,
+        do:
+          "env"
+          |> exec.run(argv, timeout_ms: timeout_ms, max_bytes: max_bytes)
+          |> git_result(timeout_ms),
+        else: {:error, :base_facts_too_large}
     end
   end
+
+  defp git_result({:ok, %{status: 0, output: output}}, _timeout_ms), do: {:ok, output}
+  defp git_result({:error, :output_too_large}, _timeout_ms), do: {:error, :base_facts_too_large}
+  defp git_result({:error, :timeout}, @timeout_ms), do: {:error, :base_read_timeout}
+  defp git_result({:error, :timeout}, _deadline_left), do: {:error, :base_facts_too_large}
+  defp git_result(_failed, _timeout_ms), do: {:error, :base_read_failed}
 
   defp head(run) do
     with {:ok, output} <- run.(~w(rev-parse --verify --end-of-options HEAD^{commit}), 4096),
@@ -119,7 +144,14 @@ defmodule RsolvHost.BaseFactsReader do
 
   # `required` is sorted, so every directory comes before what it holds.
   defp walk(run, base_sha, required) do
-    state = %{facts: %{}, trees: %{"" => base_sha}, listings: %{}}
+    state = %{
+      facts: %{},
+      trees: %{"" => base_sha},
+      listings: %{},
+      wanted: wanted(required),
+      bytes_left: @max_listings_bytes,
+      entries_left: @max_entries
+    }
 
     Enum.reduce_while(required, {:ok, state}, fn path, {:ok, state} ->
       case walk_path(run, state, path) do
@@ -129,8 +161,17 @@ defmodule RsolvHost.BaseFactsReader do
     end)
   end
 
+  # Each directory's names the walk looks up, and its .gitattributes.
+  defp wanted(required) do
+    required
+    |> Enum.group_by(&parent/1, &Path.basename/1)
+    |> Map.new(fn {dir, names} -> {dir, MapSet.new([".gitattributes" | names])} end)
+  end
+
+  defp parent(path), do: path |> BaseFacts.ancestors() |> List.last("")
+
   defp walk_path(run, state, path) do
-    parent = path |> BaseFacts.ancestors() |> List.last("")
+    parent = parent(path)
 
     with {:ok, entries, state} <- listing(run, state, parent),
          {:ok, fact} <- entry_fact(entries && entries[Path.basename(path)]) do
@@ -145,22 +186,40 @@ defmodule RsolvHost.BaseFactsReader do
     do: {:ok, state.listings[dir], state}
 
   defp listing(run, state, dir) do
-    with {:ok, output} <-
-           run.(["ls-tree", "-z", "-l", "--end-of-options", state.trees[dir]], @max_listing_bytes),
-         {:ok, entries} <- parse_listing(output) do
-      {:ok, entries, put_in(state.listings[dir], entries)}
+    args = ["ls-tree", "-z", "-l", "--end-of-options", state.trees[dir]]
+
+    with {:ok, output} <- run.(args, min(@max_listing_bytes, state.bytes_left)),
+         {:ok, entries, count} <- parse_listing(output, state.wanted[dir], state.entries_left) do
+      {:ok, entries,
+       %{
+         state
+         | listings: Map.put(state.listings, dir, entries),
+           bytes_left: state.bytes_left - byte_size(output),
+           entries_left: state.entries_left - count
+       }}
     end
   end
 
-  defp parse_listing(output) do
+  # Kept entries are copied out, so the listing's binary can be freed.
+  defp parse_listing(output, wanted, entries_left) do
     output
     |> String.split(<<0>>, trim: true)
-    |> Enum.reduce_while({:ok, %{}}, fn record, {:ok, acc} ->
-      case parse_record(record) do
-        {:ok, name, entry} -> {:cont, {:ok, Map.put(acc, name, entry)}}
-        :error -> {:halt, {:error, :base_read_failed}}
-      end
+    |> Enum.reduce_while({:ok, %{}, 0}, fn
+      _record, {:ok, _acc, ^entries_left} ->
+        {:halt, {:error, :base_facts_too_large}}
+
+      record, {:ok, acc, count} ->
+        case parse_record(record) do
+          {:ok, name, entry} -> {:cont, {:ok, keep(acc, wanted, name, entry), count + 1}}
+          :error -> {:halt, {:error, :base_read_failed}}
+        end
     end)
+  end
+
+  defp keep(acc, wanted, name, {mode, type, sha, size}) do
+    if MapSet.member?(wanted, name),
+      do: Map.put(acc, :binary.copy(name), {:binary.copy(mode), type, :binary.copy(sha), size}),
+      else: acc
   end
 
   # "<mode> <type> <sha> <size, padded, or ->\t<name>"
@@ -233,7 +292,11 @@ defmodule RsolvHost.BaseFactsReader do
            ^sha <- ChangeSet.blob_sha(content) do
         {:cont, {:ok, Map.put(acc, key, content)}}
       else
-        _failed -> {:halt, {:error, :base_read_failed}}
+        {:error, reason} when reason in [:base_read_timeout, :base_facts_too_large] ->
+          {:halt, {:error, reason}}
+
+        _failed ->
+          {:halt, {:error, :base_read_failed}}
       end
     end)
   end
@@ -251,4 +314,6 @@ defmodule RsolvHost.BaseFactsReader do
     attributes = for {{:attributes, dir}, text} <- contents, into: %{}, do: {dir, text}
     %BaseFacts{base_sha: base_sha, paths: paths, attributes: attributes}
   end
+
+  defp now, do: System.monotonic_time(:millisecond)
 end
