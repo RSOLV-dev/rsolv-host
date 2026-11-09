@@ -5,7 +5,8 @@ defmodule RsolvHost.Roles.Work do
 
   It copies the checkout, starts the sandbox behind the egress proxy, bootstraps
   it, runs VALIDATE and then MITIGATE through the tool relay, has the sandbox
-  produce the patch, and uploads it. Every model outcome is `{:outcome, …}`
+  produce the patch, and uploads it with the red patch it took when VALIDATE
+  ended. Every model outcome is `{:outcome, …}`
   (exit 0); a failure after VALIDATE confirmed the vulnerability is
   `{:error, reason, :validated}`. The host never runs git or opens a path in the
   mounted copy once the sandbox starts.
@@ -28,6 +29,7 @@ defmodule RsolvHost.Roles.Work do
   }
 
   @max_patch_bytes 5 * 1024 * 1024
+  @max_red_patch_bytes 512 * 1024
   @bootstrap_timeout_ms 900_000
   @bootstrap_max_bytes 1024 * 1024
   @patch_timeout_ms 300_000
@@ -154,15 +156,33 @@ defmodule RsolvHost.Roles.Work do
   defp validation_outcome(%{"classification" => "false_positive" <> _}), do: :false_positive
   defp validation_outcome(_result), do: :not_validated
 
+  # RFC-150 §4.1, ADR-075: the RED snapshot is taken when VALIDATE ends,
+  # before MITIGATE can touch the test, and uploaded with the final patch.
   defp validated(ctx, :validated) do
-    case session(ctx, :mitigation) do
-      {:ok, %{"success" => true}} -> patch(ctx)
-      {:ok, _failed} -> {:outcome, :mitigation_failed, false}
-      {:error, reason} -> {:error, reason, :validated}
+    case ctx |> patch() |> red_patch() do
+      {:ok, red} ->
+        mitigate(Map.put(ctx, :red, red))
+
+      :too_large ->
+        too_large(ctx, "The failing test was larger than 512 KiB and was not uploaded.")
+
+      {:error, reason} ->
+        {:error, reason, :validated}
     end
   end
 
   defp validated(_ctx, outcome), do: {:outcome, outcome, false}
+
+  defp red_patch({:ok, bytes}) when byte_size(bytes) > @max_red_patch_bytes, do: :too_large
+  defp red_patch(result), do: result
+
+  defp mitigate(ctx) do
+    case session(ctx, :mitigation) do
+      {:ok, %{"success" => true}} -> ctx |> patch() |> upload(ctx)
+      {:ok, _failed} -> {:outcome, :mitigation_failed, false}
+      {:error, reason} -> {:error, reason, :validated}
+    end
+  end
 
   defp patch(ctx) do
     ctx.sbx
@@ -172,7 +192,11 @@ defmodule RsolvHost.Roles.Work do
       max_bytes: @patch_max_bytes
     )
     |> patch_bytes()
-    |> upload(ctx)
+  end
+
+  defp too_large(ctx, message) do
+    ActionsLog.warning("RSOLV", message, ctx.io)
+    {:outcome, :mitigation_failed, false}
   end
 
   defp patch_bytes({:ok, %{status: 0, output: output}}) do
@@ -192,16 +216,14 @@ defmodule RsolvHost.Roles.Work do
   defp upload({:ok, bytes}, ctx) when byte_size(bytes) > @max_patch_bytes,
     do: upload(:too_large, ctx)
 
-  defp upload(:too_large, ctx) do
-    ActionsLog.warning("RSOLV", "The fix was larger than 5 MiB and was not uploaded.", ctx.io)
-    {:outcome, :mitigation_failed, false}
-  end
+  defp upload(:too_large, ctx),
+    do: too_large(ctx, "The fix was larger than 5 MiB and was not uploaded.")
 
   defp upload({:ok, bytes}, ctx) do
     with :ok <- in_budget(ctx),
          {:ok, %{req: req, raw: raw}} <- TokenKeeper.token(ctx.keeper),
          req = Http.deadline(req, ctx.deadline, :session_timeout),
-         :ok <- Platform.upload_result(req, raw, ctx.run, ctx.issue, bytes) do
+         :ok <- Platform.upload_result(req, raw, ctx.run, ctx.issue, bytes, ctx.red) do
       {:outcome, :mitigated, true}
     else
       {:error, {:platform, 409, "already_uploaded"}} -> {:outcome, :mitigated, true}

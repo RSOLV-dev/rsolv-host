@@ -10,6 +10,7 @@ defmodule RsolvHost.Roles.WorkTest do
   @run "0b0e5f7c-7d3c-4d8e-9a55-3f6f1b0c2a11"
   @base String.duplicate("b", 40)
   @patch "diff --git a/a.rb b/a.rb\n"
+  @red_patch "diff --git a/test/a_test.rb b/test/a_test.rb\n"
   @validated %{"validated" => true, "classification" => "validated"}
 
   setup %{tmp_dir: dir} do
@@ -80,13 +81,17 @@ defmodule RsolvHost.Roles.WorkTest do
   defp events(data), do: sse([{:complete, data}])
 
   # The sandbox: docker answers, with the bootstrap and patch results given.
+  # The first `rsolv-sandbox patch` is the red patch (VALIDATE has ended), and
+  # every later one the final patch.
   defp sandbox(opts \\ []) do
-    patch =
-      Keyword.get(
-        opts,
-        :patch,
-        {:ok, %{status: 0, output: ~s({"patch":"#{Base.encode64(@patch)}"})}}
-      )
+    final = Keyword.get(opts, :patch, patch_output(@patch))
+    red = Keyword.get(opts, :red_patch, patch_output(@red_patch))
+    patches = :counters.new(1, [])
+
+    patch = fn call ->
+      :counters.add(patches, 1, 1)
+      answer(if(:counters.get(patches, 1) == 1, do: red, else: final), call)
+    end
 
     FakeExec.script([
       {fn {"docker", ["inspect", "-f", t, _], _} -> t =~ "bridge" end,
@@ -102,6 +107,12 @@ defmodule RsolvHost.Roles.WorkTest do
       {fn {"docker", ["exec" | args], _} -> List.last(args) == "patch" end, patch}
     ])
   end
+
+  defp answer(answer, call) when is_function(answer, 1), do: answer.(call)
+  defp answer(answer, _call), do: answer
+
+  defp patch_output(bytes),
+    do: {:ok, %{status: 0, output: ~s({"patch":"#{Base.encode64(bytes)}"})}}
 
   defp deps(context, extra \\ []) do
     [io: context.io, probe: fn _ip -> :ok end, stat: &stat/1, backoff_ms: []] ++ extra
@@ -302,6 +313,59 @@ defmodule RsolvHost.Roles.WorkTest do
                {:outcome, :mitigation_failed, false}
 
       refute_received {:uploaded, _, _}
+    end
+
+    test "uploads the red patch taken when VALIDATE ended, beside the final patch", context do
+      platform()
+      sandbox()
+
+      assert Work.run(%{issue: 7}, context.env, deps(context)) == {:outcome, :mitigated, true}
+
+      assert_received {:uploaded, _path, %{"patch" => patch, "red_patch" => red_patch}}
+      assert Base.decode64!(patch) == @patch
+      assert Base.decode64!(red_patch) == @red_patch
+    end
+
+    test "takes the red patch before MITIGATE starts", context do
+      platform()
+      sandbox()
+
+      Work.run(%{issue: 7}, context.env, deps(context))
+
+      assert_received {:started, :mitigation, _body}
+
+      patches =
+        for {"docker", ["exec" | args], _} <- FakeExec.calls(),
+            List.last(args) == "patch",
+            do: args
+
+      assert length(patches) == 2
+    end
+
+    test "a red patch over 512 KiB is a failed mitigation, with a warning, and MITIGATE never starts",
+         context do
+      platform()
+      sandbox(red_patch: patch_output(:binary.copy("x", 512 * 1024 + 1)))
+
+      assert Work.run(%{issue: 7}, context.env, deps(context)) ==
+               {:outcome, :mitigation_failed, false}
+
+      refute_received {:started, :mitigation, _body}
+      refute_received {:uploaded, _, _}
+
+      assert io_text(context.io) =~
+               "::warning title=RSOLV::The failing test was larger than 512 KiB and was not uploaded.\n"
+    end
+
+    test "a red patch the sandbox can't produce records validated and exits 4", context do
+      platform()
+      sandbox(red_patch: {:ok, %{status: 1, output: "boom"}})
+
+      result = Work.run(%{issue: 7}, context.env, deps(context))
+
+      assert result == {:error, :malformed_patch, :validated}
+      assert RsolvHost.Outcome.exit_code(result) == 4
+      refute_received {:started, :mitigation, _body}
     end
 
     test "a diff over 5 MiB is a failed mitigation, with a warning", context do

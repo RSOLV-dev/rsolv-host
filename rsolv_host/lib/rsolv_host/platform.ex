@@ -188,14 +188,21 @@ defmodule RsolvHost.Platform do
     )
   end
 
-  @doc "Uploads the work job's patch bytes for its issue (work role)."
-  @spec upload_result(Req.Request.t(), String.t(), String.t(), pos_integer(), binary()) ::
+  @doc """
+  Uploads the work job's patch, and the red patch taken when VALIDATE ended,
+  for its issue (work role).
+  """
+  @spec upload_result(Req.Request.t(), String.t(), String.t(), pos_integer(), binary(), binary()) ::
           :ok | {:error, error()}
-  def upload_result(req, raw, run_id, issue, patch) do
+  def upload_result(req, raw, run_id, issue, patch, red_patch) do
     req
     |> call(:post, "/api/v1/runs/#{segment(run_id)}/issues/#{issue}/results",
       auth: {:bearer, raw},
-      json: %{issue_number: issue, patch: Base.encode64(patch)}
+      json: %{
+        issue_number: issue,
+        patch: Base.encode64(patch),
+        red_patch: Base.encode64(red_patch)
+      }
     )
     |> ok()
   end

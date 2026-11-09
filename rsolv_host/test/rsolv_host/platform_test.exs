@@ -258,16 +258,21 @@ defmodule RsolvHost.PlatformTest do
                Platform.session_status(req(), @token, :validation, "s1")
     end
 
-    test "upload_result/5 posts the patch base64-encoded" do
+    test "upload_result/6 posts the patch and the red patch base64-encoded" do
       stub(fn conn ->
         assert {conn.method, conn.request_path} ==
                  {"POST", "/api/v1/runs/#{@run}/issues/7/results"}
 
-        assert body(conn) == %{"issue_number" => 7, "patch" => Base.encode64(<<0, 1, 2>>)}
+        assert body(conn) == %{
+                 "issue_number" => 7,
+                 "patch" => Base.encode64(<<0, 1, 2>>),
+                 "red_patch" => Base.encode64(<<3>>)
+               }
+
         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{patch_bytes: 3})
       end)
 
-      assert Platform.upload_result(req(), @token, @run, 7, <<0, 1, 2>>) == :ok
+      assert Platform.upload_result(req(), @token, @run, 7, <<0, 1, 2>>, <<3>>) == :ok
     end
 
     test "the scan calls reach their routes" do
@@ -376,7 +381,7 @@ defmodule RsolvHost.PlatformTest do
             {"/api/v1/validation/tool_response/s1",
              fn -> Platform.tool_response(req(), @token, :validation, "s1", %{}) end},
             {"/api/v1/runs/#{@run}/issues/7/results",
-             fn -> Platform.upload_result(req(), @token, @run, 7, "x") end}
+             fn -> Platform.upload_result(req(), @token, @run, 7, "x", "r") end}
           ] do
         answer([503, 200])
 
