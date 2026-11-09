@@ -13,7 +13,7 @@ defmodule RsolvHost.Sandbox do
   and nothing runs unfiltered.
   """
 
-  alias RsolvHost.Egress
+  alias RsolvHost.{Egress, Frame}
 
   defstruct [:container, :network, :proxy, :exec, egress: :proxy]
 
@@ -289,6 +289,15 @@ defmodule RsolvHost.Sandbox do
       []
     )
   end
+
+  @doc """
+  The input for `rsolv-sandbox bootstrap`, from `RSOLV_EXACT_RUNTIME_VERSIONS`:
+  exactly `"true"` makes a Python version with no build attestations fail
+  rather than fall back to another patch (3d decision).
+  """
+  @spec bootstrap_input(String.t() | nil) :: binary()
+  def bootstrap_input("true"), do: Frame.encode(%{"exact_runtime_versions" => true})
+  def bootstrap_input(_unset), do: "0\n"
 
   @doc "Takes the sandbox off the proxy's network: from here on it has no network."
   @spec disconnect(t()) :: :ok | {:error, term()}

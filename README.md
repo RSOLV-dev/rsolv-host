@@ -17,8 +17,8 @@ attested binaries) is the design those changes must meet, not something you can 
   runner tokens, no Docker socket, a non-root user, only a copy of your repository mounted, and
   network access only to GitHub and package registries through a filtering proxy.
 - **Roles.** The scan role is run-wide: its run token covers one workflow run, not one issue.
-  The work and publish roles are issue-bound: each run token covers one workflow run, one issue
-  and one role.
+  The work, verify and publish roles are issue-bound: each run token covers one workflow run,
+  one issue and one role.
 - **What `rsolv-host` holds.** A short-lived RSOLV run token, obtained from GitHub Actions OIDC
   (no RSOLV secret is configured anywhere), and, in the scan and publish jobs only, the job's own
   `GITHUB_TOKEN`. Neither ever enters the sandbox.
@@ -58,7 +58,7 @@ breaking change. `rsolv-work.yml` retries once on 3.
 
 | Code | Meaning | Annotation | Workflow behaviour |
 |---|---|---|---|
-| 0 | A model outcome was reached (any of them) | `::notice::` for a false positive | none |
+| 0 | A model or verify outcome was reached (any of them) | `::notice::` for a false positive, a fix that failed verification, or a rejected fix | none |
 | 1 | Bug in the host client | `::error title=RSOLV host client bug::`, asking for an issue on `RSOLV-dev/rsolv-host` with the run URL | none |
 | 2 | Configuration, or something the customer can fix | `::error title=RSOLV configuration::` naming the fix (for example "Grant `id-token: write`") | none |
 | 3 | Transient platform or network failure | `::error title=RSOLV transient failure::` | `rsolv-work.yml` retries once, only on 3 |
@@ -71,15 +71,19 @@ What falls in each class:
 - **2, configuration:** missing permissions or variables, a platform or GitHub refusal (4xx, or
   any redirect, which is never followed), a signed decision refused or expired, a target branch
   that no longer contains the scanned commit, a fix branch or pull request that already holds
-  something else, a fix touching `.github/`.
+  something else, a fix touching `.github/`, a verify checkout that isn't the scanned commit,
+  base files too large to verify, a verify plan this host refuses, an issue already published
+  or rejected.
 - **3, transient:** network failures, 429 and 5xx, a run token that expired or a token keeper
   that stopped answering, the platform or GitHub breaking the protocol (a malformed answer or
-  event stream), a session past its time budget, and a token exchange whose answer was lost
-  (`409 already_exchanged` on the retry).
+  event stream, or a touched path that isn't a safe repository path), a session past its time
+  budget, and a token exchange whose answer was lost (`409 already_exchanged` on the retry).
 - **4, sandbox:** Docker or a sandbox setup step failing, the run-token hand-off file not
   writable, the sandbox breaking its CLI contract: a malformed or oversized frame, more frames or
   issues than allowed, an issue it didn't file, a malformed patch. The scanner's stdout and stderr
-  share the frame channel, so `rsolv-sandbox scan` must write nothing to stderr.
+  share the frame channel, so `rsolv-sandbox scan` must write nothing to stderr. In the verify
+  job: git failing to read the base commit, and a verify error (a step out of time, or a sandbox
+  failure), which a new attempt may retry.
 
 The `work` role writes the step outputs `outcome` and `has_patch` (`true` or `false`), and a
 job-summary row. `outcome` is one of:
@@ -90,6 +94,13 @@ job-summary row. `outcome` is one of:
 - `not_validated`: VALIDATE could not confirm the vulnerability;
 - `validated`: VALIDATE confirmed it, then the job failed (non-zero exit) before MITIGATE
   reported an outcome.
+
+The `verify` role (`verify --issue N`) writes the same outputs (`has_patch` is always
+`false`), with `outcome` one of:
+
+- `verified`: RED failed and GREEN passed as the platform requires;
+- `verify_failed`: the platform judged RED and GREEN and refused the fix;
+- `rejected`: the platform's policy rejected the fix, or it has no runnable RED test.
 
 Annotations and summaries are fixed text plus host-controlled values; text from the sandbox or
 an error response never reaches them.

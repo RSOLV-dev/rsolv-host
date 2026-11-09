@@ -11,7 +11,15 @@ defmodule RsolvHost.Outcome do
   alias RsolvHost.ActionsLog
 
   @type class :: :host_bug | :configuration | :transient | :sandbox
-  @type outcome :: :validated | :false_positive | :not_validated | :mitigated | :mitigation_failed
+  @type outcome ::
+          :validated
+          | :false_positive
+          | :not_validated
+          | :mitigated
+          | :mitigation_failed
+          | :verified
+          | :verify_failed
+          | :rejected
   @type result ::
           :ok
           | {:outcome, outcome(), boolean()}
@@ -37,6 +45,8 @@ defmodule RsolvHost.Outcome do
     :duplicate_path,
     :path_conflict
   ]
+  # The platform's 409s for an issue already published or rejected.
+  @ended ["issue_terminal", "issue_not_open"]
   @summary_header "| Issue | Outcome | Patch | Exit |\n|---|---|---|---|\n"
 
   @doc "Exit code for a role's result."
@@ -67,6 +77,15 @@ defmodule RsolvHost.Outcome do
   def classify(:base_not_on_target), do: :configuration
   def classify(:pull_collision), do: :configuration
   def classify(:pull_closed), do: :configuration
+
+  def classify(:checkout_not_base), do: :configuration
+  def classify(:base_facts_too_large), do: :configuration
+  def classify(:invalid_plan), do: :configuration
+  def classify({:platform, 409, code}) when code in @ended, do: :configuration
+  def classify({:platform, 413, _code}), do: :configuration
+  def classify(:verify_error), do: :sandbox
+  def classify(:base_read_failed), do: :sandbox
+  def classify(:invalid_touched_paths), do: :transient
 
   def classify({:platform, 409, "already_exchanged"}), do: :transient
 
@@ -193,6 +212,21 @@ defmodule RsolvHost.Outcome do
     do:
       "The target branch no longer contains the commit this run was scanned at (it was rewritten). Run a new scan."
 
+  defp message(:checkout_not_base, _class),
+    do:
+      "The verify job's checkout isn't the commit RSOLV scanned (or has no .git directory). Use RSOLV's reusable verify workflow unmodified."
+
+  defp message(:base_facts_too_large, _class), do: too_large()
+
+  defp message({:platform, 413, _code}, _class), do: too_large()
+
+  defp message(:invalid_plan, _class),
+    do:
+      "This rsolv-host refused the RSOLV platform's verify plan and ran nothing. Update to the current RSOLV workflow release; if this repeats, contact RSOLV support."
+
+  defp message({:platform, 409, code}, _class) when code in @ended,
+    do: "This issue is already published or rejected; there is nothing left to do for it."
+
   defp message({:platform, status, _code}, :configuration),
     do:
       "The RSOLV platform refused the request (HTTP #{status}). Check that this repository's owner is connected to RSOLV and that the job uses RSOLV's reusable workflows."
@@ -209,6 +243,14 @@ defmodule RsolvHost.Outcome do
   defp message(reason, :configuration),
     do:
       "The platform's signed publish decision was refused (#{kind(reason)}). Re-run the issue's workflow for a fresh decision; if this repeats, contact RSOLV support."
+
+  defp message(:verify_error, _class),
+    do:
+      "RSOLV could not finish verifying this fix (a step ran out of time, or the sandbox failed). Re-run the issue's workflow."
+
+  defp message(:base_read_failed, _class),
+    do:
+      "Reading the base commit with git failed on this runner. Check that git is installed and the checkout is intact."
 
   defp message({:sandbox, :enoent}, :sandbox),
     do: "Docker is not available on this runner (no `docker` on PATH)."
@@ -244,6 +286,10 @@ defmodule RsolvHost.Outcome do
   defp message(reason, :transient),
     do:
       "A platform or network failure (#{kind(reason)}). The RSOLV work workflow retries once; if this repeats, re-run the workflow later."
+
+  defp too_large,
+    do:
+      "The files this fix changes are too large for RSOLV to verify (over 5 MiB each, or about 5 MiB together); nothing will be published."
 
   defp report_bug,
     do: "Please open an issue on RSOLV-dev/rsolv-host with this workflow run's URL."
@@ -292,6 +338,22 @@ defmodule RsolvHost.Outcome do
       ActionsLog.notice(
         "RSOLV",
         "Issue ##{issue} is a false positive; no patch was produced.",
+        io
+      )
+
+  defp notify(:verify_failed, issue, io),
+    do:
+      ActionsLog.notice(
+        "RSOLV",
+        "The fix for issue ##{issue} did not pass verification; nothing will be published.",
+        io
+      )
+
+  defp notify(:rejected, issue, io),
+    do:
+      ActionsLog.notice(
+        "RSOLV",
+        "RSOLV rejected the fix for issue ##{issue} (by policy, or no runnable test); nothing will be published.",
         io
       )
 

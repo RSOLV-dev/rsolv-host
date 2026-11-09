@@ -69,9 +69,10 @@ defmodule RsolvHost.Platform do
   end
 
   @doc """
-  Req's retry policy (`RsolvHost.Http.retry/3`): a read, a tool response (the platform accepts a repeat)
-  or a result upload (write-once; a repeat is `409 already_uploaded`) is
-  repeated after a transient failure. The token exchange, a refresh (it
+  Req's retry policy (`RsolvHost.Http.retry/3`): a read, a tool response (the platform accepts a repeat),
+  a result upload (write-once; a repeat is `409 already_uploaded`), or base
+  facts and a verification (write-once; an identical repeat gets the stored
+  answer) is repeated after a transient failure. The token exchange, a refresh (it
   rotates the token), registration, a session start, validation, the scan plan
   and the published report may have happened when the answer was lost, and
   are never repeated blind.
@@ -86,7 +87,7 @@ defmodule RsolvHost.Platform do
   defp repeatable?(:post, path),
     do:
       path =~ ~r{/api/v1/(validation|mitigation)/tool_response/[^/]+\z} or
-        path =~ ~r{/api/v1/runs/[^/]+/issues/[0-9]+/results\z}
+        path =~ ~r{/api/v1/runs/[^/]+/issues/[0-9]+/(results|base-facts|verification)\z}
 
   defp repeatable?(_method, _path), do: false
 
@@ -206,6 +207,38 @@ defmodule RsolvHost.Platform do
     )
     |> ok()
   end
+
+  @doc ~s(The paths base facts must cover, `%{"paths" => [...], "work_attempt" => n}` \(verify role\).)
+  @spec touched_paths(Req.Request.t(), String.t(), String.t(), pos_integer()) ::
+          {:ok, term()} | {:error, term()}
+  def touched_paths(req, raw, run_id, issue),
+    do: call(req, :get, issue_path(run_id, issue, "touched-paths"), auth: {:bearer, raw})
+
+  @doc "Submits base facts (`RsolvCore.BaseFacts.to_json/1`); the answer is the policy verdict."
+  @spec base_facts(Req.Request.t(), String.t(), String.t(), pos_integer(), map()) ::
+          {:ok, term()} | {:error, term()}
+  def base_facts(req, raw, run_id, issue, facts),
+    do:
+      call(req, :post, issue_path(run_id, issue, "base-facts"), auth: {:bearer, raw}, json: facts)
+
+  @doc "The platform-built verify plan, for `RsolvCore.VerifyPlan.decode/1`."
+  @spec verify_plan(Req.Request.t(), String.t(), String.t(), pos_integer()) ::
+          {:ok, term()} | {:error, term()}
+  def verify_plan(req, raw, run_id, issue),
+    do: call(req, :get, issue_path(run_id, issue, "verify-plan"), auth: {:bearer, raw})
+
+  @doc "Reports RED and GREEN, or a verify error; the answer is the verdict."
+  @spec verification(Req.Request.t(), String.t(), String.t(), pos_integer(), map()) ::
+          {:ok, term()} | {:error, term()}
+  def verification(req, raw, run_id, issue, body),
+    do:
+      call(req, :post, issue_path(run_id, issue, "verification"),
+        auth: {:bearer, raw},
+        json: body
+      )
+
+  defp issue_path(run_id, issue, tail),
+    do: "/api/v1/runs/#{segment(run_id)}/issues/#{issue}/#{tail}"
 
   @doc "The enhanced patterns for one scanner language."
   @spec patterns(Req.Request.t(), String.t(), String.t()) :: {:ok, term()} | {:error, error()}
