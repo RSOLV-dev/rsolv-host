@@ -162,6 +162,31 @@ defmodule RsolvHost.SandboxDockerTest do
       assert running == "false\n"
     end
 
+    test "a step that writes past its budget and ends before the next poll is still disk_limit",
+         %{sbx: sbx} do
+      {:ok, used} = Sandbox.disk_used(sbx)
+
+      result =
+        Sandbox.watched(sbx, used + 50 * 1024 * 1024, 60_000, fn ->
+          Sandbox.exec(sbx, ["sh", "-c", "head -c 100M /dev/zero > /work/big"],
+            timeout_ms: 60_000
+          )
+        end)
+
+      assert result == {:error, :disk_limit}
+    end
+
+    test "a step that ends within its budget keeps its own result", %{sbx: sbx} do
+      {:ok, used} = Sandbox.disk_used(sbx)
+
+      assert {:ok, %{status: 0}} =
+               Sandbox.watched(sbx, used + 50 * 1024 * 1024, 60_000, fn ->
+                 Sandbox.exec(sbx, ["sh", "-c", "head -c 1M /dev/zero > /work/small"],
+                   timeout_ms: 60_000
+                 )
+               end)
+    end
+
     test "is killed when it hides what it wrote in a directory the host can't read", %{sbx: sbx} do
       {:ok, used} = Sandbox.disk_used(sbx)
       on_exit(fn -> File.chmod(Path.join(sbx.copy_dir, "d"), 0o700) end)

@@ -306,6 +306,45 @@ defmodule RsolvHost.SandboxTest do
     end
   end
 
+  describe "watched/4" do
+    setup %{tmp_dir: dir} do
+      %{
+        sbx: %Sandbox{
+          container: "s",
+          copy_dir: Path.join(dir, "c"),
+          dirs: [Path.join(dir, "h")],
+          ids: %{sandbox: "i"},
+          exec: FakeExec
+        }
+      }
+    end
+
+    test "measures once more when the step ends, before any poll, and refuses a total over budget",
+         %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("101\ttotal\n")}])
+
+      assert Sandbox.watched(sbx, 100, 60_000, fn -> :done end) == {:error, :disk_limit}
+    end
+
+    test "waits for a measure in flight when the step ends", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         fn _call ->
+           Process.sleep(300)
+           ok("101\ttotal\n")
+         end}
+      ])
+
+      assert Sandbox.watched(sbx, 100, 10, fn -> Process.sleep(50) end) == {:error, :disk_limit}
+    end
+
+    test "keeps the step's result within budget", %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("100\ttotal\n")}])
+
+      assert Sandbox.watched(sbx, 100, 60_000, fn -> :done end) == :done
+    end
+  end
+
   describe "exec/3" do
     test "runs the argv under coreutils timeout, with a host deadline beyond it", %{tmp_dir: dir} do
       script_inspect()

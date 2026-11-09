@@ -89,8 +89,9 @@ defmodule RsolvHost.Roles.Verify do
   # up to 60, report 1) is clamped to its side's deadline: unclamped, one
   # side could take 170. Past a deadline a step ends within timeout's 10 s
   # KILL grace and the host's 30 s, a report within 41 s more, the disk
-  # baseline's du takes at most 30 s, and removing the sandbox at most 2
-  # minutes: 4, inside the 5-minute reserve before the verification is posted.
+  # baseline's du at most 30 s and the watchdog's last measure at most 35 s,
+  # and removing the sandbox at most 2 minutes: 4.5, inside the 5-minute
+  # reserve before the verification is posted.
   @budget_ms 100 * 60 * 1_000
   @reserve_ms 5 * 60 * 1_000
   # owner/name, as GitHub allows them: label values never carry more.

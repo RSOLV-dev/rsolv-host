@@ -53,6 +53,7 @@ defmodule RsolvHost.Sandbox do
   @tmp "/tmp:exec,size=1g"
   @setup_timeout_ms 60_000
   @du_timeout_ms 30_000
+  @stop_wait_ms 35_000
   # An image pull can be slow; the sandbox image carries every toolchain.
   @pull_timeout_ms 900_000
   @kill_after_s "10"
@@ -421,7 +422,10 @@ defmodule RsolvHost.Sandbox do
   Runs `fun` (the sandbox's steps) while a watchdog measures `disk_used/1`
   every `poll_ms`: past `max_bytes`, or with no measure, it kills the
   sandbox, and the answer is `{:error, :disk_limit}` whatever `fun` returned.
-  The bind mounts have no portable quota, so this is the bound.
+  When `fun` returns, the watchdog finishes the measure in flight and takes
+  one more; either over budget, or no answer within 35 s (du's 30 s and a
+  margin), is `{:error, :disk_limit}` too. The bind mounts have no portable
+  quota, so this is the bound.
 
   ponytail: a burst between two polls overshoots by whatever it writes in
   `poll_ms` (plus du's own time); a hard bound needs a quota (xfs project
@@ -431,37 +435,57 @@ defmodule RsolvHost.Sandbox do
           result | {:error, :disk_limit}
         when result: term()
   def watched(sbx, max_bytes, poll_ms, fun) do
-    role = self()
     ref = make_ref()
+    role = self()
     {:ok, watchdog} = Task.start_link(fn -> watch(sbx, max_bytes, poll_ms, {role, ref}) end)
 
-    try do
-      fun.()
-    after
-      Process.unlink(watchdog)
-      Process.exit(watchdog, :kill)
-    end
-    |> then(fn result ->
-      receive do
-        {^ref, :disk_limit} -> {:error, :disk_limit}
-      after
-        0 -> result
+    result =
+      try do
+        fun.()
+      catch
+        kind, reason ->
+          stop_watchdog(watchdog)
+          :erlang.raise(kind, reason, __STACKTRACE__)
       end
-    end)
-  end
 
-  defp watch(sbx, max_bytes, poll_ms, {role, ref} = tell) do
-    Process.sleep(poll_ms)
+    send(watchdog, {:stop, ref})
 
-    case disk_used(sbx) do
-      {:ok, used} when used <= max_bytes ->
-        watch(sbx, max_bytes, poll_ms, tell)
-
-      _over_or_unmeasured ->
-        send(role, {ref, :disk_limit})
-        sbx.exec.run("docker", ["kill", sbx.ids.sandbox], timeout_ms: @setup_timeout_ms)
+    receive do
+      {^ref, :within} -> result
+      {^ref, :disk_limit} -> {:error, :disk_limit}
+    after
+      @stop_wait_ms ->
+        stop_watchdog(watchdog)
+        {:error, :disk_limit}
     end
   end
+
+  defp stop_watchdog(watchdog) do
+    Process.unlink(watchdog)
+    Process.exit(watchdog, :kill)
+  end
+
+  # Tells the role {ref, :disk_limit} as soon as a measure fails, or, once
+  # asked to stop, the verdict of one last measure.
+  defp watch(sbx, max_bytes, poll_ms, {role, ref} = tell) do
+    receive do
+      {:stop, ^ref} ->
+        send(role, {ref, verdict(disk_used(sbx), max_bytes)})
+    after
+      poll_ms ->
+        case verdict(disk_used(sbx), max_bytes) do
+          :within ->
+            watch(sbx, max_bytes, poll_ms, tell)
+
+          :disk_limit ->
+            send(role, {ref, :disk_limit})
+            sbx.exec.run("docker", ["kill", sbx.ids.sandbox], timeout_ms: @setup_timeout_ms)
+        end
+    end
+  end
+
+  defp verdict({:ok, used}, max_bytes) when used <= max_bytes, do: :within
+  defp verdict(_over_or_unmeasured, _max_bytes), do: :disk_limit
 
   @doc "Takes the sandbox off the proxy's network: from here on it has no network."
   @spec disconnect(t()) :: :ok | {:error, term()}
