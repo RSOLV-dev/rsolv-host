@@ -5,7 +5,7 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
   use ExUnit.Case, async: false
 
   alias RsolvCore.ChangeSet.Entry
-  alias RsolvHost.{BaseFactsReader, Copies, Exec, Sandbox, Workspace}
+  alias RsolvHost.{BaseFactsReader, Copies, Exec, KilledVm, Sandbox, Workspace}
 
   @moduletag :docker
   @moduletag :tmp_dir
@@ -181,21 +181,6 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
     end
   end
 
-  # A container another job could own: same run id, another repo or issue.
-  defp bystander(labels) do
-    args = for {key, value} <- labels, arg <- ["--label", "rsolv.#{key}=#{value}"], do: arg
-
-    {id, 0} =
-      System.cmd("docker", ["run", "-d" | args] ++ ["--entrypoint", "sleep", @image, "300"])
-
-    id = String.trim(id)
-    on_exit(fn -> System.cmd("docker", ["rm", "-f", id], stderr_to_stdout: true) end)
-    id
-  end
-
-  defp alive?(id),
-    do: match?({_, 0}, System.cmd("docker", ["inspect", id], stderr_to_stdout: true))
-
   defp labels(run, attempt),
     do: %{
       "rsolv.repo" => "acme/app",
@@ -209,16 +194,19 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
       run = "#{System.unique_integer([:positive])}"
       mine = %{repo: "acme/app", run: run, issue: "7"}
 
-      earlier = bystander(Map.put(mine, :attempt, "1"))
-      sibling = bystander(%{mine | issue: "8"} |> Map.put(:attempt, "1"))
-      other_repo = bystander(%{mine | repo: "other/app"} |> Map.put(:attempt, "1"))
-      current = bystander(Map.put(mine, :attempt, "2"))
-      later = bystander(Map.put(mine, :attempt, "3"))
+      earlier = KilledVm.bystander(Map.put(mine, :attempt, "1"), @image)
+      sibling = KilledVm.bystander(%{mine | issue: "8"} |> Map.put(:attempt, "1"), @image)
+
+      other_repo =
+        KilledVm.bystander(%{mine | repo: "other/app"} |> Map.put(:attempt, "1"), @image)
+
+      current = KilledVm.bystander(Map.put(mine, :attempt, "2"), @image)
+      later = KilledVm.bystander(Map.put(mine, :attempt, "3"), @image)
 
       assert Sandbox.remove_stale(labels(run, "2"), Exec) == :ok
 
-      refute alive?(earlier)
-      assert Enum.all?([sibling, other_repo, current, later], &alive?/1)
+      refute KilledVm.alive?(earlier)
+      assert Enum.all?([sibling, other_repo, current, later], &KilledVm.alive?/1)
     end
   end
 
@@ -228,9 +216,10 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
       run = "#{System.unique_integer([:positive])}"
       name = "rsolv-test-killed-#{run}"
       mine = %{repo: "acme/app", run: run, issue: "7", attempt: "1"}
-      twin = bystander(mine)
-      sibling = bystander(%{mine | issue: "8"})
-      other_repo = bystander(%{mine | repo: "other/app"})
+      twin = KilledVm.bystander(mine, @image)
+      sibling = KilledVm.bystander(%{mine | issue: "8"}, @image)
+      other_repo = KilledVm.bystander(%{mine | repo: "other/app"}, @image)
+      ours = Map.put(labels(run, "1"), "rsolv.instance", "0123456789abcdef")
 
       on_exit(fn ->
         for kind <- [[], ["network"]],
@@ -242,7 +231,7 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
 
       script = """
       Application.put_env(:rsolv_host, :proxy_image, #{inspect(Application.fetch_env!(:rsolv_host, :proxy_image))})
-      {:ok, trap} = RsolvHost.Sandbox.trap_sigterm(RsolvHost.Exec)
+      {:ok, trap} = RsolvHost.Sandbox.trap_sigterm(#{inspect(ours)}, RsolvHost.Exec)
 
       {:ok, sbx} =
         RsolvHost.Sandbox.start(
@@ -251,7 +240,7 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
           copy_dir: #{inspect(context.red)},
           runner_temp: #{inspect(context.dir)},
           image: #{inspect(@image)},
-          labels: #{inspect(labels(run, "1"))},
+          labels: #{inspect(ours)},
           created: trap.created,
           exec: RsolvHost.Exec
         )
@@ -265,52 +254,64 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
       end
       """
 
-      ebin =
-        for dir <- Path.wildcard(Path.join(Mix.Project.build_path(), "lib/*/ebin")),
-            arg <- ["-pa", dir],
-            do: arg
-
-      port =
-        Port.open({:spawn_executable, System.find_executable("elixir")}, [
-          :binary,
-          :exit_status,
-          :stderr_to_stdout,
-          args: ebin ++ ["-e", script]
-        ])
-
-      pid = ready(port, "")
+      port = KilledVm.start(script)
+      pid = KilledVm.ready(port)
       {_, 0} = System.cmd("kill", ["-TERM", pid])
 
-      assert {status, output} = exited(port, "")
+      assert {status, output} = KilledVm.exited(port)
       assert status == 4
       refute output =~ "after ran"
 
-      for made <- [name, name <> "-proxy", name <> "-net"], do: refute(alive?(made), made)
-      assert Enum.all?([twin, sibling, other_repo], &alive?/1)
+      for made <- [name, name <> "-proxy", name <> "-net"],
+          do: refute(KilledVm.alive?(made), made)
+
+      assert Enum.all?([twin, sibling, other_repo], &KilledVm.alive?/1)
     end
-  end
 
-  defp ready(port, acc) do
-    receive do
-      {^port, {:data, data}} ->
-        case Regex.run(~r/ready (\d+)/, acc <> data) do
-          [_, pid] -> pid
-          nil -> ready(port, acc <> data)
-        end
+    # Docker made them, but the VM stopped before it recorded their IDs.
+    test "removes what this VM made but hadn't recorded, by its labels", _context do
+      run = "#{System.unique_integer([:positive])}"
+      name = "rsolv-test-unrecorded-#{run}"
+      mine = %{repo: "acme/app", run: run, issue: "7", attempt: "1"}
+      twin = KilledVm.bystander(mine, @image)
+      ours = Map.put(labels(run, "1"), "rsolv.instance", "0123456789abcdef")
 
-      {^port, {:exit_status, status}} ->
-        flunk("the VM exited #{status} before it was ready: #{acc}")
-    after
-      300_000 -> flunk("the VM never became ready: #{acc}")
-    end
-  end
+      on_exit(fn ->
+        for kind <- [[], ["network"]],
+            do:
+              System.cmd("docker", kind ++ ["rm", "-f", name, name <> "-net"],
+                stderr_to_stdout: true
+              )
+      end)
 
-  defp exited(port, acc) do
-    receive do
-      {^port, {:data, data}} -> exited(port, acc <> data)
-      {^port, {:exit_status, status}} -> {status, acc}
-    after
-      120_000 -> flunk("the VM didn't stop after SIGTERM: #{acc}")
+      script = """
+      labels = #{inspect(ours)}
+      {:ok, _trap} = RsolvHost.Sandbox.trap_sigterm(labels, RsolvHost.Exec)
+      flags = for {key, value} <- labels, arg <- ["--label", key <> "=" <> value], do: arg
+
+      {_, 0} =
+        System.cmd("docker", ["network", "create", "--internal" | flags] ++ [#{inspect(name <> "-net")}])
+
+      {_, 0} =
+        System.cmd(
+          "docker",
+          ["run", "-d", "--name", #{inspect(name)}, "--network", #{inspect(name <> "-net")} | flags] ++
+            ["--entrypoint", "sleep", #{inspect(@image)}, "300"]
+        )
+
+      IO.puts("ready " <> System.pid())
+      Process.sleep(:infinity)
+      """
+
+      port = KilledVm.start(script)
+      pid = KilledVm.ready(port)
+      assert KilledVm.alive?(name) and KilledVm.alive?(name <> "-net")
+      {_, 0} = System.cmd("kill", ["-TERM", pid])
+
+      assert {4, _output} = KilledVm.exited(port)
+      refute KilledVm.alive?(name)
+      refute KilledVm.alive?(name <> "-net")
+      assert KilledVm.alive?(twin)
     end
   end
 end

@@ -13,6 +13,14 @@ defmodule RsolvHost.Roles.Work do
 
   `--resume` (the workflow's one retry, on exit 3) refreshes the first attempt's
   run token and uses a fresh copy and fresh container names.
+
+  Its containers and network carry the job's labels (`RsolvHost.Sandbox.labels/2`):
+  a re-run first removes what an earlier attempt left. A `--resume` runs in
+  the same job, with the same `rsolv.attempt`, so that cleanup leaves the
+  first run's alone: the first run's `RsolvHost.Sandbox.stop/1` removes
+  them. A runner stopping the job (SIGTERM) removes the sandbox, proxy and network it made, by ID and
+  then by this VM's labels, and ends the role with exit 4
+  (`RsolvHost.Sandbox.trap_sigterm/2`).
   """
 
   alias RsolvHost.{
@@ -34,25 +42,67 @@ defmodule RsolvHost.Roles.Work do
   @bootstrap_max_bytes 1024 * 1024
   @patch_timeout_ms 300_000
   @patch_max_bytes 8 * 1024 * 1024
-  # Both attempts (the workflow retries once) fit GitHub's 6-hour job limit.
-  @budget_ms 150 * 60 * 1_000
+  # The role's time, under `rsolv-work.yml`'s `timeout-minutes: 120`, which
+  # holds the first run and, after an exit 3, a 30 s wait and one `--resume`
+  # (each its own budget), in minutes:
+  #
+  #     job setup before the role (checkout, host download and check)  10
+  #   + the first run: its budget and at most 8 past it                48
+  #   + the wait before --resume                                         0.5
+  #   + the resume: the same                                            48
+  #   + margin                                                          13.5
+  #   = 120
+  #
+  # The budget counts from the role's start: the token exchange (at most
+  # 13) and the copy come out of it. Every sandbox setup Docker step,
+  # bootstrap, each session and its tools, and the upload are clamped to its
+  # deadline. These aren't, so they can run past it (worst case, minutes):
+  #
+  #   stale cleanup (`Sandbox.remove_stale/1`: four 60 s Docker calls)    4
+  #   the proxy probe (30 tries of 2 s)                                    1
+  #   one patch (5, and timeout's 10 s KILL inside the host's 30 s)       5.5
+  #   the upload's run token (`TokenKeeper.token/1`: 15 s)                0.25
+  #   bootstrap, or a tool, ended by the host's 30 s grace                0.5
+  #   removing the sandbox, proxy and network (two 60 s Docker calls)     2
+  #
+  # The step running at the deadline overruns it and the next clamped step
+  # ends at once, so they don't all add up: the longest chain is one patch
+  # (the red one, as VALIDATE ends) and removing the sandbox, 7.5, inside
+  # the 8. Stale cleanup or the probe past the deadline come before any
+  # patch, so they replace it: 4 + 2, or 1 + 2.
+  #
+  # Two filesystem walks have no bound, and grow with the repository and
+  # what the sandbox installed: the copy's sanitising walk (it passes the
+  # deadline only if it alone takes the 27 the exchange leaves), and
+  # `Sandbox.stop/1` removing the sandbox's HOME and proxy directories
+  # (`Workspace.remove/1`). The margin, 6.75 an attempt, is for them, and
+  # nothing enforces it. A role past its budget ends `session_timeout`
+  # (exit 3), which the workflow resumes.
+  @budget_ms 40 * 60 * 1_000
+
+  @doc "The role's default time budget, in milliseconds (`run/3`'s `:budget_ms`)."
+  @spec budget_ms() :: pos_integer()
+  def budget_ms, do: @budget_ms
 
   @doc """
   Runs the role. `deps` replaces collaborators in tests: `:io`, `:probe`,
   `:stat` (passed to `RsolvHost.Sandbox.start/1`), `:backoff_ms` (passed to
   `RsolvHost.Relay.run_session/5`) and `:budget_ms`.
 
-  The role has one time budget (2.5 hours by default), from its start to the
-  upload: both sessions share its deadline, and a patch ready after it isn't
-  uploaded (`{:error, :session_timeout, :validated}`).
+  The role has one time budget (40 minutes by default), from its start to the
+  upload: the token exchange, sandbox setup, bootstrap and both sessions share
+  its deadline, and a patch ready after it isn't uploaded
+  (`{:error, :session_timeout, :validated}`).
   """
   @spec run(map(), map(), keyword()) :: Outcome.result()
   def run(%{issue: issue} = opts, env, deps \\ []) do
     resume? = Map.get(opts, :resume, false)
     io = Keyword.get(deps, :io, :stdio)
 
-    with {:ok, run_id} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
+    with {:ok, labels} <- Sandbox.labels(env, issue),
          {:ok, workspace} <- env_value(env, "GITHUB_WORKSPACE", ~r/\A\//),
+         deadline =
+           System.monotonic_time(:millisecond) + Keyword.get(deps, :budget_ms, @budget_ms),
          {:ok, keeper} <-
            TokenKeeper.start(role: :work, issue: issue, env: env, resume: resume?, io: io) do
       ctx = %{
@@ -63,8 +113,9 @@ defmodule RsolvHost.Roles.Work do
         keeper: keeper,
         workspace: workspace,
         suffix: if(resume?, do: "-2", else: ""),
-        deadline: System.monotonic_time(:millisecond) + Keyword.get(deps, :budget_ms, @budget_ms),
-        names: "rsolv-#{run_id}-#{issue}"
+        deadline: deadline,
+        labels: labels,
+        names: "rsolv-#{labels["rsolv.run"]}-#{issue}"
       }
 
       try do
@@ -89,10 +140,25 @@ defmodule RsolvHost.Roles.Work do
     copy = Path.join([ctx.env["RUNNER_TEMP"], "rsolv", "work" <> ctx.suffix])
 
     with {:ok, %{binding: %{"pipeline_run_id" => run, "base_sha" => base}}} <- token(ctx),
-         :ok <- Workspace.copy(ctx.workspace, copy),
-         {:ok, sbx} <- start_sandbox(ctx, copy) do
+         :ok <- Workspace.copy(ctx.workspace, copy) do
+      trap = Sandbox.trap_sigterm(ctx.labels)
+
       try do
-        ctx |> Map.merge(%{sbx: sbx, run: run, base: base}) |> work()
+        Sandbox.remove_stale(ctx.labels)
+        ctx |> Map.merge(%{run: run, base: base, created: created(trap)}) |> sandboxed(copy)
+      after
+        Sandbox.untrap_sigterm(trap)
+      end
+    end
+  end
+
+  defp created({:ok, %{created: created}}), do: created
+  defp created({:error, _not_trapped}), do: nil
+
+  defp sandboxed(ctx, copy) do
+    with {:ok, sbx} <- start_sandbox(ctx, copy) do
+      try do
+        ctx |> Map.put(:sbx, sbx) |> work()
       after
         Sandbox.stop(sbx)
       end
@@ -112,7 +178,10 @@ defmodule RsolvHost.Roles.Work do
       name: ctx.names <> "-work" <> ctx.suffix,
       network: ctx.names <> "-net" <> ctx.suffix,
       copy_dir: copy,
-      runner_temp: ctx.env["RUNNER_TEMP"]
+      runner_temp: ctx.env["RUNNER_TEMP"],
+      deadline: ctx.deadline,
+      labels: ctx.labels,
+      created: ctx.created
     ]
     |> Keyword.merge(Keyword.take(ctx.deps, [:probe, :stat]))
     |> Sandbox.start()
@@ -131,7 +200,8 @@ defmodule RsolvHost.Roles.Work do
     with {:ok, %{output: output}} <-
            Sandbox.exec(ctx.sbx, ["rsolv-sandbox", "bootstrap"],
              input: Sandbox.bootstrap_input(ctx.env["RSOLV_EXACT_RUNTIME_VERSIONS"]),
-             timeout_ms: @bootstrap_timeout_ms,
+             timeout_ms:
+               min(@bootstrap_timeout_ms, ctx.deadline - System.monotonic_time(:millisecond)),
              max_bytes: @bootstrap_max_bytes
            ),
          %{"log_tail" => tail} = result when is_binary(tail) <- Relay.last_object(output) do

@@ -203,6 +203,17 @@ defmodule RsolvHost.Roles.VerifyTest do
 
   defp run(context), do: Verify.run(%{issue: 7}, context.env, deps(context))
 
+  # Whether a SIGTERM trap (`RsolvHost.Sandbox.trap_sigterm/2`) that suspends
+  # `pid` is installed: the trap's function closes over the process it suspends.
+  defp sigterm_trapped_by?(pid) do
+    :erl_signal_server
+    |> :sys.get_state()
+    |> Enum.any?(fn
+      {System.SignalHandler, _id, {:sigterm, fun}} -> pid in elem(:erlang.fun_info(fun, :env), 1)
+      _other -> false
+    end)
+  end
+
   defp docker_calls, do: for({"docker", _args, _opts} = call <- FakeExec.calls(), do: call)
 
   defp requests(acc \\ []) do
@@ -568,7 +579,7 @@ defmodule RsolvHost.Roles.VerifyTest do
   end
 
   describe "run/3's containers and time" do
-    test "labels each sandbox, proxy and network with its repository, run, issue and attempt",
+    test "labels each sandbox, proxy and network with its repository, run, issue, attempt and instance",
          context do
       platform(context)
       sandbox()
@@ -582,9 +593,12 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       assert length(labelled) == 6
 
-      assert Enum.uniq(labelled) == [
+      assert [[attempt, "rsolv.instance=" <> instance | rest]] = Enum.uniq(labelled)
+
+      assert [attempt | rest] ==
                ~w(rsolv.attempt=2 rsolv.issue=7 rsolv.repo=acme/app rsolv.run=41)
-             ]
+
+      assert instance =~ ~r/\A[0-9a-f]{16}\z/
     end
 
     for repository <- ["acme", "acme/app/x", "acme/a b", "acme/app\n", "-x/app"] do
@@ -625,6 +639,21 @@ defmodule RsolvHost.Roles.VerifyTest do
              ] = docker_calls()
 
       assert Enum.take(ps, 6) == identity and Enum.take(ls, 6) == identity
+    end
+
+    test "traps SIGTERM before it removes what an earlier attempt left", context do
+      platform(context)
+
+      sandbox([
+        {fn {"docker", ["ps", "-a" | _], _} ->
+           send(self(), {:stale_cleanup, sigterm_trapped_by?(self())})
+           false
+         end, :unused}
+      ])
+
+      run(context)
+
+      assert_received {:stale_cleanup, true}
     end
 
     test "fits every sandbox stage in the role's budget, RED in half of it", context do
@@ -863,6 +892,26 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       assert_received {:request, "verification", %{"error" => "sandbox"}}
       assert result == {:error, {:sandbox_setup, :network_create}}
+      assert Outcome.exit_code(result) == 4
+    end
+
+    test "a setup step its side's deadline stops is still a sandbox error (exit 4)", context do
+      platform(context, %{
+        "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+      })
+
+      sandbox([
+        {fn {"docker", ["network", "create" | _], opts} ->
+           Process.sleep(opts[:timeout_ms])
+           true
+         end, {:error, :timeout}}
+      ])
+
+      result =
+        Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: 5 * 60_000 + 1_000])
+
+      assert_received {:request, "verification", %{"error" => "sandbox"}}
+      assert result == {:error, {:sandbox, :deadline}}
       assert Outcome.exit_code(result) == 4
     end
 

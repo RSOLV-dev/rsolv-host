@@ -228,6 +228,34 @@ defmodule RsolvHost.SandboxTest do
              ]
     end
 
+    test "a step the deadline stops is session_timeout, and removes what it created",
+         %{tmp_dir: dir} do
+      FakeExec.script([
+        {fn {"docker", ["run", "-d", "--name", "rsolv-41-7-work-proxy" | _], opts} ->
+           Process.sleep(opts[:timeout_ms])
+           true
+         end, {:error, :timeout}}
+      ])
+
+      deadline = System.monotonic_time(:millisecond) + 200
+
+      assert Sandbox.start(start_opts(dir, deadline: deadline)) == {:error, :session_timeout}
+
+      assert List.last(docker_args()) == ["network", "rm", FakeExec.docker_id("rsolv-41-7-net")]
+    end
+
+    test "a step stopped by its own limit, with the deadline still ahead, is the step's failure",
+         %{tmp_dir: dir} do
+      FakeExec.script([
+        {fn {"docker", ["network", "create" | _], _} -> true end, {:error, :timeout}}
+      ])
+
+      deadline = System.monotonic_time(:millisecond) + 3_600_000
+
+      assert Sandbox.start(start_opts(dir, deadline: deadline)) ==
+               {:error, {:sandbox_setup, :network_create}}
+    end
+
     test "refuses a container Docker gave no ID", %{tmp_dir: dir} do
       FakeExec.script([
         {fn {"docker", ["run", "-d", "--name", "rsolv-41-7-work" | _], _} -> true end,

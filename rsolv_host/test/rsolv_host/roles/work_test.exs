@@ -3,7 +3,7 @@ defmodule RsolvHost.Roles.WorkTest do
 
   import RsolvHost.PlatformStub
 
-  alias RsolvHost.{FakeExec, Frame, Oidc, Platform, TokenKeeper}
+  alias RsolvHost.{FakeExec, Frame, Oidc, Outcome, Platform, TokenKeeper}
   alias RsolvHost.Roles.Work
 
   @moduletag :tmp_dir
@@ -23,6 +23,8 @@ defmodule RsolvHost.Roles.WorkTest do
       "RUNNER_TEMP" => dir,
       "GITHUB_WORKSPACE" => workspace,
       "GITHUB_RUN_ID" => "41",
+      "GITHUB_RUN_ATTEMPT" => "2",
+      "GITHUB_REPOSITORY" => "acme/app",
       "ACTIONS_ID_TOKEN_REQUEST_URL" => "https://token.actions.example/id?v=1",
       "ACTIONS_ID_TOKEN_REQUEST_TOKEN" => "t"
     }
@@ -41,6 +43,7 @@ defmodule RsolvHost.Roles.WorkTest do
     Req.Test.stub(Platform, fn conn ->
       case {conn.method, conn.request_path} do
         {"POST", "/api/v1/runs/token"} ->
+          Process.sleep(Keyword.get(opts, :exchange_ms, 0))
           Req.Test.json(conn, token())
 
         {"POST", "/api/v1/runs/token/refresh"} ->
@@ -455,7 +458,121 @@ defmodule RsolvHost.Roles.WorkTest do
     end
   end
 
+  describe "run/3's containers" do
+    test "labels its sandbox, proxy and network with its repository, run, issue, attempt and instance",
+         context do
+      platform()
+      sandbox()
+
+      Work.run(%{issue: 7}, context.env, deps(context))
+
+      labelled =
+        for {"docker", args, _} <- FakeExec.calls(),
+            match?(["run" | _], args) or match?(["network", "create" | _], args),
+            do: for([flag, value] <- Enum.chunk_every(args, 2, 1), flag == "--label", do: value)
+
+      assert length(labelled) == 3
+
+      assert [[attempt, "rsolv.instance=" <> instance | rest]] = Enum.uniq(labelled)
+
+      assert [attempt | rest] ==
+               ~w(rsolv.attempt=2 rsolv.issue=7 rsolv.repo=acme/app rsolv.run=41)
+
+      assert instance =~ ~r/\A[0-9a-f]{16}\z/
+    end
+
+    for name <- ["GITHUB_RUN_ATTEMPT", "GITHUB_REPOSITORY"] do
+      test "needs #{name}, which labels its containers, before anything runs", context do
+        platform()
+        sandbox()
+        env = Map.delete(context.env, unquote(name))
+
+        assert Work.run(%{issue: 7}, env, deps(context)) ==
+                 {:error, {:missing_env, unquote(name)}}
+
+        assert FakeExec.calls() == []
+      end
+    end
+
+    test "first removes, by ID, what an earlier attempt of this issue left", context do
+      platform()
+
+      FakeExec.script([
+        {fn {"docker", ["ps", "-a" | _], _} -> true end,
+         {:ok, %{status: 0, output: "aaa\t1\nbbb\t2\n"}}},
+        {fn {"docker", ["network", "ls" | _], _} -> true end,
+         {:ok, %{status: 0, output: "nnn\t1\n"}}}
+      ])
+
+      Work.run(%{issue: 7}, context.env, deps(context))
+
+      assert [
+               {"docker", ["ps", "-a" | _], _},
+               {"docker", ["rm", "-f", "aaa"], _},
+               {"docker", ["network", "ls" | _], _},
+               {"docker", ["network", "rm", "nnn"], _},
+               {"docker", ["network", "create" | _], _} | _
+             ] = for({"docker", _, _} = call <- FakeExec.calls(), do: call)
+    end
+  end
+
   describe "run/3 and its time budget" do
+    # rsolv-work.yml runs the role, waits 30 s and runs it once more with
+    # --resume, all inside `timeout-minutes: 120`. The rows of the table in
+    # the module's `@budget_ms` comment, in minutes.
+    test "fits both attempts, the wait between them and the margin in the job's 120 minutes" do
+      job_setup = 10
+      past_budget = 8
+      wait = 0.5
+      margin = 13.5
+      attempt = Work.budget_ms() / 60_000 + past_budget
+
+      assert job_setup + attempt + wait + attempt + margin <= 120
+    end
+
+    test "counts the token exchange in the budget", context do
+      platform(exchange_ms: 400)
+      sandbox()
+
+      result = Work.run(%{issue: 7}, context.env, deps(context, budget_ms: 300))
+
+      assert result == {:error, :session_timeout}
+      refute_received {:started, :validation, _}
+    end
+
+    test "clamps every sandbox setup step and bootstrap to the budget", context do
+      platform()
+      sandbox()
+
+      Work.run(%{issue: 7}, context.env, deps(context, budget_ms: 60_000))
+
+      assert for({"docker", ["run" | _], opts} <- FakeExec.calls(), do: opts[:timeout_ms])
+             |> Enum.all?(&(&1 <= 60_000))
+
+      assert {"docker",
+              ["exec", "-i", _, "timeout", "-k", _, seconds, "rsolv-sandbox", "bootstrap"], _} =
+               Enum.find(FakeExec.calls(), &match?({"docker", ["exec" | _], _}, &1))
+
+      assert String.to_integer(seconds) <= 60
+    end
+
+    test "a setup step the deadline stops is session_timeout, which the resume retries",
+         context do
+      platform()
+
+      FakeExec.script([
+        {fn {"docker", ["network", "create" | _], opts} ->
+           Process.sleep(opts[:timeout_ms])
+           true
+         end, {:error, :timeout}}
+      ])
+
+      result = Work.run(%{issue: 7}, context.env, deps(context, budget_ms: 500))
+
+      assert result == {:error, :session_timeout}
+      assert Outcome.exit_code(result) == 3
+    end
+
     test "a patch ready after the role's deadline isn't uploaded", context do
       platform()
 

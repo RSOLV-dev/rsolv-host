@@ -58,6 +58,8 @@ defmodule RsolvHost.Sandbox do
   @pull_timeout_ms 900_000
   @kill_after_s "10"
   @host_grace_ms 30_000
+  # owner/name, as GitHub allows them: label values never carry more.
+  @repository ~r/\A[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}\z/
 
   @doc """
   The `docker run` argv for the sandbox. `opts` has `:name`, `:network`,
@@ -123,13 +125,18 @@ defmodule RsolvHost.Sandbox do
   image), `:probe` (the proxy readiness check, `fn ip -> :ok | :error end`),
   `:stat` (how the copy is stat'ed, default `File.stat!/1`), `:exec`,
   `:labels` (on its containers and network, for `remove_stale/2`),
-  `:created` (a `trap_sigterm/1` registry, told every container and network
+  `:created` (a `trap_sigterm/2` registry, told every container and network
   ID as it's made) and `:deadline` (monotonic milliseconds: no setup step
-  runs past it). It removes them by those IDs, never by name.
+  runs past it, and one it stops is `:session_timeout`). It removes them by
+  those IDs, never by name.
   """
   @spec start(keyword()) ::
           {:ok, t()}
-          | {:error, {:sandbox_setup, atom()} | {:sandbox, :enoent} | :sandbox_image_unpinned}
+          | {:error,
+             {:sandbox_setup, atom()}
+             | {:sandbox, :enoent}
+             | :sandbox_image_unpinned
+             | :session_timeout}
   def start(opts) do
     image =
       Keyword.get_lazy(opts, :image, fn -> Application.fetch_env!(:rsolv_host, :sandbox_image) end)
@@ -309,6 +316,7 @@ defmodule RsolvHost.Sandbox do
          {:ok, _address} <- :inet.parse_strict_address(String.to_charlist(ip)) do
       {:ok, ip}
     else
+      {:error, :session_timeout} = late -> late
       _not_an_address -> {:error, {:sandbox_setup, :proxy_inspect}}
     end
   end
@@ -340,18 +348,27 @@ defmodule RsolvHost.Sandbox do
     with {:ok, _output} <- docker(sbx, name, args, timeout_ms), do: :ok
   end
 
+  # A step the deadline cut short (its time left was at most its own limit)
+  # and that then timed out is `:session_timeout`, not the step failing.
   defp docker(sbx, name, args, timeout_ms) do
-    case sbx.exec.run("docker", args, timeout_ms: within(timeout_ms, sbx.deadline)) do
+    {limit, cut} = within(timeout_ms, sbx.deadline)
+
+    case sbx.exec.run("docker", args, timeout_ms: limit) do
       {:ok, %{status: 0, output: output}} -> {:ok, output}
       {:error, :enoent} -> {:error, {:sandbox, :enoent}}
+      {:error, :timeout} when cut == :deadline -> {:error, :session_timeout}
       _failed -> {:error, {:sandbox_setup, name}}
     end
   end
 
-  defp within(timeout_ms, nil), do: timeout_ms
+  defp within(timeout_ms, nil), do: {timeout_ms, :step}
 
-  defp within(timeout_ms, deadline),
-    do: timeout_ms |> min(deadline - System.monotonic_time(:millisecond)) |> max(0)
+  defp within(timeout_ms, deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      left when left <= timeout_ms -> {max(left, 0), :deadline}
+      _room -> {timeout_ms, :step}
+    end
+  end
 
   @doc """
   Runs `argv` in the sandbox as `docker exec -i <container> timeout -k 10 <s>
@@ -544,13 +561,17 @@ defmodule RsolvHost.Sandbox do
   registry}}`; pass `created: registry` to `start/1`, which tells it every
   container and network ID it makes. On SIGTERM the trap suspends the
   calling process, so it can't act on a sandbox vanishing (post a verify
-  error), removes exactly those IDs, never selecting by label, and halts with
+  error), removes those IDs, then the containers and networks that carry all
+  of `labels` (`labels/2`'s, whose `rsolv.instance` only this VM's carry):
+  Docker may have made one whose ID the VM hadn't yet recorded. It halts with
   exit code 4. Undo it with `untrap_sigterm/1`.
   """
-  @spec trap_sigterm(module()) :: {:ok, %{id: term(), created: pid()}} | {:error, term()}
-  def trap_sigterm(exec \\ RsolvHost.exec()) do
+  @spec trap_sigterm(%{String.t() => String.t()}, module()) ::
+          {:ok, %{id: term(), created: pid()}} | {:error, term()}
+  def trap_sigterm(labels, exec \\ RsolvHost.exec()) do
     caller = self()
     {:ok, created} = Agent.start_link(fn -> [] end)
+    filters = filters(labels, ~w(rsolv.repo rsolv.run rsolv.issue rsolv.attempt rsolv.instance))
 
     trapped =
       System.trap_signal(:sigterm, fn ->
@@ -558,6 +579,7 @@ defmodule RsolvHost.Sandbox do
         ids = Agent.get(created, & &1)
         remove(exec, ["rm", "-f"], for({kind, id} <- ids, kind != :network, do: id))
         remove(exec, ["network", "rm"], for({:network, id} <- ids, do: id))
+        remove_listed(exec, filters, &ids/1)
         System.halt(4)
       end)
 
@@ -571,7 +593,7 @@ defmodule RsolvHost.Sandbox do
     end
   end
 
-  @doc "Undoes `trap_sigterm/1`."
+  @doc "Undoes `trap_sigterm/2`."
   @spec untrap_sigterm({:ok, %{id: term(), created: pid()}} | {:error, term()}) :: :ok
   def untrap_sigterm({:ok, %{id: id, created: created}}) do
     System.untrap_signal(:sigterm, id)
@@ -587,6 +609,40 @@ defmodule RsolvHost.Sandbox do
   end
 
   @doc """
+  The labels a role's containers and networks carry (`start/1`,
+  `remove_stale/2`, `trap_sigterm/2`): the job's repository, run and attempt,
+  from `env`, `issue`, and `rsolv.instance`, random for each call, which tells
+  this VM's apart from another job's with the same labels. A missing or
+  malformed variable is `{:error, {:missing_env, name}}`.
+  """
+  @spec labels(map(), pos_integer()) ::
+          {:ok, %{String.t() => String.t()}} | {:error, {:missing_env, String.t()}}
+  def labels(env, issue) do
+    with {:ok, run} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
+         {:ok, attempt} <- env_value(env, "GITHUB_RUN_ATTEMPT", ~r/\A[0-9]{1,5}\z/),
+         {:ok, repository} <- env_value(env, "GITHUB_REPOSITORY", @repository) do
+      {:ok,
+       %{
+         "rsolv.repo" => repository,
+         "rsolv.run" => run,
+         "rsolv.issue" => Integer.to_string(issue),
+         "rsolv.attempt" => attempt,
+         "rsolv.instance" => 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+       }}
+    end
+  end
+
+  defp env_value(env, name, format) do
+    case env[name] do
+      value when is_binary(value) ->
+        if value =~ format, do: {:ok, value}, else: {:error, {:missing_env, name}}
+
+      nil ->
+        {:error, {:missing_env, name}}
+    end
+  end
+
+  @doc """
   Removes, by ID, the containers and then the networks an earlier attempt of
   the same job left: those whose `rsolv.repo`, `rsolv.run` and `rsolv.issue`
   labels equal `labels`' and whose `rsolv.attempt` is lower. A sibling job (another
@@ -595,13 +651,22 @@ defmodule RsolvHost.Sandbox do
   """
   @spec remove_stale(%{String.t() => String.t()}, module()) :: :ok
   def remove_stale(%{"rsolv.attempt" => attempt} = labels, exec \\ RsolvHost.exec()) do
-    filters =
-      for key <- ~w(rsolv.repo rsolv.run rsolv.issue),
-          arg <- ["--filter", "label=#{key}=#{Map.fetch!(labels, key)}"],
-          do: arg
-
-    format = "{{.ID}}\t{{.Label \"rsolv.attempt\"}}"
     attempt = String.to_integer(attempt)
+
+    remove_listed(
+      exec,
+      filters(labels, ~w(rsolv.repo rsolv.run rsolv.issue)),
+      &earlier(&1, attempt)
+    )
+  end
+
+  defp filters(labels, keys),
+    do: for(key <- keys, arg <- ["--filter", "label=#{key}=#{Map.fetch!(labels, key)}"], do: arg)
+
+  # Lists the containers, then the networks, matching `filters`, and removes
+  # the IDs `select` picks from the listing. Best effort.
+  defp remove_listed(exec, filters, select) do
+    format = "{{.ID}}\t{{.Label \"rsolv.attempt\"}}"
 
     for {list, command} <- [{["ps", "-a"], ["rm", "-f"]}, {["network", "ls"], ["network", "rm"]}],
         {:ok, %{status: 0, output: output}} <-
@@ -610,10 +675,14 @@ defmodule RsolvHost.Sandbox do
               timeout_ms: @setup_timeout_ms
             )
           ],
-        do: remove(exec, command, earlier(output, attempt))
+        do: remove(exec, command, select.(output))
 
     :ok
   end
+
+  defp ids(output),
+    do:
+      for(line <- String.split(output, "\n", trim: true), do: line |> String.split("\t") |> hd())
 
   defp earlier(output, attempt) do
     for line <- String.split(output, "\n", trim: true),
