@@ -61,6 +61,9 @@ defmodule RsolvHost.OutcomeTest do
               :decision_keys_invalid,
               :publish_unavailable,
               {:base_mismatch, "a"},
+              {:attributes_mismatch, "a"},
+              :base_check_too_large,
+              :bad_base_attributes,
               {:tree_mismatch, "a"},
               :branch_collision,
               {:missing_env, "GITHUB_RUN_ID"}
@@ -166,6 +169,7 @@ defmodule RsolvHost.OutcomeTest do
             {:touched_path_too_deep, "than RSOLV verifies"},
             {:checkout_not_base, "isn't the commit RSOLV scanned"},
             {:base_facts_too_large, "too large for RSOLV to verify"},
+            {:base_check_too_large, "more directories than RSOLV checks"},
             {:base_read_failed, "Reading the base commit with git failed"},
             {:invalid_plan, "verify plan"},
             {{:platform, 409, "issue_terminal"}, "already published or rejected"},

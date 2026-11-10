@@ -1,5 +1,5 @@
 {
-  "_comment": "Synthetic test vector. The key is RFC 8032 section 7.1 TEST 1; the envelope was signed independently with Python's cryptography package.",
+  "_comment": "Synthetic test vector. The key is RFC 8032 section 7.1 TEST 1; the envelope was signed independently with Python's cryptography package. The root's base .gitattributes is \"*.js text eol=lf\\n\".",
   "secret_key_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
   "keys": [
     {
@@ -65,8 +65,22 @@
         "fix_commit_message": "fix: resolve issue #42"
       },
       "issued_at": "2026-11-05T12:00:00Z",
-      "expires_at": "2026-11-05T12:30:00Z"
+      "expires_at": "2026-11-05T12:30:00Z",
+      "base_attributes": [
+        {
+          "dir": "",
+          "blob_sha": "cbdcbbc258e6e757fe6f41a6e1827d407963b070"
+        },
+        {
+          "dir": "src",
+          "blob_sha": null
+        },
+        {
+          "dir": "test",
+          "blob_sha": null
+        }
+      ]
     },
-    "signature": "mZR5tqgSVasngSPJAzTAtoIdHNQDaBhdlGDBu-h7G7s4D-j11falz6o6tkbGjrr3AOgciVb7xta0u2mHUycsAQ"
+    "signature": "cmvMnR7yK1zUGlqtBRg5f-jiZEC_iPSJU00fWlDHXWTOOy7FAKMCSjzQceQ7JPfAgh5YMdML6w_fqYotWbb-BA"
   }
 }

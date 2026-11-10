@@ -9,7 +9,8 @@ defmodule RsolvCore.Decision do
   the response bytes and checks, in order: strict decoding, the shape (exactly the
   §6.1 fields, a canonical unpadded base64url signature), the key (`kid` known and
   not past `not_after`), the signature, the version, the schema, the validity
-  window, the change set and its digest, and finally the run binding.
+  window, the change set and its digest, the base attributes, and finally the run
+  binding.
 
   ## Schema
 
@@ -26,7 +27,14 @@ defmodule RsolvCore.Decision do
     plain text each), `comments` (`[{"issue" => positive integer,
     "body_sha256" => 64 lowercase hex}]`), `red_commit_message` and
     `fix_commit_message` (non-empty plain text, newlines allowed, at most 64 KiB);
-  - `issued_at` and `expires_at` are whole UTC seconds, `YYYY-MM-DDTHH:MM:SSZ`.
+  - `issued_at` and `expires_at` are whole UTC seconds, `YYYY-MM-DDTHH:MM:SSZ`;
+  - `base_attributes` is `[{"dir" => dir, "blob_sha" => sha | nil}]`, one entry
+    for each directory of `attribute_dirs/1` over the change set's paths, in that
+    order: the git blob SHA-1 (40 lowercase hex) of the directory's
+    `.gitattributes` in the base tree, or `nil` when it has none. At most
+    5,120 entries. The publish job checks each against the base before
+    it writes, so base facts that hid a `.gitattributes` can't reach a pull
+    request.
 
   ## Validity
 
@@ -35,7 +43,7 @@ defmodule RsolvCore.Decision do
   at, `expires_at`.
   """
 
-  alias RsolvCore.{CanonicalJson, ChangeSet, StrictJson, Text}
+  alias RsolvCore.{BaseFacts, CanonicalJson, ChangeSet, StrictJson, Text}
 
   @context "rsolv-decision-v1\n"
   @max_validity_s 30 * 60
@@ -47,10 +55,13 @@ defmodule RsolvCore.Decision do
   @binding ~w(check_run_id_publish issue publish_attempt repository_id run_id)
   @max_envelope_bytes 1024 * 1024
   @max_keys_bytes 64 * 1024
+  # ponytail: 2 × Policy.max_files (20) touched paths × 128 directories each, the
+  # depth base facts allow (root included). Raise it with the platform's policy.
+  @max_attribute_dirs 2 * 20 * 128
   @fields ~w(v kid decision_id run_id repository_id issue work_attempt verify_attempt
              publish_attempt check_run_id_work check_run_id_verify check_run_id_publish
              base_sha target_branch branch change_set change_set_digest red_paths
-             policy_version verify_mode effects issued_at expires_at)
+             policy_version verify_mode effects issued_at expires_at base_attributes)
           |> Enum.sort()
 
   @type key :: %{kid: String.t(), public_key: <<_::256>>, not_after: Date.t()}
@@ -65,6 +76,7 @@ defmodule RsolvCore.Decision do
           | :validity_too_long
           | :digest_mismatch
           | :bad_red_paths
+          | :bad_base_attributes
           | :malformed_change_set
           | :invalid_path
           | :invalid_entry
@@ -130,6 +142,7 @@ defmodule RsolvCore.Decision do
          :ok <- schema(decision),
          :ok <- validity(decision, now),
          {:ok, change_set} <- change_set(decision),
+         :ok <- base_attributes(decision["base_attributes"], change_set),
          :ok <- binding(decision, expect) do
       {:ok, %{decision: decision, change_set: change_set, envelope: envelope}}
     end
@@ -328,6 +341,40 @@ defmodule RsolvCore.Decision do
   end
 
   defp red_paths_added(_entries, _red_paths), do: {:error, :bad_red_paths}
+
+  @doc """
+  The directories whose `.gitattributes` can apply to `paths`: the root (`""`)
+  and every ancestor of each path, sorted by bytes, each once. `base_attributes`
+  lists exactly these.
+
+      iex> RsolvCore.Decision.attribute_dirs(["src/a/x.js", "src/b.js", "README"])
+      ["", "src", "src/a"]
+  """
+  @spec attribute_dirs([String.t()]) :: [String.t()]
+  def attribute_dirs(paths),
+    do:
+      paths
+      |> Enum.flat_map(&BaseFacts.ancestors/1)
+      |> then(&["" | &1])
+      |> Enum.uniq()
+      |> Enum.sort()
+
+  defp base_attributes(attributes, entries)
+       when is_list(attributes) and length(attributes) <= @max_attribute_dirs do
+    with true <- Enum.all?(attributes, &attribute?/1),
+         true <- Enum.map(attributes, & &1["dir"]) == attribute_dirs(Enum.map(entries, & &1.path)) do
+      :ok
+    else
+      false -> {:error, :bad_base_attributes}
+    end
+  end
+
+  defp base_attributes(_attributes, _entries), do: {:error, :bad_base_attributes}
+
+  defp attribute?(%{"dir" => dir, "blob_sha" => sha} = attribute) when map_size(attribute) == 2,
+    do: (dir == "" or ChangeSet.valid_path?(dir)) and (sha == nil or hex?(sha, 40))
+
+  defp attribute?(_attribute), do: false
 
   defp binding(decision, expect) do
     case Enum.find(expect, fn {field, value} -> decision[field] !== value end) do

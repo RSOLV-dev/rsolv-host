@@ -38,6 +38,7 @@ defmodule RsolvHost.Outcome do
     :unsupported_version,
     :digest_mismatch,
     :bad_red_paths,
+    :bad_base_attributes,
     :malformed_change_set,
     :invalid_path,
     :invalid_entry,
@@ -72,6 +73,7 @@ defmodule RsolvHost.Outcome do
   def classify(reason) when reason in @verify_errors, do: :configuration
   def classify({:binding_mismatch, _field}), do: :configuration
   def classify({:base_mismatch, _path}), do: :configuration
+  def classify({:attributes_mismatch, _dir}), do: :configuration
   def classify({:tree_mismatch, _path}), do: :configuration
   def classify(:branch_collision), do: :configuration
   def classify(:base_not_on_target), do: :configuration
@@ -80,6 +82,7 @@ defmodule RsolvHost.Outcome do
 
   def classify(:checkout_not_base), do: :configuration
   def classify(:base_facts_too_large), do: :configuration
+  def classify(:base_check_too_large), do: :configuration
   def classify(:invalid_plan), do: :configuration
   def classify(:verify_timed_out), do: :configuration
   def classify(:too_many_touched_paths), do: :configuration
@@ -230,6 +233,10 @@ defmodule RsolvHost.Outcome do
   defp message(reason, _class) when reason in [:too_many_touched_paths, :touched_path_too_deep],
     do:
       "This fix touches more files and directories (over 4,096) or deeper paths (over 128 levels) than RSOLV verifies; nothing will be published."
+
+  defp message(:base_check_too_large, _class),
+    do:
+      "This fix touches more directories than RSOLV checks on GitHub before publishing (#{RsolvHost.GitTree.max_tree_reads()} tree reads); nothing will be published."
 
   defp message({:platform, 413, _code}, _class), do: too_large()
 

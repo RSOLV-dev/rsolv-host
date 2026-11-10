@@ -105,6 +105,8 @@ defmodule RsolvHost.Roles.PublishTest do
     ]
   end
 
+  # Unless overridden, base_attributes says no directory of the change set has a
+  # .gitattributes, as in @base_files.
   defp decision(context, overrides \\ %{}) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
     entries = change_set()
@@ -144,6 +146,13 @@ defmodule RsolvHost.Roles.PublishTest do
       },
       overrides
     )
+    |> Map.put_new_lazy("base_attributes", fn ->
+      overrides
+      |> Map.get("change_set", ChangeSet.to_json(entries))
+      |> Enum.map(& &1["path"])
+      |> Decision.attribute_dirs()
+      |> Enum.map(&%{"dir" => &1, "blob_sha" => nil})
+    end)
   end
 
   defp sha256(text), do: :sha256 |> :crypto.hash(text) |> Base.encode16(case: :lower)
@@ -226,6 +235,20 @@ defmodule RsolvHost.Roles.PublishTest do
 
   defp run(context), do: Publish.run(%{issue: 7}, context.env, io: context.io)
 
+  # A fresh repository: @base_files and `files`.
+  defp reseeded(context, files) do
+    gh = FakeGithub.start()
+    %{context | gh: gh, base: FakeGithub.seed(gh, Map.merge(@base_files, files))}
+  end
+
+  # The default base_attributes, with `shas` (dir => blob SHA) signed in.
+  defp attributes(context, shas),
+    do:
+      for(
+        %{"dir" => dir} = attribute <- decision(context)["base_attributes"],
+        do: %{attribute | "blob_sha" => shas[dir]}
+      )
+
   defp posts(gh), do: for({"POST", path} <- FakeGithub.requests(gh), do: path)
 
   defp head(context) do
@@ -270,6 +293,14 @@ defmodule RsolvHost.Roles.PublishTest do
                "base" => "main"
              }
 
+      trees = for {"GET", "/git/trees/" <> sha} <- FakeGithub.requests(context.gh), do: sha
+      assert trees == Enum.uniq(trees)
+
+      assert Enum.count(
+               FakeGithub.requests(context.gh),
+               &(&1 == {"GET", "/git/commits/" <> base})
+             ) == 1
+
       assert labels == [{100, %{"labels" => ["rsolv:mitigated"]}}]
       assert comments == [{7, %{"body" => @comment_body}}]
 
@@ -282,6 +313,46 @@ defmodule RsolvHost.Roles.PublishTest do
                          "red_commit_sha" => ^red,
                          "fix_commit_sha" => ^fix
                        }}
+    end
+
+    test "when no directory has a .gitattributes, in the base or base_attributes", context do
+      platform(context)
+
+      assert [
+               %{"dir" => "", "blob_sha" => nil},
+               %{"dir" => "docs", "blob_sha" => nil},
+               %{"dir" => "lib", "blob_sha" => nil},
+               %{"dir" => "test", "blob_sha" => nil}
+             ] = decision(context)["base_attributes"]
+
+      assert run(context) == :ok
+    end
+
+    test "when each .gitattributes base_attributes signs is in the base with its blob",
+         context do
+      context =
+        reseeded(context, %{
+          ".gitattributes" => {"100644", "*.txt -text\n"},
+          "lib/.gitattributes" => {"100755", "*.rb text\n"}
+        })
+
+      signed = attributes(context, %{"" => blob("*.txt -text\n"), "lib" => blob("*.rb text\n")})
+      platform(context, decision: decision(context, %{"base_attributes" => signed}))
+
+      assert run(context) == :ok
+    end
+
+    test "when a .gitattributes base_attributes says none of is a symlink or a directory",
+         context do
+      context =
+        reseeded(context, %{
+          ".gitattributes" => {"120000", "elsewhere"},
+          "lib/.gitattributes/x" => {"100644", "*.rb text\n"}
+        })
+
+      platform(context)
+
+      assert run(context) == :ok
     end
 
     test "when the target branch moved on from the base, opens the PR with only signed effects",
@@ -358,6 +429,69 @@ defmodule RsolvHost.Roles.PublishTest do
       platform(context)
 
       refused(context, {:base_mismatch, "lib/app.rb"})
+    end
+
+    test "a change set whose checks could read more trees than the budget", context do
+      # 32 disjoint adds, each 127 directories deep: about 8,000 trees.
+      entries =
+        for n <- 1..32 do
+          %Entry{
+            path: "p#{n}/" <> String.duplicate("d/", 126) <> "f",
+            op: :add,
+            base_mode: nil,
+            base_blob_sha: nil,
+            mode: "100644",
+            new_blob_sha: blob("x")
+          }
+        end
+        |> Enum.sort_by(& &1.path)
+
+      decision =
+        decision(context, %{
+          "change_set" => ChangeSet.to_json(entries),
+          "change_set_digest" => ChangeSet.digest(entries),
+          "red_paths" => [hd(entries).path]
+        })
+
+      platform(context, decision: decision)
+
+      refused(context, :base_check_too_large)
+      assert FakeGithub.requests(context.gh) == []
+    end
+
+    test "a .gitattributes the base has where base_attributes says none", context do
+      context = reseeded(context, %{".gitattributes" => {"100644", "*.rb filter=lfs\n"}})
+      platform(context)
+
+      refused(context, {:attributes_mismatch, ""})
+    end
+
+    test "a .gitattributes whose blob differs from base_attributes", context do
+      context = reseeded(context, %{"lib/.gitattributes" => {"100644", "*.rb filter=lfs\n"}})
+      signed = attributes(context, %{"lib" => blob("*.rb text\n")})
+      platform(context, decision: decision(context, %{"base_attributes" => signed}))
+
+      refused(context, {:attributes_mismatch, "lib"})
+    end
+
+    test "a .gitattributes base_attributes signs that the base doesn't have", context do
+      signed = attributes(context, %{"test" => blob("*.rb text\n")})
+      platform(context, decision: decision(context, %{"base_attributes" => signed}))
+
+      refused(context, {:attributes_mismatch, "test"})
+    end
+
+    for {kind, files} <- [
+          symlink: %{"lib/.gitattributes" => {"120000", "*.rb text\n"}},
+          directory: %{"lib/.gitattributes/x" => {"100644", "*.rb text\n"}}
+        ] do
+      test "a #{kind} where base_attributes signs a .gitattributes file", context do
+        context = reseeded(context, unquote(Macro.escape(files)))
+        signed = attributes(context, %{"lib" => blob("*.rb text\n")})
+        platform(context, decision: decision(context, %{"base_attributes" => signed}))
+
+        refused(context, {:attributes_mismatch, "lib"})
+      end
     end
 
     test "no decision keys, or unparseable ones", context do
