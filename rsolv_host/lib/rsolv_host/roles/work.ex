@@ -16,8 +16,9 @@ defmodule RsolvHost.Roles.Work do
 
   Its containers and network carry the job's labels (`RsolvHost.Sandbox.labels/2`):
   a re-run first removes what an earlier attempt left. A runner stopping the
-  job (SIGTERM) removes the sandbox, proxy and network it made, by ID, and
-  ends the role with exit 4 (`RsolvHost.Sandbox.trap_sigterm/1`).
+  job (SIGTERM) removes the sandbox, proxy and network it made, by ID and
+  then by this VM's labels, and ends the role with exit 4
+  (`RsolvHost.Sandbox.trap_sigterm/2`).
   """
 
   alias RsolvHost.{
@@ -117,7 +118,7 @@ defmodule RsolvHost.Roles.Work do
 
     with {:ok, %{binding: %{"pipeline_run_id" => run, "base_sha" => base}}} <- token(ctx),
          :ok <- Workspace.copy(ctx.workspace, copy) do
-      trap = Sandbox.trap_sigterm()
+      trap = Sandbox.trap_sigterm(ctx.labels)
 
       try do
         Sandbox.remove_stale(ctx.labels)

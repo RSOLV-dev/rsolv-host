@@ -568,7 +568,7 @@ defmodule RsolvHost.Roles.VerifyTest do
   end
 
   describe "run/3's containers and time" do
-    test "labels each sandbox, proxy and network with its repository, run, issue and attempt",
+    test "labels each sandbox, proxy and network with its repository, run, issue, attempt and instance",
          context do
       platform(context)
       sandbox()
@@ -582,9 +582,12 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       assert length(labelled) == 6
 
-      assert Enum.uniq(labelled) == [
+      assert [[attempt, "rsolv.instance=" <> instance | rest]] = Enum.uniq(labelled)
+
+      assert [attempt | rest] ==
                ~w(rsolv.attempt=2 rsolv.issue=7 rsolv.repo=acme/app rsolv.run=41)
-             ]
+
+      assert instance =~ ~r/\A[0-9a-f]{16}\z/
     end
 
     for repository <- ["acme", "acme/app/x", "acme/a b", "acme/app\n", "-x/app"] do

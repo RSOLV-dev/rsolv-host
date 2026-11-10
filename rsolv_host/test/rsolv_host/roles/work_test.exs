@@ -459,7 +459,7 @@ defmodule RsolvHost.Roles.WorkTest do
   end
 
   describe "run/3's containers" do
-    test "labels its sandbox, proxy and network with its repository, run, issue and attempt",
+    test "labels its sandbox, proxy and network with its repository, run, issue, attempt and instance",
          context do
       platform()
       sandbox()
@@ -473,9 +473,12 @@ defmodule RsolvHost.Roles.WorkTest do
 
       assert length(labelled) == 3
 
-      assert Enum.uniq(labelled) == [
+      assert [[attempt, "rsolv.instance=" <> instance | rest]] = Enum.uniq(labelled)
+
+      assert [attempt | rest] ==
                ~w(rsolv.attempt=2 rsolv.issue=7 rsolv.repo=acme/app rsolv.run=41)
-             ]
+
+      assert instance =~ ~r/\A[0-9a-f]{16}\z/
     end
 
     for name <- ["GITHUB_RUN_ATTEMPT", "GITHUB_REPOSITORY"] do

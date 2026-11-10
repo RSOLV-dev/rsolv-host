@@ -234,7 +234,7 @@ defmodule RsolvHost.Roles.Verify do
 
   defp prove(ctx, plan, dirs) do
     Sandbox.remove_stale(ctx.labels)
-    trap = Sandbox.trap_sigterm()
+    trap = Sandbox.trap_sigterm(ctx.labels)
 
     try do
       ctx |> Map.put(:created, created(trap)) |> sides(plan, dirs)
