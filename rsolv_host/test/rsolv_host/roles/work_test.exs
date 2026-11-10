@@ -518,14 +518,16 @@ defmodule RsolvHost.Roles.WorkTest do
 
   describe "run/3 and its time budget" do
     # rsolv-work.yml runs the role, waits 30 s and runs it once more with
-    # --resume, all inside `timeout-minutes: 120`. The module's comment holds
-    # the table: the role ends at most 8 minutes past its budget.
-    test "fits both attempts, and the wait between them, in the job's 120 minutes" do
-      source = File.read!(Path.expand("../../../lib/rsolv_host/roles/work.ex", __DIR__))
-      [_, minutes] = Regex.run(~r/@budget_ms (\d+) \* 60 \* 1_000/, source)
-      attempt = String.to_integer(minutes) + 8
+    # --resume, all inside `timeout-minutes: 120`. The rows of the table in
+    # the module's `@budget_ms` comment, in minutes.
+    test "fits both attempts, the wait between them and the margin in the job's 120 minutes" do
+      job_setup = 10
+      past_budget = 8
+      wait = 0.5
+      margin = 13.5
+      attempt = Work.budget_ms() / 60_000 + past_budget
 
-      assert 10 + attempt + 0.5 + attempt + 10 <= 120
+      assert job_setup + attempt + wait + attempt + margin <= 120
     end
 
     test "counts the token exchange in the budget", context do

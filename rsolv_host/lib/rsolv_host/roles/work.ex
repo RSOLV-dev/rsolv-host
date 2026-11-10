@@ -15,8 +15,10 @@ defmodule RsolvHost.Roles.Work do
   run token and uses a fresh copy and fresh container names.
 
   Its containers and network carry the job's labels (`RsolvHost.Sandbox.labels/2`):
-  a re-run first removes what an earlier attempt left. A runner stopping the
-  job (SIGTERM) removes the sandbox, proxy and network it made, by ID and
+  a re-run first removes what an earlier attempt left. A `--resume` runs in
+  the same job, with the same `rsolv.attempt`, so that cleanup leaves the
+  first run's alone: the first run's `RsolvHost.Sandbox.stop/1` removes
+  them. A runner stopping the job (SIGTERM) removes the sandbox, proxy and network it made, by ID and
   then by this VM's labels, and ends the role with exit 4
   (`RsolvHost.Sandbox.trap_sigterm/2`).
   """
@@ -52,14 +54,35 @@ defmodule RsolvHost.Roles.Work do
   #   = 120
   #
   # The budget counts from the role's start: the token exchange (at most
-  # 13) and the copy (at most 10) come out of it. Every sandbox setup step,
-  # bootstrap (15 at most), each session and the upload are clamped to its
-  # deadline. Past it, one patch may still run (5, and timeout's 10 s KILL
-  # grace and the host's 30 s), and removing the sandbox takes at most 2
-  # minutes: 8. A role past its budget ends `session_timeout` (exit 3), so
-  # the resume, the `outcome` output and the cleanup all happen before
-  # GitHub stops the job.
+  # 13) and the copy come out of it. Every sandbox setup Docker step,
+  # bootstrap, each session and its tools, and the upload are clamped to its
+  # deadline. These aren't, so they can run past it (worst case, minutes):
+  #
+  #   stale cleanup (`Sandbox.remove_stale/1`: four 60 s Docker calls)    4
+  #   the proxy probe (30 tries of 2 s)                                    1
+  #   one patch (5, and timeout's 10 s KILL inside the host's 30 s)       5.5
+  #   the upload's run token (`TokenKeeper.token/1`: 15 s)                0.25
+  #   bootstrap, or a tool, ended by the host's 30 s grace                0.5
+  #   removing the sandbox, proxy and network (two 60 s Docker calls)     2
+  #
+  # The step running at the deadline overruns it and the next clamped step
+  # ends at once, so they don't all add up: the longest chain is one patch
+  # (the red one, as VALIDATE ends) and removing the sandbox, 7.5, inside
+  # the 8. Stale cleanup or the probe past the deadline come before any
+  # patch, so they replace it: 4 + 2, or 1 + 2.
+  #
+  # Two filesystem walks have no bound, and grow with the repository and
+  # what the sandbox installed: the copy's sanitising walk (it passes the
+  # deadline only if it alone takes the 27 the exchange leaves), and
+  # `Sandbox.stop/1` removing the sandbox's HOME and proxy directories
+  # (`Workspace.remove/1`). The margin, 6.75 an attempt, is for them, and
+  # nothing enforces it. A role past its budget ends `session_timeout`
+  # (exit 3), which the workflow resumes.
   @budget_ms 40 * 60 * 1_000
+
+  @doc "The role's default time budget, in milliseconds (`run/3`'s `:budget_ms`)."
+  @spec budget_ms() :: pos_integer()
+  def budget_ms, do: @budget_ms
 
   @doc """
   Runs the role. `deps` replaces collaborators in tests: `:io`, `:probe`,
