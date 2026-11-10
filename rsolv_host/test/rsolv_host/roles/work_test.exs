@@ -41,6 +41,7 @@ defmodule RsolvHost.Roles.WorkTest do
     Req.Test.stub(Platform, fn conn ->
       case {conn.method, conn.request_path} do
         {"POST", "/api/v1/runs/token"} ->
+          Process.sleep(Keyword.get(opts, :exchange_ms, 0))
           Req.Test.json(conn, token())
 
         {"POST", "/api/v1/runs/token/refresh"} ->
@@ -456,6 +457,43 @@ defmodule RsolvHost.Roles.WorkTest do
   end
 
   describe "run/3 and its time budget" do
+    # rsolv-work.yml runs the role, waits 30 s and runs it once more with
+    # --resume, all inside `timeout-minutes: 120`. The module's comment holds
+    # the table: the role ends at most 8 minutes past its budget.
+    test "fits both attempts, and the wait between them, in the job's 120 minutes" do
+      source = File.read!(Path.expand("../../../lib/rsolv_host/roles/work.ex", __DIR__))
+      [_, minutes] = Regex.run(~r/@budget_ms (\d+) \* 60 \* 1_000/, source)
+      attempt = String.to_integer(minutes) + 8
+
+      assert 10 + attempt + 0.5 + attempt + 10 <= 120
+    end
+
+    test "counts the token exchange in the budget", context do
+      platform(exchange_ms: 400)
+      sandbox()
+
+      result = Work.run(%{issue: 7}, context.env, deps(context, budget_ms: 300))
+
+      assert result == {:error, :session_timeout}
+      refute_received {:started, :validation, _}
+    end
+
+    test "clamps every sandbox setup step and bootstrap to the budget", context do
+      platform()
+      sandbox()
+
+      Work.run(%{issue: 7}, context.env, deps(context, budget_ms: 60_000))
+
+      assert for({"docker", ["run" | _], opts} <- FakeExec.calls(), do: opts[:timeout_ms])
+             |> Enum.all?(&(&1 <= 60_000))
+
+      assert {"docker",
+              ["exec", "-i", _, "timeout", "-k", _, seconds, "rsolv-sandbox", "bootstrap"], _} =
+               Enum.find(FakeExec.calls(), &match?({"docker", ["exec" | _], _}, &1))
+
+      assert String.to_integer(seconds) <= 60
+    end
+
     test "a patch ready after the role's deadline isn't uploaded", context do
       platform()
 

@@ -34,17 +34,36 @@ defmodule RsolvHost.Roles.Work do
   @bootstrap_max_bytes 1024 * 1024
   @patch_timeout_ms 300_000
   @patch_max_bytes 8 * 1024 * 1024
-  # Both attempts (the workflow retries once) fit GitHub's 6-hour job limit.
-  @budget_ms 150 * 60 * 1_000
+  # The role's time, under `rsolv-work.yml`'s `timeout-minutes: 120`, which
+  # holds the first run and, after an exit 3, a 30 s wait and one `--resume`
+  # (each its own budget), in minutes:
+  #
+  #     job setup before the role (checkout, host download and check)  10
+  #   + the first run: its budget and at most 8 past it                48
+  #   + the wait before --resume                                         0.5
+  #   + the resume: the same                                            48
+  #   + margin                                                          13.5
+  #   = 120
+  #
+  # The budget counts from the role's start: the token exchange (at most
+  # 13) and the copy (at most 10) come out of it. Every sandbox setup step,
+  # bootstrap (15 at most), each session and the upload are clamped to its
+  # deadline. Past it, one patch may still run (5, and timeout's 10 s KILL
+  # grace and the host's 30 s), and removing the sandbox takes at most 2
+  # minutes: 8. A role past its budget ends `session_timeout` (exit 3), so
+  # the resume, the `outcome` output and the cleanup all happen before
+  # GitHub stops the job.
+  @budget_ms 40 * 60 * 1_000
 
   @doc """
   Runs the role. `deps` replaces collaborators in tests: `:io`, `:probe`,
   `:stat` (passed to `RsolvHost.Sandbox.start/1`), `:backoff_ms` (passed to
   `RsolvHost.Relay.run_session/5`) and `:budget_ms`.
 
-  The role has one time budget (2.5 hours by default), from its start to the
-  upload: both sessions share its deadline, and a patch ready after it isn't
-  uploaded (`{:error, :session_timeout, :validated}`).
+  The role has one time budget (40 minutes by default), from its start to the
+  upload: the token exchange, sandbox setup, bootstrap and both sessions share
+  its deadline, and a patch ready after it isn't uploaded
+  (`{:error, :session_timeout, :validated}`).
   """
   @spec run(map(), map(), keyword()) :: Outcome.result()
   def run(%{issue: issue} = opts, env, deps \\ []) do
@@ -53,6 +72,8 @@ defmodule RsolvHost.Roles.Work do
 
     with {:ok, run_id} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
          {:ok, workspace} <- env_value(env, "GITHUB_WORKSPACE", ~r/\A\//),
+         deadline =
+           System.monotonic_time(:millisecond) + Keyword.get(deps, :budget_ms, @budget_ms),
          {:ok, keeper} <-
            TokenKeeper.start(role: :work, issue: issue, env: env, resume: resume?, io: io) do
       ctx = %{
@@ -63,7 +84,7 @@ defmodule RsolvHost.Roles.Work do
         keeper: keeper,
         workspace: workspace,
         suffix: if(resume?, do: "-2", else: ""),
-        deadline: System.monotonic_time(:millisecond) + Keyword.get(deps, :budget_ms, @budget_ms),
+        deadline: deadline,
         names: "rsolv-#{run_id}-#{issue}"
       }
 
@@ -112,7 +133,8 @@ defmodule RsolvHost.Roles.Work do
       name: ctx.names <> "-work" <> ctx.suffix,
       network: ctx.names <> "-net" <> ctx.suffix,
       copy_dir: copy,
-      runner_temp: ctx.env["RUNNER_TEMP"]
+      runner_temp: ctx.env["RUNNER_TEMP"],
+      deadline: ctx.deadline
     ]
     |> Keyword.merge(Keyword.take(ctx.deps, [:probe, :stat]))
     |> Sandbox.start()
@@ -131,7 +153,8 @@ defmodule RsolvHost.Roles.Work do
     with {:ok, %{output: output}} <-
            Sandbox.exec(ctx.sbx, ["rsolv-sandbox", "bootstrap"],
              input: Sandbox.bootstrap_input(ctx.env["RSOLV_EXACT_RUNTIME_VERSIONS"]),
-             timeout_ms: @bootstrap_timeout_ms,
+             timeout_ms:
+               min(@bootstrap_timeout_ms, ctx.deadline - System.monotonic_time(:millisecond)),
              max_bytes: @bootstrap_max_bytes
            ),
          %{"log_tail" => tail} = result when is_binary(tail) <- Relay.last_object(output) do
