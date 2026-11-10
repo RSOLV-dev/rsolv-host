@@ -293,6 +293,14 @@ defmodule RsolvHost.Roles.PublishTest do
                "base" => "main"
              }
 
+      trees = for {"GET", "/git/trees/" <> sha} <- FakeGithub.requests(context.gh), do: sha
+      assert trees == Enum.uniq(trees)
+
+      assert Enum.count(
+               FakeGithub.requests(context.gh),
+               &(&1 == {"GET", "/git/commits/" <> base})
+             ) == 1
+
       assert labels == [{100, %{"labels" => ["rsolv:mitigated"]}}]
       assert comments == [{7, %{"body" => @comment_body}}]
 
@@ -421,6 +429,34 @@ defmodule RsolvHost.Roles.PublishTest do
       platform(context)
 
       refused(context, {:base_mismatch, "lib/app.rb"})
+    end
+
+    test "a change set whose checks could read more trees than the budget", context do
+      # 32 disjoint adds, each 127 directories deep: about 8,000 trees.
+      entries =
+        for n <- 1..32 do
+          %Entry{
+            path: "p#{n}/" <> String.duplicate("d/", 126) <> "f",
+            op: :add,
+            base_mode: nil,
+            base_blob_sha: nil,
+            mode: "100644",
+            new_blob_sha: blob("x")
+          }
+        end
+        |> Enum.sort_by(& &1.path)
+
+      decision =
+        decision(context, %{
+          "change_set" => ChangeSet.to_json(entries),
+          "change_set_digest" => ChangeSet.digest(entries),
+          "red_paths" => [hd(entries).path]
+        })
+
+      platform(context, decision: decision)
+
+      refused(context, :base_check_too_large)
+      assert FakeGithub.requests(context.gh) == []
     end
 
     test "a .gitattributes the base has where base_attributes says none", context do

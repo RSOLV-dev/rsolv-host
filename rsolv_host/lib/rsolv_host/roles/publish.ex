@@ -84,11 +84,13 @@ defmodule RsolvHost.Roles.Publish do
          {:ok, expires_at, 0} <- DateTime.from_iso8601(verified.decision["expires_at"]),
          ctx = until(ctx, expires_at),
          :ok <- no_workflow_paths(verified.change_set),
+         :ok <- GitTree.within_budget(verified.change_set, verified.decision["red_paths"]),
          {:ok, bodies} <- bodies(verified),
          {:ok, images} <- post_images(ctx, verified.change_set),
-         :ok <- check_base(ctx, verified),
+         {:ok, base} <- check_base(ctx, verified),
          :ok <- on_target(ctx, verified.decision),
-         {:ok, commits} <- write_commits(ctx, verified.decision, verified.change_set, images),
+         {:ok, commits} <-
+           write_commits(ctx, verified.decision, verified.change_set, images, base),
          {:ok, pull} <- earlier_pull(ctx, verified.decision, bodies, commits) do
       finish(ctx, verified.decision, bodies, commits, pull)
     else
@@ -175,10 +177,14 @@ defmodule RsolvHost.Roles.Publish do
   end
 
   # The change set's base paths, then the .gitattributes the decision signs for
-  # their directories: base facts that hid one never reach a write.
+  # their directories: base facts that hid one never reach a write. The base
+  # tree and the tree cache go on to the writes and their checks.
   defp check_base(ctx, %{decision: decision, change_set: change_set}) do
-    with :ok <- GitTree.check_base(ctx.gh, decision["base_sha"], change_set),
-         do: GitTree.check_attributes(ctx.gh, decision["base_sha"], decision["base_attributes"])
+    with {:ok, tree} <- GitTree.tree(ctx.gh, decision["base_sha"]),
+         {:ok, cache} <- GitTree.check_base(ctx.gh, tree, change_set, %{}),
+         {:ok, cache} <-
+           GitTree.check_attributes(ctx.gh, tree, decision["base_attributes"], cache),
+         do: {:ok, %{tree: tree, cache: cache}}
   end
 
   # RFC-150 §3: the signed base must be reachable from the target's head before
@@ -193,23 +199,27 @@ defmodule RsolvHost.Roles.Publish do
     end
   end
 
-  defp write_commits(ctx, decision, change_set, images) do
+  defp write_commits(ctx, decision, change_set, images, %{tree: base_tree, cache: cache}) do
     {red, rest} = Enum.split_with(change_set, &(&1.path in decision["red_paths"]))
     base = decision["base_sha"]
     effects = decision["effects"]
 
-    with {:ok, %{"tree" => %{"sha" => base_tree}}} <- GitHub.get_commit(ctx.gh, base),
-         {:ok, red_tree} <- tree(ctx, base_tree, red, images),
+    with {:ok, red_tree} <- tree(ctx, base_tree, red, images),
          {:ok, red_commit} <-
            GitHub.create_commit(ctx.gh, effects["red_commit_message"], red_tree, [base]),
          {:ok, fix_tree} <- tree(ctx, red_tree, rest, images),
          {:ok, fix_commit} <-
            GitHub.create_commit(ctx.gh, effects["fix_commit_message"], fix_tree, [red_commit]),
-         :ok <- GitTree.check_result(ctx.gh, red_commit, red),
-         :ok <- GitTree.check_result(ctx.gh, fix_commit, change_set) do
+         {:ok, cache} <- check_result(ctx, red_commit, red, cache),
+         {:ok, _cache} <- check_result(ctx, fix_commit, change_set, cache) do
       {:ok,
        %{red: red_commit, fix: fix_commit, red_tree: red_tree, fix_tree: fix_tree, base: base}}
     end
+  end
+
+  defp check_result(ctx, commit, entries, cache) do
+    with {:ok, tree} <- GitTree.tree(ctx.gh, commit),
+         do: GitTree.check_result(ctx.gh, tree, entries, cache)
   end
 
   defp tree(ctx, base_tree, entries, images) do
