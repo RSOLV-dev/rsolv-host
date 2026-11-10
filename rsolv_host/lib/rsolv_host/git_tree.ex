@@ -18,6 +18,8 @@ defmodule RsolvHost.GitTree do
   @type cache :: %{optional(String.t()) => [map()]}
 
   @regular ["100644", "100755"]
+  # A directory, a symlink and a submodule: git reads no attributes from them.
+  @not_files [{"tree", "040000"}, {"blob", "120000"}, {"commit", "160000"}]
 
   @doc "Looks `path` up in the tree `tree_sha`."
   @spec lookup(GitHub.t(), String.t(), String.t(), cache()) ::
@@ -77,8 +79,8 @@ defmodule RsolvHost.GitTree do
   @doc """
   §6.2 step 2, for the decision's `base_attributes`: in `base_commit`, each
   `<dir>/.gitattributes` with a `blob_sha` is a regular file with that blob, and
-  each without one is absent or not a regular file (a symlink or a directory),
-  which git doesn't read attributes from.
+  each without one is absent, a directory, a symlink or a submodule, which git
+  doesn't read attributes from. Any other entry is a mismatch.
   """
   @spec check_attributes(GitHub.t(), String.t(), [attribute()]) :: :ok | {:error, term()}
   def check_attributes(gh, base_commit, attributes) do
@@ -147,10 +149,15 @@ defmodule RsolvHost.GitTree do
   defp attributes_path(""), do: ".gitattributes"
   defp attributes_path(dir), do: dir <> "/.gitattributes"
 
-  defp attributes?(sha, {:ok, %{type: "blob", mode: mode, sha: found}, _cache})
-       when mode in @regular,
-       do: sha == found
+  defp attributes?(sha, {:ok, %{type: "blob", mode: mode, sha: sha}, _cache})
+       when mode in @regular and is_binary(sha),
+       do: sha =~ ~r/\A[0-9a-f]{40}\z/
 
-  defp attributes?(nil, _absent_or_not_a_file), do: true
-  defp attributes?(_sha, _absent_or_not_a_file), do: false
+  defp attributes?(nil, {:absent, _cache}), do: true
+
+  defp attributes?(nil, {:ok, %{type: type, mode: mode}, _cache})
+       when {type, mode} in @not_files,
+       do: true
+
+  defp attributes?(_sha, _found), do: false
 end

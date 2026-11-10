@@ -186,6 +186,59 @@ defmodule RsolvHost.GitTreeTest do
       end
     end
 
+    # GitHub answering the root tree with `entry` named .gitattributes.
+    defp root_entry(entry) do
+      tree = String.duplicate("e", 40)
+
+      Req.Test.stub(GitHub, fn conn ->
+        case conn.request_path do
+          "/repos/acme/app/git/commits/" <> _sha ->
+            Req.Test.json(conn, %{"tree" => %{"sha" => tree}})
+
+          "/repos/acme/app/git/trees/" <> _sha ->
+            entry = Map.put(entry, "path", ".gitattributes")
+            Req.Test.json(conn, %{"sha" => tree, "tree" => [entry], "truncated" => false})
+        end
+      end)
+
+      String.duplicate("c", 40)
+    end
+
+    @attributes_sha String.duplicate("a", 40)
+
+    for {kind, entry} <- [
+          tree: %{"mode" => "040000", "type" => "tree", "sha" => String.duplicate("1", 40)},
+          symlink: %{"mode" => "120000", "type" => "blob", "sha" => String.duplicate("2", 40)},
+          gitlink: %{"mode" => "160000", "type" => "commit", "sha" => String.duplicate("3", 40)}
+        ] do
+      test "accepts none where .gitattributes is a #{kind}", %{gh: gh} do
+        base = root_entry(unquote(Macro.escape(entry)))
+        assert GitTree.check_attributes(gh, base, [attribute("")]) == :ok
+      end
+    end
+
+    for {label, entry} <- [
+          "a regular blob without a SHA": %{"mode" => "100644", "type" => "blob", "sha" => nil},
+          "a regular blob missing its SHA": %{"mode" => "100644", "type" => "blob"},
+          "a tree mode typed blob": %{"mode" => "040000", "type" => "blob", "sha" => nil},
+          "an unknown mode": %{"mode" => "100664", "type" => "blob", "sha" => nil}
+        ] do
+      test "refuses none where .gitattributes is #{label}", %{gh: gh} do
+        base = root_entry(unquote(Macro.escape(entry)))
+
+        assert GitTree.check_attributes(gh, base, [attribute("")]) ==
+                 {:error, {:attributes_mismatch, ""}}
+      end
+    end
+
+    test "refuses a SHA where the regular blob's SHA isn't 40 lowercase hex", %{gh: gh} do
+      upper = String.upcase(@attributes_sha)
+      base = root_entry(%{"mode" => "100644", "type" => "blob", "sha" => upper})
+
+      assert GitTree.check_attributes(gh, base, [attribute("", upper)]) ==
+               {:error, {:attributes_mismatch, ""}}
+    end
+
     test "refuses a path under a blob", %{gh: gh, attributes_base: base} do
       assert GitTree.check_attributes(gh, base, [attribute("lib/app.rb")]) ==
                {:error, {:attributes_mismatch, "lib/app.rb"}}
