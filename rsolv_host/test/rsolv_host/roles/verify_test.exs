@@ -203,6 +203,17 @@ defmodule RsolvHost.Roles.VerifyTest do
 
   defp run(context), do: Verify.run(%{issue: 7}, context.env, deps(context))
 
+  # Whether a SIGTERM trap (`RsolvHost.Sandbox.trap_sigterm/2`) that suspends
+  # `pid` is installed: the trap's function closes over the process it suspends.
+  defp sigterm_trapped_by?(pid) do
+    :erl_signal_server
+    |> :sys.get_state()
+    |> Enum.any?(fn
+      {System.SignalHandler, _id, {:sigterm, fun}} -> pid in elem(:erlang.fun_info(fun, :env), 1)
+      _other -> false
+    end)
+  end
+
   defp docker_calls, do: for({"docker", _args, _opts} = call <- FakeExec.calls(), do: call)
 
   defp requests(acc \\ []) do
@@ -628,6 +639,21 @@ defmodule RsolvHost.Roles.VerifyTest do
              ] = docker_calls()
 
       assert Enum.take(ps, 6) == identity and Enum.take(ls, 6) == identity
+    end
+
+    test "traps SIGTERM before it removes what an earlier attempt left", context do
+      platform(context)
+
+      sandbox([
+        {fn {"docker", ["ps", "-a" | _], _} ->
+           send(self(), {:stale_cleanup, sigterm_trapped_by?(self())})
+           false
+         end, :unused}
+      ])
+
+      run(context)
+
+      assert_received {:stale_cleanup, true}
     end
 
     test "fits every sandbox stage in the role's budget, RED in half of it", context do
