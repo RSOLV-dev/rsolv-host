@@ -88,5 +88,70 @@ defmodule RsolvHost.Roles.WorkDockerTest do
       for made <- names, do: refute(KilledVm.alive?(made), made)
       assert Enum.all?([twin, sibling, other_repo], &KilledVm.alive?/1)
     end
+
+    test "while it removes what an earlier attempt left, still ends with exit 4",
+         %{tmp_dir: dir} do
+      checkout = Path.join(dir, "checkout")
+      File.mkdir_p!(checkout)
+
+      env = %{
+        "RUNNER_TEMP" => dir,
+        "GITHUB_WORKSPACE" => checkout,
+        "GITHUB_RUN_ID" => "#{System.unique_integer([:positive])}",
+        "GITHUB_RUN_ATTEMPT" => "2",
+        "GITHUB_REPOSITORY" => "acme/app",
+        "RSOLV_API_URL" => "https://api.rsolv.ai.",
+        "ACTIONS_ID_TOKEN_REQUEST_URL" => "https://token.actions.example/id?v=1",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN" => "t"
+      }
+
+      # The role's first `docker ps` (stale cleanup) hangs; any other docker
+      # call, the trap's included, is real.
+      script = """
+      {:ok, _} = Application.ensure_all_started(:req)
+
+      defmodule StaleCleanupHangs do
+        def run("docker", ["ps" | _] = args, opts) do
+          if Process.whereis(:hung) do
+            RsolvHost.Exec.run("docker", args, opts)
+          else
+            Process.register(self(), :hung)
+            IO.puts("ready " <> System.pid())
+            Process.sleep(:infinity)
+          end
+        end
+
+        def run(executable, args, opts), do: RsolvHost.Exec.run(executable, args, opts)
+        def open(executable, args, opts), do: RsolvHost.Exec.open(executable, args, opts)
+        def command(port, data, deadline), do: RsolvHost.Exec.command(port, data, deadline)
+      end
+
+      for {key, value} <- [
+            exec: StaleCleanupHangs,
+            oidc_audience: "https://api.rsolv.dev",
+            "Elixir.RsolvHost.Oidc": [
+              req_options: [plug: &Req.Test.json(&1, %{value: "e30.e30.sig"}), retry: false]
+            ],
+            "Elixir.RsolvHost.Platform": [
+              req_options: [plug: &Req.Test.json(&1, RsolvHost.PlatformStub.token())]
+            ]
+          ],
+          do: Application.put_env(:rsolv_host, key, value)
+
+      try do
+        RsolvHost.Roles.Work.run(%{issue: 7}, #{inspect(env)}, io: :stderr)
+      after
+        IO.puts("after ran")
+      end
+      """
+
+      port = KilledVm.start(script)
+      pid = KilledVm.ready(port)
+      {_, 0} = System.cmd("kill", ["-TERM", pid])
+
+      assert {status, output} = KilledVm.exited(port)
+      assert status == 4
+      refute output =~ "after ran"
+    end
   end
 end

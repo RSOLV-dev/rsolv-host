@@ -117,10 +117,10 @@ defmodule RsolvHost.Roles.Work do
 
     with {:ok, %{binding: %{"pipeline_run_id" => run, "base_sha" => base}}} <- token(ctx),
          :ok <- Workspace.copy(ctx.workspace, copy) do
-      Sandbox.remove_stale(ctx.labels)
       trap = Sandbox.trap_sigterm()
 
       try do
+        Sandbox.remove_stale(ctx.labels)
         ctx |> Map.merge(%{run: run, base: base, created: created(trap)}) |> sandboxed(copy)
       after
         Sandbox.untrap_sigterm(trap)
