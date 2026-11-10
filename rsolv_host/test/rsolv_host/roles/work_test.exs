@@ -23,6 +23,8 @@ defmodule RsolvHost.Roles.WorkTest do
       "RUNNER_TEMP" => dir,
       "GITHUB_WORKSPACE" => workspace,
       "GITHUB_RUN_ID" => "41",
+      "GITHUB_RUN_ATTEMPT" => "2",
+      "GITHUB_REPOSITORY" => "acme/app",
       "ACTIONS_ID_TOKEN_REQUEST_URL" => "https://token.actions.example/id?v=1",
       "ACTIONS_ID_TOKEN_REQUEST_TOKEN" => "t"
     }
@@ -453,6 +455,61 @@ defmodule RsolvHost.Roles.WorkTest do
 
       assert ["run", "-d", "--name", "rsolv-41-7-work-2", "--network", "rsolv-41-7-net-2" | _] =
                List.last(docker_runs())
+    end
+  end
+
+  describe "run/3's containers" do
+    test "labels its sandbox, proxy and network with its repository, run, issue and attempt",
+         context do
+      platform()
+      sandbox()
+
+      Work.run(%{issue: 7}, context.env, deps(context))
+
+      labelled =
+        for {"docker", args, _} <- FakeExec.calls(),
+            match?(["run" | _], args) or match?(["network", "create" | _], args),
+            do: for([flag, value] <- Enum.chunk_every(args, 2, 1), flag == "--label", do: value)
+
+      assert length(labelled) == 3
+
+      assert Enum.uniq(labelled) == [
+               ~w(rsolv.attempt=2 rsolv.issue=7 rsolv.repo=acme/app rsolv.run=41)
+             ]
+    end
+
+    for name <- ["GITHUB_RUN_ATTEMPT", "GITHUB_REPOSITORY"] do
+      test "needs #{name}, which labels its containers, before anything runs", context do
+        platform()
+        sandbox()
+        env = Map.delete(context.env, unquote(name))
+
+        assert Work.run(%{issue: 7}, env, deps(context)) ==
+                 {:error, {:missing_env, unquote(name)}}
+
+        assert FakeExec.calls() == []
+      end
+    end
+
+    test "first removes, by ID, what an earlier attempt of this issue left", context do
+      platform()
+
+      FakeExec.script([
+        {fn {"docker", ["ps", "-a" | _], _} -> true end,
+         {:ok, %{status: 0, output: "aaa\t1\nbbb\t2\n"}}},
+        {fn {"docker", ["network", "ls" | _], _} -> true end,
+         {:ok, %{status: 0, output: "nnn\t1\n"}}}
+      ])
+
+      Work.run(%{issue: 7}, context.env, deps(context))
+
+      assert [
+               {"docker", ["ps", "-a" | _], _},
+               {"docker", ["rm", "-f", "aaa"], _},
+               {"docker", ["network", "ls" | _], _},
+               {"docker", ["network", "rm", "nnn"], _},
+               {"docker", ["network", "create" | _], _} | _
+             ] = for({"docker", _, _} = call <- FakeExec.calls(), do: call)
     end
   end
 

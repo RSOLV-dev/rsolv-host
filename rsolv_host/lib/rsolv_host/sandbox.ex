@@ -58,6 +58,8 @@ defmodule RsolvHost.Sandbox do
   @pull_timeout_ms 900_000
   @kill_after_s "10"
   @host_grace_ms 30_000
+  # owner/name, as GitHub allows them: label values never carry more.
+  @repository ~r/\A[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}\z/
 
   @doc """
   The `docker run` argv for the sandbox. `opts` has `:name`, `:network`,
@@ -584,6 +586,37 @@ defmodule RsolvHost.Sandbox do
     :erlang.suspend_process(pid)
   rescue
     ArgumentError -> false
+  end
+
+  @doc """
+  The labels a role's containers and networks carry (`start/1`,
+  `remove_stale/2`): the job's repository, run and attempt, from `env`, and
+  `issue`. A missing or malformed variable is `{:error, {:missing_env, name}}`.
+  """
+  @spec labels(map(), pos_integer()) ::
+          {:ok, %{String.t() => String.t()}} | {:error, {:missing_env, String.t()}}
+  def labels(env, issue) do
+    with {:ok, run} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
+         {:ok, attempt} <- env_value(env, "GITHUB_RUN_ATTEMPT", ~r/\A[0-9]{1,5}\z/),
+         {:ok, repository} <- env_value(env, "GITHUB_REPOSITORY", @repository) do
+      {:ok,
+       %{
+         "rsolv.repo" => repository,
+         "rsolv.run" => run,
+         "rsolv.issue" => Integer.to_string(issue),
+         "rsolv.attempt" => attempt
+       }}
+    end
+  end
+
+  defp env_value(env, name, format) do
+    case env[name] do
+      value when is_binary(value) ->
+        if value =~ format, do: {:ok, value}, else: {:error, {:missing_env, name}}
+
+      nil ->
+        {:error, {:missing_env, name}}
+    end
   end
 
   @doc """

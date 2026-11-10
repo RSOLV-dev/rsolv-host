@@ -94,8 +94,6 @@ defmodule RsolvHost.Roles.Verify do
   # reserve before the verification is posted.
   @budget_ms 100 * 60 * 1_000
   @reserve_ms 5 * 60 * 1_000
-  # owner/name, as GitHub allows them: label values never carry more.
-  @repository ~r/\A[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}\z/
   @bound ~w(change_set_digest red_digest policy_version)
   @rejections ["issue_rejected", "not_eligible"]
 
@@ -109,9 +107,7 @@ defmodule RsolvHost.Roles.Verify do
   def run(%{issue: issue}, env, deps \\ []) do
     io = Keyword.get(deps, :io, :stdio)
 
-    with {:ok, run_id} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
-         {:ok, attempt} <- env_value(env, "GITHUB_RUN_ATTEMPT", ~r/\A[0-9]{1,5}\z/),
-         {:ok, repository} <- env_value(env, "GITHUB_REPOSITORY", @repository),
+    with {:ok, labels} <- Sandbox.labels(env, issue),
          {:ok, workspace} <- env_value(env, "GITHUB_WORKSPACE", ~r/\A\//),
          {:ok, root} <- copies_root(env, workspace),
          deadline = now() + Keyword.get(deps, :budget_ms, @budget_ms),
@@ -126,13 +122,8 @@ defmodule RsolvHost.Roles.Verify do
         root: root,
         deadline: deadline,
         stages: deadline - @reserve_ms,
-        labels: %{
-          "rsolv.repo" => repository,
-          "rsolv.run" => run_id,
-          "rsolv.issue" => Integer.to_string(issue),
-          "rsolv.attempt" => attempt
-        },
-        names: "rsolv-#{run_id}-#{attempt}-#{issue}-verify"
+        labels: labels,
+        names: "rsolv-#{labels["rsolv.run"]}-#{labels["rsolv.attempt"]}-#{issue}-verify"
       }
 
       try do

@@ -13,6 +13,11 @@ defmodule RsolvHost.Roles.Work do
 
   `--resume` (the workflow's one retry, on exit 3) refreshes the first attempt's
   run token and uses a fresh copy and fresh container names.
+
+  Its containers and network carry the job's labels (`RsolvHost.Sandbox.labels/2`):
+  a re-run first removes what an earlier attempt left. A runner stopping the
+  job (SIGTERM) removes the sandbox, proxy and network it made, by ID, and
+  ends the role with exit 4 (`RsolvHost.Sandbox.trap_sigterm/1`).
   """
 
   alias RsolvHost.{
@@ -70,7 +75,7 @@ defmodule RsolvHost.Roles.Work do
     resume? = Map.get(opts, :resume, false)
     io = Keyword.get(deps, :io, :stdio)
 
-    with {:ok, run_id} <- env_value(env, "GITHUB_RUN_ID", ~r/\A[0-9]{1,20}\z/),
+    with {:ok, labels} <- Sandbox.labels(env, issue),
          {:ok, workspace} <- env_value(env, "GITHUB_WORKSPACE", ~r/\A\//),
          deadline =
            System.monotonic_time(:millisecond) + Keyword.get(deps, :budget_ms, @budget_ms),
@@ -85,7 +90,8 @@ defmodule RsolvHost.Roles.Work do
         workspace: workspace,
         suffix: if(resume?, do: "-2", else: ""),
         deadline: deadline,
-        names: "rsolv-#{run_id}-#{issue}"
+        labels: labels,
+        names: "rsolv-#{labels["rsolv.run"]}-#{issue}"
       }
 
       try do
@@ -110,10 +116,25 @@ defmodule RsolvHost.Roles.Work do
     copy = Path.join([ctx.env["RUNNER_TEMP"], "rsolv", "work" <> ctx.suffix])
 
     with {:ok, %{binding: %{"pipeline_run_id" => run, "base_sha" => base}}} <- token(ctx),
-         :ok <- Workspace.copy(ctx.workspace, copy),
-         {:ok, sbx} <- start_sandbox(ctx, copy) do
+         :ok <- Workspace.copy(ctx.workspace, copy) do
+      Sandbox.remove_stale(ctx.labels)
+      trap = Sandbox.trap_sigterm()
+
       try do
-        ctx |> Map.merge(%{sbx: sbx, run: run, base: base}) |> work()
+        ctx |> Map.merge(%{run: run, base: base, created: created(trap)}) |> sandboxed(copy)
+      after
+        Sandbox.untrap_sigterm(trap)
+      end
+    end
+  end
+
+  defp created({:ok, %{created: created}}), do: created
+  defp created({:error, _not_trapped}), do: nil
+
+  defp sandboxed(ctx, copy) do
+    with {:ok, sbx} <- start_sandbox(ctx, copy) do
+      try do
+        ctx |> Map.put(:sbx, sbx) |> work()
       after
         Sandbox.stop(sbx)
       end
@@ -134,7 +155,9 @@ defmodule RsolvHost.Roles.Work do
       network: ctx.names <> "-net" <> ctx.suffix,
       copy_dir: copy,
       runner_temp: ctx.env["RUNNER_TEMP"],
-      deadline: ctx.deadline
+      deadline: ctx.deadline,
+      labels: ctx.labels,
+      created: ctx.created
     ]
     |> Keyword.merge(Keyword.take(ctx.deps, [:probe, :stat]))
     |> Sandbox.start()
