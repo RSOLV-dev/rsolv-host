@@ -83,7 +83,12 @@ defmodule RsolvHost.SandboxDockerTest do
     test "reaches allowlisted hosts through the proxy, and nothing else", %{sbx: sbx} do
       code = ["curl", "-s", "-m", "20", "-o", "/dev/null", "-w"]
 
-      assert run(sbx, code ++ ["%{http_code}", "https://api.github.com/zen"]).output == "200"
+      # The proxy's CONNECT reply proves the allowlist; any HTTP status from
+      # GitHub proves the tunnel carried TLS (unauthenticated calls from shared
+      # runner IPs can be rate-limited to 403).
+      assert run(sbx, code ++ ["%{http_connect} %{http_code}", "https://api.github.com/zen"]).output =~
+               ~r/\A200 [1-5]\d\d\z/
+
       assert run(sbx, code ++ ["%{http_connect}", "https://example.com"]).output == "403"
       assert run(sbx, code ++ ["%{http_connect}", "https://1.1.1.1"]).output == "403"
     end
