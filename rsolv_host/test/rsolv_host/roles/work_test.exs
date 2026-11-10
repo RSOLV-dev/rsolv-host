@@ -3,7 +3,7 @@ defmodule RsolvHost.Roles.WorkTest do
 
   import RsolvHost.PlatformStub
 
-  alias RsolvHost.{FakeExec, Frame, Oidc, Platform, TokenKeeper}
+  alias RsolvHost.{FakeExec, Frame, Oidc, Outcome, Platform, TokenKeeper}
   alias RsolvHost.Roles.Work
 
   @moduletag :tmp_dir
@@ -549,6 +549,23 @@ defmodule RsolvHost.Roles.WorkTest do
                Enum.find(FakeExec.calls(), &match?({"docker", ["exec" | _], _}, &1))
 
       assert String.to_integer(seconds) <= 60
+    end
+
+    test "a setup step the deadline stops is session_timeout, which the resume retries",
+         context do
+      platform()
+
+      FakeExec.script([
+        {fn {"docker", ["network", "create" | _], opts} ->
+           Process.sleep(opts[:timeout_ms])
+           true
+         end, {:error, :timeout}}
+      ])
+
+      result = Work.run(%{issue: 7}, context.env, deps(context, budget_ms: 500))
+
+      assert result == {:error, :session_timeout}
+      assert Outcome.exit_code(result) == 3
     end
 
     test "a patch ready after the role's deadline isn't uploaded", context do

@@ -273,9 +273,14 @@ defmodule RsolvHost.Roles.Verify do
         end
 
       {:error, reason} ->
-        {:verify_error, "sandbox", reason}
+        {:verify_error, "sandbox", sandbox_reason(reason)}
     end
   end
+
+  # A Docker step its side's deadline stopped is the sandbox's failure, as a
+  # bootstrap it stopped is: a side's deadline isn't the role's budget.
+  defp sandbox_reason(:session_timeout), do: {:sandbox, :deadline}
+  defp sandbox_reason(reason), do: reason
 
   # The project's steps run under the disk watchdog, from what the copy and
   # HOME use once bootstrap has set up the toolchains.
@@ -364,7 +369,7 @@ defmodule RsolvHost.Roles.Verify do
   defp offline(sbx) do
     case Sandbox.disconnect(sbx) do
       :ok -> :ok
-      {:error, reason} -> {:verify_error, "sandbox", reason}
+      {:error, reason} -> {:verify_error, "sandbox", sandbox_reason(reason)}
     end
   end
 

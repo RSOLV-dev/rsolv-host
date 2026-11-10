@@ -127,11 +127,16 @@ defmodule RsolvHost.Sandbox do
   `:labels` (on its containers and network, for `remove_stale/2`),
   `:created` (a `trap_sigterm/1` registry, told every container and network
   ID as it's made) and `:deadline` (monotonic milliseconds: no setup step
-  runs past it). It removes them by those IDs, never by name.
+  runs past it, and one it stops is `:session_timeout`). It removes them by
+  those IDs, never by name.
   """
   @spec start(keyword()) ::
           {:ok, t()}
-          | {:error, {:sandbox_setup, atom()} | {:sandbox, :enoent} | :sandbox_image_unpinned}
+          | {:error,
+             {:sandbox_setup, atom()}
+             | {:sandbox, :enoent}
+             | :sandbox_image_unpinned
+             | :session_timeout}
   def start(opts) do
     image =
       Keyword.get_lazy(opts, :image, fn -> Application.fetch_env!(:rsolv_host, :sandbox_image) end)
@@ -311,6 +316,7 @@ defmodule RsolvHost.Sandbox do
          {:ok, _address} <- :inet.parse_strict_address(String.to_charlist(ip)) do
       {:ok, ip}
     else
+      {:error, :session_timeout} = late -> late
       _not_an_address -> {:error, {:sandbox_setup, :proxy_inspect}}
     end
   end
@@ -342,18 +348,27 @@ defmodule RsolvHost.Sandbox do
     with {:ok, _output} <- docker(sbx, name, args, timeout_ms), do: :ok
   end
 
+  # A step the deadline cut short (its time left was at most its own limit)
+  # and that then timed out is `:session_timeout`, not the step failing.
   defp docker(sbx, name, args, timeout_ms) do
-    case sbx.exec.run("docker", args, timeout_ms: within(timeout_ms, sbx.deadline)) do
+    {limit, cut} = within(timeout_ms, sbx.deadline)
+
+    case sbx.exec.run("docker", args, timeout_ms: limit) do
       {:ok, %{status: 0, output: output}} -> {:ok, output}
       {:error, :enoent} -> {:error, {:sandbox, :enoent}}
+      {:error, :timeout} when cut == :deadline -> {:error, :session_timeout}
       _failed -> {:error, {:sandbox_setup, name}}
     end
   end
 
-  defp within(timeout_ms, nil), do: timeout_ms
+  defp within(timeout_ms, nil), do: {timeout_ms, :step}
 
-  defp within(timeout_ms, deadline),
-    do: timeout_ms |> min(deadline - System.monotonic_time(:millisecond)) |> max(0)
+  defp within(timeout_ms, deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      left when left <= timeout_ms -> {max(left, 0), :deadline}
+      _room -> {timeout_ms, :step}
+    end
+  end
 
   @doc """
   Runs `argv` in the sandbox as `docker exec -i <container> timeout -k 10 <s>

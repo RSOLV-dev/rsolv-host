@@ -866,6 +866,26 @@ defmodule RsolvHost.Roles.VerifyTest do
       assert Outcome.exit_code(result) == 4
     end
 
+    test "a setup step its side's deadline stops is still a sandbox error (exit 4)", context do
+      platform(context, %{
+        "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+      })
+
+      sandbox([
+        {fn {"docker", ["network", "create" | _], opts} ->
+           Process.sleep(opts[:timeout_ms])
+           true
+         end, {:error, :timeout}}
+      ])
+
+      result =
+        Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: 5 * 60_000 + 1_000])
+
+      assert_received {:request, "verification", %{"error" => "sandbox"}}
+      assert result == {:error, {:sandbox, :deadline}}
+      assert Outcome.exit_code(result) == 4
+    end
+
     for {label, answer} <- [
           {"missing", {:ok, %{status: 1, output: "cat: /tmp/r.json: No such file"}}},
           {"over the platform's 4 MiB cap", {:error, :output_too_large}}
