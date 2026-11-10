@@ -69,7 +69,8 @@ What falls in each class:
 - **1, host bug:** an exception, exit or throw inside `rsolv-host`, or a process it depends on
   ending abnormally. The release always exits; it never hangs until the job timeout.
 - **2, configuration:** missing permissions or variables, a platform or GitHub refusal (4xx, or
-  any redirect, which is never followed), a signed decision refused or expired, a target branch
+  any redirect, which is never followed), a signed decision refused or expired, a base whose files or
+  `.gitattributes` differ from what the decision signs, a target branch
   that no longer contains the scanned commit, a fix branch or pull request that already holds
   something else, a fix touching `.github/`, a verify checkout that isn't the scanned commit,
   base files or touched paths too many or too large to verify, a verify plan this host refuses, an issue already published

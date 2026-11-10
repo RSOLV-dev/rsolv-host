@@ -61,6 +61,8 @@ defmodule RsolvHost.OutcomeTest do
               :decision_keys_invalid,
               :publish_unavailable,
               {:base_mismatch, "a"},
+              {:attributes_mismatch, "a"},
+              :bad_base_attributes,
               {:tree_mismatch, "a"},
               :branch_collision,
               {:missing_env, "GITHUB_RUN_ID"}

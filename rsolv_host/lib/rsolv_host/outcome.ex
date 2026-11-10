@@ -38,6 +38,7 @@ defmodule RsolvHost.Outcome do
     :unsupported_version,
     :digest_mismatch,
     :bad_red_paths,
+    :bad_base_attributes,
     :malformed_change_set,
     :invalid_path,
     :invalid_entry,
@@ -72,6 +73,7 @@ defmodule RsolvHost.Outcome do
   def classify(reason) when reason in @verify_errors, do: :configuration
   def classify({:binding_mismatch, _field}), do: :configuration
   def classify({:base_mismatch, _path}), do: :configuration
+  def classify({:attributes_mismatch, _dir}), do: :configuration
   def classify({:tree_mismatch, _path}), do: :configuration
   def classify(:branch_collision), do: :configuration
   def classify(:base_not_on_target), do: :configuration

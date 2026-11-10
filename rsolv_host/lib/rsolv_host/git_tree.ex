@@ -1,7 +1,8 @@
 defmodule RsolvHost.GitTree do
   @moduledoc """
-  Checks a change set against GitHub's trees (RFC-150 §6.2): the base before any
-  write (step 2), and the written commits after (step 5).
+  Checks a change set against GitHub's trees (RFC-150 §6.2): the base, and the
+  `.gitattributes` the decision signs for it, before any write (step 2), and the
+  written commits after (step 5).
 
   Lookups read one non-recursive tree per directory, memoized by tree SHA, so a
   change set costs one request per directory it touches, and a truncated listing
@@ -13,7 +14,10 @@ defmodule RsolvHost.GitTree do
   alias RsolvHost.GitHub
 
   @type found :: %{mode: String.t(), type: String.t(), sha: String.t()}
+  @type attribute :: %{String.t() => String.t() | nil}
   @type cache :: %{optional(String.t()) => [map()]}
+
+  @regular ["100644", "100755"]
 
   @doc "Looks `path` up in the tree `tree_sha`."
   @spec lookup(GitHub.t(), String.t(), String.t(), cache()) ::
@@ -63,7 +67,27 @@ defmodule RsolvHost.GitTree do
   """
   @spec check_base(GitHub.t(), String.t(), [Entry.t()]) :: :ok | {:error, term()}
   def check_base(gh, base_commit, entries),
-    do: check(gh, base_commit, entries, :base_mismatch, &base?/2)
+    do:
+      check(
+        gh,
+        base_commit,
+        for(e <- entries, do: {e.path, {:base_mismatch, e.path}, &base?(e, &1)})
+      )
+
+  @doc """
+  §6.2 step 2, for the decision's `base_attributes`: in `base_commit`, each
+  `<dir>/.gitattributes` with a `blob_sha` is a regular file with that blob, and
+  each without one is absent or not a regular file (a symlink or a directory),
+  which git doesn't read attributes from.
+  """
+  @spec check_attributes(GitHub.t(), String.t(), [attribute()]) :: :ok | {:error, term()}
+  def check_attributes(gh, base_commit, attributes) do
+    checks =
+      for %{"dir" => dir, "blob_sha" => sha} <- attributes,
+          do: {attributes_path(dir), {:attributes_mismatch, dir}, &attributes?(sha, &1)}
+
+    check(gh, base_commit, checks)
+  end
 
   @doc """
   §6.2 step 5: in `commit`, every `add` and `modify` is a blob with its `mode`
@@ -71,32 +95,33 @@ defmodule RsolvHost.GitTree do
   """
   @spec check_result(GitHub.t(), String.t(), [Entry.t()]) :: :ok | {:error, term()}
   def check_result(gh, commit, entries),
-    do: check(gh, commit, entries, :tree_mismatch, &result?/2)
+    do:
+      check(
+        gh,
+        commit,
+        for(e <- entries, do: {e.path, {:tree_mismatch, e.path}, &result?(e, &1)})
+      )
 
-  defp check(gh, commit, entries, mismatch, expected?) do
+  # Each check is `{path, mismatch, expected?}`, looked up through one cache.
+  defp check(gh, commit, checks) do
     with {:ok, %{"tree" => %{"sha" => tree}}} <- GitHub.get_commit(gh, commit),
-         {:ok, _cache} <-
-           Enum.reduce_while(
-             entries,
-             {:ok, %{}},
-             &check_entry(gh, tree, &1, &2, mismatch, expected?)
-           ) do
+         {:ok, _cache} <- Enum.reduce_while(checks, {:ok, %{}}, &check_path(gh, tree, &1, &2)) do
       :ok
     end
   end
 
-  defp check_entry(gh, tree, entry, {:ok, cache}, mismatch, expected?) do
-    case lookup(gh, tree, entry.path, cache) do
+  defp check_path(gh, tree, {path, mismatch, expected?}, {:ok, cache}) do
+    case lookup(gh, tree, path, cache) do
       {:error, :ancestor_not_tree} ->
-        {:halt, {:error, {mismatch, entry.path}}}
+        {:halt, {:error, mismatch}}
 
       {:error, _reason} = error ->
         {:halt, error}
 
       found ->
-        if expected?.(entry, found),
+        if expected?.(found),
           do: {:cont, {:ok, cache_of(found)}},
-          else: {:halt, {:error, {mismatch, entry.path}}}
+          else: {:halt, {:error, mismatch}}
     end
   end
 
@@ -118,4 +143,14 @@ defmodule RsolvHost.GitTree do
        do: found == %{mode: mode, type: "blob", sha: sha}
 
   defp result?(_entry, _found), do: false
+
+  defp attributes_path(""), do: ".gitattributes"
+  defp attributes_path(dir), do: dir <> "/.gitattributes"
+
+  defp attributes?(sha, {:ok, %{type: "blob", mode: mode, sha: found}, _cache})
+       when mode in @regular,
+       do: sha == found
+
+  defp attributes?(nil, _absent_or_not_a_file), do: true
+  defp attributes?(_sha, _absent_or_not_a_file), do: false
 end

@@ -126,6 +126,72 @@ defmodule RsolvHost.GitTreeTest do
     end
   end
 
+  describe "check_attributes/3" do
+    setup %{agent: agent} do
+      base =
+        FakeGithub.seed(agent, %{
+          ".gitattributes" => {"100644", "* text=auto\n"},
+          "lib/.gitattributes" => {"100755", "*.rb text\n"},
+          "lib/app.rb" => {"100644", "puts 1\n"},
+          "bin/.gitattributes" => {"120000", "../.gitattributes"},
+          "bin/run" => {"100755", "#!/bin/sh\n"},
+          "doc/.gitattributes/x" => {"100644", "x\n"},
+          "doc/a.md" => {"100644", "a\n"},
+          "src/main.rb" => {"100644", "m\n"}
+        })
+
+      %{attributes_base: base}
+    end
+
+    defp attribute(dir, sha \\ nil), do: %{"dir" => dir, "blob_sha" => sha}
+
+    test "accepts each file with its blob, and none where there is none or no directory",
+         %{agent: agent, gh: gh, attributes_base: base} do
+      attributes = [
+        attribute("", ChangeSet.blob_sha("* text=auto\n")),
+        attribute("lib", ChangeSet.blob_sha("*.rb text\n")),
+        attribute("new"),
+        attribute("src")
+      ]
+
+      gets = tree_gets(agent)
+      assert GitTree.check_attributes(gh, base, attributes) == :ok
+      assert tree_gets(agent) - gets == 3
+    end
+
+    test "accepts none where a symlink or a directory is named .gitattributes",
+         %{gh: gh, attributes_base: base} do
+      assert GitTree.check_attributes(gh, base, [attribute("bin"), attribute("doc")]) == :ok
+    end
+
+    test "refuses none where there is a file", %{gh: gh, attributes_base: base} do
+      assert GitTree.check_attributes(gh, base, [attribute("lib")]) ==
+               {:error, {:attributes_mismatch, "lib"}}
+    end
+
+    test "refuses a blob that differs", %{gh: gh, attributes_base: base} do
+      assert GitTree.check_attributes(gh, base, [attribute("", ChangeSet.blob_sha("*\n"))]) ==
+               {:error, {:attributes_mismatch, ""}}
+    end
+
+    for dir <- ["src", "new", "bin", "doc"] do
+      test "refuses a file where #{dir}/.gitattributes isn't one", %{
+        gh: gh,
+        attributes_base: base
+      } do
+        sha = ChangeSet.blob_sha("../.gitattributes")
+
+        assert GitTree.check_attributes(gh, base, [attribute(unquote(dir), sha)]) ==
+                 {:error, {:attributes_mismatch, unquote(dir)}}
+      end
+    end
+
+    test "refuses a path under a blob", %{gh: gh, attributes_base: base} do
+      assert GitTree.check_attributes(gh, base, [attribute("lib/app.rb")]) ==
+               {:error, {:attributes_mismatch, "lib/app.rb"}}
+    end
+  end
+
   describe "check_result/3" do
     setup %{agent: agent, gh: gh, base: base, tree: tree} do
       entries = [
