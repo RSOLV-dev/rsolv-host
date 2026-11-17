@@ -1,10 +1,20 @@
 defmodule RsolvCore.VerifyPlan do
   @moduledoc """
-  The platform-built verify plan (RFC-150 §5) as the host receives it. The host
-  runs `rsolv-sandbox bootstrap`, then `install` (online, behind the proxy),
-  disconnects the sandbox, runs `prepare` and `test` offline, and reads the
-  report with `report.argv` (`null` means the test's own output is the
-  report). It never runs a command from the work job.
+  The platform-built verify plan (RFC-150 §5) as the host receives it. In a
+  BUILD sandbox on the base alone, the host runs `rsolv-sandbox bootstrap`,
+  then `install` (online, behind the proxy), disconnects the sandbox and runs
+  `prepare` offline. In an offline TEST sandbox on a copy of that build with
+  the change set written in, it runs each `test_prepare` step, then `test`,
+  and reads the report with `report.argv` (`null` means the test's own
+  output is the report). It never runs a command from the work job.
+
+  `v` is 1 or 2. A v1 plan's `prepare` runs only `rm`, so a host that still
+  runs `prepare` after writing the change set (0.1.0) runs no project code
+  there. v2 needs a host that builds on the base (0.2.0): its `prepare` may
+  run project tooling, and it adds `test_prepare` (0–8 argvs) and `env`, whose
+  keys are among #{inspect(~w(MIX_ENV RACK_ENV RAILS_ENV))} and whose every value is
+  `"test"`; the host sets it on every TEST step and nowhere else. v1 has
+  neither key, and decodes with `test_prepare: []` and `env: %{}`.
 
   Every argv is 1–256 arguments of 1–4096 bytes of `RsolvCore.Text.plain?/1`
   text. Its executable must be one of #{inspect(~w(npx python bundle mix mvn vendor/bin/phpunit cat rm find))}.
@@ -26,6 +36,8 @@ defmodule RsolvCore.VerifyPlan do
     :framework,
     :install,
     :prepare,
+    :test_prepare,
+    :env,
     :test,
     :report,
     :install_timeout_s,
@@ -43,6 +55,8 @@ defmodule RsolvCore.VerifyPlan do
           framework: String.t(),
           install: [argv()],
           prepare: [argv()],
+          test_prepare: [argv()],
+          env: %{optional(String.t()) => String.t()},
           test: argv(),
           report: %{format: String.t(), argv: argv() | nil},
           install_timeout_s: pos_integer(),
@@ -63,15 +77,32 @@ defmodule RsolvCore.VerifyPlan do
   @max_arg_bytes 4096
   @max_steps 8
   @max_timeout_s 3_600
+  @env_keys ~w(MIX_ENV RACK_ENV RAILS_ENV)
   @fields ~w(v framework install prepare test report install_timeout_s test_timeout_s change_set
              change_set_digest red_paths red_digest policy_version)
           |> Enum.sort()
+  @fields_v2 Enum.sort(@fields ++ ~w(test_prepare env))
 
   @doc "Decodes and checks a plan's JSON form."
   @spec decode(term()) :: {:ok, t()} | {:error, :invalid_plan}
   def decode(%{"v" => 1} = json) do
     with true <- json |> Map.keys() |> Enum.sort() == @fields,
-         true <- json["framework"] in @frameworks,
+         true <- Enum.all?(List.wrap(json["prepare"]), &match?(["rm" | _], &1)),
+         do: checked(Map.merge(json, %{"test_prepare" => [], "env" => %{}})),
+         else: (_invalid -> {:error, :invalid_plan})
+  end
+
+  def decode(%{"v" => 2} = json) do
+    with true <- json |> Map.keys() |> Enum.sort() == @fields_v2,
+         true <- steps?(json["test_prepare"]) and env?(json["env"]),
+         do: checked(json),
+         else: (_invalid -> {:error, :invalid_plan})
+  end
+
+  def decode(_json), do: {:error, :invalid_plan}
+
+  defp checked(json) do
+    with true <- json["framework"] in @frameworks,
          true <- steps?(json["install"]) and steps?(json["prepare"]) and argv?(json["test"]),
          {:ok, report} <- report(json["report"]),
          true <- timeout?(json["install_timeout_s"]) and timeout?(json["test_timeout_s"]),
@@ -85,6 +116,8 @@ defmodule RsolvCore.VerifyPlan do
          framework: json["framework"],
          install: json["install"],
          prepare: json["prepare"],
+         test_prepare: json["test_prepare"],
+         env: json["env"],
          test: json["test"],
          report: report,
          install_timeout_s: json["install_timeout_s"],
@@ -99,8 +132,6 @@ defmodule RsolvCore.VerifyPlan do
       _invalid -> {:error, :invalid_plan}
     end
   end
-
-  def decode(_json), do: {:error, :invalid_plan}
 
   @doc "The RED snapshot's entries: the adds `red_paths` names, each exactly once."
   @spec red([ChangeSet.Entry.t()], term()) :: {:ok, [ChangeSet.Entry.t()]} | :error
@@ -158,6 +189,11 @@ defmodule RsolvCore.VerifyPlan do
        do: if(argv?(argv), do: {:ok, %{format: format, argv: argv}}, else: :error)
 
   defp report(_report), do: :error
+
+  defp env?(env) when is_map(env),
+    do: Enum.all?(env, fn {key, value} -> key in @env_keys and value == "test" end)
+
+  defp env?(_env), do: false
 
   defp timeout?(seconds), do: is_integer(seconds) and seconds in 1..@max_timeout_s
 end
