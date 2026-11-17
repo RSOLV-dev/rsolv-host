@@ -490,6 +490,22 @@ defmodule RsolvHost.SandboxTest do
       assert opts[:max_bytes] == 8
     end
 
+    test "sets :env as -e values on the exec, before the container", %{tmp_dir: dir} do
+      script_inspect()
+      {:ok, sbx} = Sandbox.start(start_opts(dir))
+
+      Sandbox.exec(sbx, ["true"],
+        timeout_ms: 5_000,
+        env: %{"RAILS_ENV" => "test", "MIX_ENV" => "test"}
+      )
+
+      assert {"docker",
+              ["exec", "-i", "-e", "MIX_ENV=test", "-e", "RAILS_ENV=test", "rsolv-41-7-work" | _],
+              opts} = List.last(FakeExec.calls())
+
+      refute Keyword.has_key?(opts, :env)
+    end
+
     test "never asks coreutils for a zero timeout, which would mean none", %{tmp_dir: dir} do
       script_inspect()
       {:ok, sbx} = Sandbox.start(start_opts(dir))
@@ -654,6 +670,25 @@ defmodule RsolvHost.SandboxTest do
 
       assert Sandbox.stop_confirmed(sbx) == :error
       assert File.dir?(home)
+    end
+
+    test "gives each docker call at most what's left before its deadline, and none past it",
+         %{tmp_dir: dir} do
+      FakeExec.script([gone()] ++ inspect_rules())
+      {:ok, sbx} = Sandbox.start(start_opts(dir))
+
+      deadline = System.monotonic_time(:millisecond) + 5_000
+      assert Sandbox.stop_confirmed(sbx, :stdio, deadline) == :ok
+
+      limits =
+        for {"docker", args, opts} <- FakeExec.calls(),
+            match?(["rm" | _], args) or match?(["inspect", "--type" | _], args),
+            do: opts[:timeout_ms]
+
+      assert length(limits) == 3 and Enum.all?(limits, &(&1 <= 5_000))
+
+      past = System.monotonic_time(:millisecond) - 1
+      assert Sandbox.stop_confirmed(sbx, :stdio, past) == :error
     end
 
     test "never inspects past a failed rm", %{tmp_dir: dir} do

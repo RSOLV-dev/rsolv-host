@@ -18,7 +18,11 @@ defmodule RsolvHost.Workspace do
   # repositoryformatversion 1 and its extensions.objectFormat kept.
   @git_config "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n"
 
-  @doc "Copies the tree at `src` into a new directory `dest`. Option: `:exec`."
+  @doc """
+  Copies the tree at `src` into a new directory `dest`. Options: `:exec`, and
+  `:timeout_ms`, what's left of the caller's time: cp gets that or 10
+  minutes, whichever is less.
+  """
   @spec copy(Path.t(), Path.t(), keyword()) ::
           :ok | {:error, :exists | {:sandbox_setup, :copy} | {:sandbox, :enoent}}
   def copy(src, dest, opts \\ []) do
@@ -29,7 +33,9 @@ defmodule RsolvHost.Workspace do
     else
       File.mkdir_p!(dest)
 
-      case exec.run("cp", ["-a", "--", src <> "/.", dest], timeout_ms: @copy_timeout_ms) do
+      timeout_ms = opts |> Keyword.get(:timeout_ms, @copy_timeout_ms) |> min(@copy_timeout_ms)
+
+      case exec.run("cp", ["-a", "--", src <> "/.", dest], timeout_ms: timeout_ms) do
         {:ok, %{status: 0}} -> dest |> Path.join(".git") |> sanitize()
         {:error, :enoent} -> {:error, {:sandbox, :enoent}}
         _failed -> {:error, {:sandbox_setup, :copy}}

@@ -409,16 +409,19 @@ defmodule RsolvHost.Sandbox do
   @doc """
   Runs `argv` in the sandbox as `docker exec -i <container> timeout -k 10 <s>
   <argv…>`, where `s` is `:timeout_ms` in whole seconds (at least 1), with a host
-  deadline 30 s later. Takes `run/3`'s `:input` and `:max_bytes`.
+  deadline 30 s later. Takes `run/3`'s `:input` and `:max_bytes`, and `:env`
+  (name => value), each set with `-e`.
   """
   @spec exec(t(), [String.t()], keyword()) :: RsolvHost.Exec.result()
   def exec(sbx, argv, opts) do
+    {env, opts} = Keyword.pop(opts, :env, %{})
     timeout_ms = Keyword.get(opts, :timeout_ms, 60_000)
     seconds = timeout_ms |> div(1_000) |> max(1) |> Integer.to_string()
+    env = for {name, value} <- Enum.sort(env), arg <- ["-e", name <> "=" <> value], do: arg
 
     sbx.exec.run(
       "docker",
-      ["exec", "-i", sbx.container, "timeout", "-k", @kill_after_s, seconds | argv],
+      ["exec", "-i" | env] ++ [sbx.container, "timeout", "-k", @kill_after_s, seconds | argv],
       Keyword.merge(opts, timeout_ms: timeout_ms + @host_grace_ms)
     )
   end
@@ -576,29 +579,34 @@ defmodule RsolvHost.Sandbox do
   the directories the sandbox made, and answer `:ok`. A failure, a timeout,
   any other answer, or a sandbox whose container ID was never recorded, is
   `:error`, and every directory stays: something may still be running in
-  it.
+  it. With a `deadline` (monotonic milliseconds), each call gets at most
+  what's left before it, and one with nothing left is `:error`.
   """
-  @spec stop_confirmed(t() | nil, IO.device()) :: :ok | :error
-  def stop_confirmed(sbx, io \\ :stdio)
-  def stop_confirmed(nil, _io), do: :ok
+  @spec stop_confirmed(t() | nil, IO.device(), integer() | nil) :: :ok | :error
+  def stop_confirmed(sbx, io \\ :stdio, deadline \\ nil)
+  def stop_confirmed(nil, _io, _deadline), do: :ok
 
-  def stop_confirmed(%__MODULE__{ids: %{sandbox: _}} = sbx, io) do
+  def stop_confirmed(%__MODULE__{ids: %{sandbox: _}} = sbx, io, deadline) do
     ids = Enum.flat_map([:sandbox, :proxy], &List.wrap(sbx.ids[&1]))
+    # 60 s per call, or what's left before the deadline.
+    limit = fn -> @setup_timeout_ms |> within(deadline) |> elem(0) end
 
-    with :ok <- remove(sbx.exec, ["rm", "-f"], ids),
-         true <- Enum.all?(ids, &gone?(sbx.exec, &1)) do
-      remove(sbx.exec, ["network", "rm"], List.wrap(sbx.ids[:network]))
+    with :ok <- remove(sbx.exec, ["rm", "-f"], ids, limit.()),
+         true <- Enum.all?(ids, &gone?(sbx.exec, &1, limit.())) do
+      remove(sbx.exec, ["network", "rm"], List.wrap(sbx.ids[:network]), limit.())
       Enum.each(sbx.dirs, &remove_dir(&1, io))
     else
       _not_confirmed -> :error
     end
   end
 
-  def stop_confirmed(_unrecorded, _io), do: :error
+  def stop_confirmed(_unrecorded, _io, _deadline), do: :error
 
-  defp gone?(exec, id) do
+  defp gone?(_exec, _id, 0), do: false
+
+  defp gone?(exec, id, limit_ms) do
     case exec.run("docker", ["inspect", "--type", "container", "--format", "{{.Id}}", id],
-           timeout_ms: @setup_timeout_ms
+           timeout_ms: limit_ms
          ) do
       {:ok, %{status: status, output: output}} when status != 0 ->
         String.trim(output) =~
@@ -621,10 +629,12 @@ defmodule RsolvHost.Sandbox do
     end
   end
 
-  defp remove(_exec, _command, []), do: :ok
+  defp remove(exec, command, ids, limit_ms \\ @setup_timeout_ms)
+  defp remove(_exec, _command, [], _limit_ms), do: :ok
+  defp remove(_exec, _command, _ids, 0), do: :error
 
-  defp remove(exec, command, ids) do
-    case exec.run("docker", command ++ ids, timeout_ms: @setup_timeout_ms) do
+  defp remove(exec, command, ids, limit_ms) do
+    case exec.run("docker", command ++ ids, timeout_ms: limit_ms) do
       {:ok, %{status: 0}} -> :ok
       _failed -> :error
     end

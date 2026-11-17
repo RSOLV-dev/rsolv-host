@@ -25,6 +25,17 @@ defmodule RsolvHost.WorkspaceTest do
       assert [{"cp", ["-a", "--", "/home/runner/work/repo/.", ^dest], _opts}] = FakeExec.calls()
     end
 
+    test "gives cp ten minutes, or less when :timeout_ms is less", %{tmp_dir: dir} do
+      FakeExec.script([])
+
+      Workspace.copy("/src", Path.join(dir, "a"))
+      Workspace.copy("/src", Path.join(dir, "b"), timeout_ms: 1_234)
+      Workspace.copy("/src", Path.join(dir, "c"), timeout_ms: 3_600_000)
+
+      assert [600_000, 1_234, 600_000] =
+               for({"cp", _, opts} <- FakeExec.calls(), do: opts[:timeout_ms])
+    end
+
     test "when the destination already exists, refuses to reuse it", %{tmp_dir: dir} do
       FakeExec.script([])
 
