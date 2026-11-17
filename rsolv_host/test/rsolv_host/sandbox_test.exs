@@ -37,6 +37,17 @@ defmodule RsolvHost.SandboxTest do
     ])
   end
 
+  defp inspect_rules do
+    [
+      {fn {"docker", ["inspect", "-f", template, "rsolv-41-7-work-proxy"], _} ->
+         template =~ "rsolv-41-7-net"
+       end, ok("172.18.0.2\n")},
+      {fn {"docker", ["inspect", "-f", template, "rsolv-41-7-work-proxy"], _} ->
+         template =~ "bridge"
+       end, ok("172.17.0.5\n")}
+    ]
+  end
+
   describe "run_args/1" do
     test "is exactly the hardened sandbox, behind the proxy" do
       opts = %{
@@ -114,7 +125,8 @@ defmodule RsolvHost.SandboxTest do
               uid <- positive_integer(),
               gid <- positive_integer(),
               name <- string(:alphanumeric, min_length: 1),
-              ip <- member_of(["172.18.0.2", "10.0.0.9"])
+              ip <- member_of(["172.18.0.2", "10.0.0.9"]),
+              read_only <- boolean()
             ) do
         args =
           Sandbox.run_args(%{
@@ -126,24 +138,103 @@ defmodule RsolvHost.SandboxTest do
             gid: gid,
             proxy_ip: ip,
             image: @image,
-            egress: egress
+            egress: egress,
+            read_only: read_only
           })
 
         for ["-e", value] <- Enum.chunk_every(args, 2, 1), do: assert(value =~ "=")
 
-        for forbidden <- [
-              "--env-file",
-              "--privileged",
-              "/var/run/docker.sock",
-              "--add-host",
-              "host-gateway",
-              "host.docker.internal"
-            ] do
+        assert for(["-v", mount] <- Enum.chunk_every(args, 2, 1), do: mount) ==
+                 ["/c/#{name}:/work", "/h/#{name}:/opt/home"]
+
+        refute Enum.any?(args, &(&1 in ["--volume", "--mount", "--volumes-from", "--device"]))
+
+        for flag <- ~w(--env-file --privileged --pid --ipc --cap-add --userns --add-host) do
+          refute Enum.any?(args, &(&1 == flag or String.starts_with?(&1, flag <> "="))), flag
+        end
+
+        for forbidden <- ["docker.sock", "host-gateway", "host.docker.internal"] do
           refute Enum.any?(args, &String.contains?(&1, forbidden)), forbidden
         end
 
         refute "host" in args
       end
+    end
+  end
+
+  describe "run_args/1 with :read_only (TEST)" do
+    defp test_args(read_only) do
+      %{
+        name: "s",
+        network: "n",
+        copy_dir: "/c",
+        home_dir: "/h",
+        uid: 1,
+        gid: 1,
+        proxy_ip: nil,
+        image: @image,
+        egress: :none
+      }
+      |> Map.merge(if read_only == :unset, do: %{}, else: %{read_only: read_only})
+      |> Sandbox.run_args()
+    end
+
+    test "makes the root filesystem read-only, pins /dev/shm at 64 MiB and keeps the /tmp tmpfs" do
+      args = test_args(true)
+
+      assert "--read-only" in args
+      assert ["--shm-size", "64m"] in Enum.chunk_every(args, 2, 1)
+      assert ["--tmpfs", "/tmp:exec,size=1g"] in Enum.chunk_every(args, 2, 1)
+    end
+
+    test "leaves BUILD's argv as it was" do
+      assert test_args(false) == test_args(:unset)
+      refute "--read-only" in test_args(false)
+      refute "--shm-size" in test_args(false)
+    end
+  end
+
+  describe "make_home/2" do
+    test "makes a fresh 0700 directory the host's user owns, under RUNNER_TEMP/rsolv",
+         %{tmp_dir: dir} do
+      assert {:ok, home} = Sandbox.make_home(dir, "rsolv-41-7-verify-red-build")
+      assert home == Path.join([dir, "rsolv", "home-rsolv-41-7-verify-red-build"])
+
+      assert %{type: :directory, uid: uid, mode: mode} = File.stat!(home)
+      assert uid == File.stat!(dir).uid
+      assert Bitwise.band(mode, 0o777) == 0o700
+    end
+
+    test "refuses a directory that's already there, and leaves it alone", %{tmp_dir: dir} do
+      home = Path.join([dir, "rsolv", "home-x"])
+      File.mkdir_p!(home)
+      File.chmod!(home, 0o755)
+
+      assert Sandbox.make_home(dir, "x") == {:error, :exists}
+      assert Bitwise.band(File.stat!(home).mode, 0o777) == 0o755
+    end
+  end
+
+  describe "start/1 with :home_dir and :read_only" do
+    test "mounts a HOME it was given, measures it, and never removes it", %{tmp_dir: dir} do
+      FakeExec.script([gone()])
+      {:ok, home} = Sandbox.make_home(dir, "given")
+
+      assert {:ok, sbx} = Sandbox.start(start_opts(dir, egress: :none, home_dir: home))
+      assert (home <> ":/opt/home") in List.last(docker_args())
+      refute File.exists?(Path.join([dir, "rsolv", "home-rsolv-41-7-work"]))
+      assert sbx.home == home
+
+      assert Sandbox.stop_confirmed(sbx) == :ok
+      assert File.dir?(home)
+    end
+
+    test "passes :read_only to the sandbox's run", %{tmp_dir: dir} do
+      FakeExec.script([])
+
+      {:ok, _sbx} = Sandbox.start(start_opts(dir, egress: :none, read_only: true))
+
+      assert "--read-only" in List.last(docker_args())
     end
   end
 
@@ -311,7 +402,7 @@ defmodule RsolvHost.SandboxTest do
         sbx: %Sandbox{
           container: "s",
           copy_dir: Path.join(dir, "c"),
-          dirs: [Path.join(dir, "h")],
+          home: Path.join(dir, "h"),
           exec: FakeExec
         }
       }
@@ -340,7 +431,7 @@ defmodule RsolvHost.SandboxTest do
         sbx: %Sandbox{
           container: "s",
           copy_dir: Path.join(dir, "c"),
-          dirs: [Path.join(dir, "h")],
+          home: Path.join(dir, "h"),
           ids: %{sandbox: "i"},
           exec: FakeExec
         }
@@ -445,6 +536,142 @@ defmodule RsolvHost.SandboxTest do
 
     test "stop is a no-op when nothing started" do
       assert Sandbox.stop(nil) == :ok
+    end
+  end
+
+  # `docker inspect` answering that each container it's asked about is gone.
+  defp gone do
+    {fn {"docker", ["inspect", "--type", "container" | _], _} -> true end,
+     fn {"docker", args, _} ->
+       {:ok,
+        %{
+          status: 1,
+          output: "Error response from daemon: No such container: #{List.last(args)}\n"
+        }}
+     end}
+  end
+
+  describe "stop_confirmed/1" do
+    defp owned(dir),
+      do: Enum.map(["home-", "proxy-"], &Path.join([dir, "rsolv", &1 <> "rsolv-41-7-work"]))
+
+    test "is :ok only once rm -f exits 0 and Docker says each container is gone, then removes its directories",
+         %{tmp_dir: dir} do
+      FakeExec.script([gone()] ++ inspect_rules())
+      {:ok, sbx} = Sandbox.start(start_opts(dir))
+
+      assert Sandbox.stop_confirmed(sbx) == :ok
+
+      sandbox = FakeExec.docker_id("rsolv-41-7-work")
+      proxy = FakeExec.docker_id("rsolv-41-7-work-proxy")
+
+      assert Enum.take(docker_args(), -4) == [
+               ["rm", "-f", sandbox, proxy],
+               ["inspect", "--type", "container", "--format", "{{.Id}}", sandbox],
+               ["inspect", "--type", "container", "--format", "{{.Id}}", proxy],
+               ["network", "rm", FakeExec.docker_id("rsolv-41-7-net")]
+             ]
+
+      for owned <- owned(dir), do: refute(File.exists?(owned))
+    end
+
+    test "accepts docker's no-such-object answer", %{tmp_dir: dir} do
+      FakeExec.script(
+        [
+          {fn {"docker", ["inspect", "--type", "container" | _], _} -> true end,
+           fn {"docker", args, _} ->
+             {:ok, %{status: 1, output: "error: no such object: #{List.last(args)}\n"}}
+           end}
+        ] ++ inspect_rules()
+      )
+
+      {:ok, sbx} = Sandbox.start(start_opts(dir, egress: :none))
+
+      assert Sandbox.stop_confirmed(sbx) == :ok
+    end
+
+    for {label, rule} <- [
+          {"rm -f exits 1",
+           quote(
+             do: {fn {"docker", ["rm", "-f" | _], _} -> true end, {:ok, %{status: 1, output: ""}}}
+           )},
+          {"rm -f times out",
+           quote(do: {fn {"docker", ["rm", "-f" | _], _} -> true end, {:error, :timeout}})},
+          {"inspect finds the container",
+           quote(
+             do:
+               {fn {"docker", ["inspect", "--type", "container" | _], _} -> true end,
+                {:ok, %{status: 0, output: "abc\n"}}}
+           )},
+          {"inspect exits 0, whatever it prints",
+           quote(
+             do:
+               {fn {"docker", ["inspect", "--type", "container" | _], _} -> true end,
+                fn {"docker", args, _} ->
+                  {:ok,
+                   %{
+                     status: 0,
+                     output: "Error response from daemon: No such container: #{List.last(args)}"
+                   }}
+                end}
+           )},
+          {"inspect times out",
+           quote(
+             do:
+               {fn {"docker", ["inspect", "--type", "container" | _], _} -> true end,
+                {:error, :timeout}}
+           )},
+          {"inspect fails some other way",
+           quote(
+             do:
+               {fn {"docker", ["inspect", "--type", "container" | _], _} -> true end,
+                {:ok,
+                 %{status: 1, output: "Cannot connect to the Docker daemon. Is it running?\n"}}}
+           )},
+          {"inspect names another container",
+           quote(
+             do:
+               {fn {"docker", ["inspect", "--type", "container" | _], _} -> true end,
+                {:ok, %{status: 1, output: "Error response from daemon: No such container: x\n"}}}
+           )}
+        ] do
+      test "is :error, and removes no directory, when #{label}", %{tmp_dir: dir} do
+        FakeExec.script([unquote(rule), gone()] ++ inspect_rules())
+        {:ok, sbx} = Sandbox.start(start_opts(dir))
+
+        assert Sandbox.stop_confirmed(sbx) == :error
+        for owned <- owned(dir), do: assert(File.dir?(owned))
+      end
+    end
+
+    test "is :error, and removes no directory, for a sandbox whose container ID it never recorded",
+         %{tmp_dir: dir} do
+      home = Path.join(dir, "h")
+      File.mkdir_p!(home)
+      FakeExec.script([gone()])
+
+      sbx = %Sandbox{container: "s", home: home, dirs: [home], ids: %{}, exec: FakeExec}
+
+      assert Sandbox.stop_confirmed(sbx) == :error
+      assert File.dir?(home)
+    end
+
+    test "never inspects past a failed rm", %{tmp_dir: dir} do
+      FakeExec.script(
+        [{fn {"docker", ["rm", "-f" | _], _} -> true end, {:ok, %{status: 1, output: ""}}}] ++
+          inspect_rules()
+      )
+
+      {:ok, sbx} = Sandbox.start(start_opts(dir))
+      Sandbox.stop_confirmed(sbx)
+
+      refute Enum.any?(docker_args(), &match?(["inspect", "--type" | _], &1))
+    end
+  end
+
+  describe "stop_confirmed/1 of nothing" do
+    test "is :ok when nothing started" do
+      assert Sandbox.stop_confirmed(nil) == :ok
     end
   end
 end
