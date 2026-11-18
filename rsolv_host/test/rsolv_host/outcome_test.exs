@@ -172,6 +172,10 @@ defmodule RsolvHost.OutcomeTest do
             {:base_check_too_large, "more directories than RSOLV checks"},
             {:base_read_failed, "Reading the base commit with git failed"},
             {:invalid_plan, "verify plan"},
+            {:overlay_refused, "changed or linked a file the fix changes"},
+            {{:sandbox, :teardown}, "didn't confirm a verify sandbox removed"},
+            {{:sandbox, :disk_limit}, "wrote past its disk budget"},
+            {{:sandbox, :timeout}, "Docker didn't answer"},
             {{:platform, 409, "issue_terminal"}, "already published or rejected"},
             {{:platform, 413, nil}, "too large for RSOLV to verify"}
           ] do
@@ -191,6 +195,11 @@ defmodule RsolvHost.OutcomeTest do
       assert Outcome.exit_code({:error, :oidc_unavailable}) == 2
       assert Outcome.exit_code({:error, :stream_exhausted}) == 3
       assert Outcome.exit_code({:error, {:sandbox, :enoent}}) == 4
+    end
+
+    test "verify's overlay refused and an unconfirmed teardown are sandbox failures (exit 4), like an install failing without the fix" do
+      assert Outcome.exit_code({:error, :overlay_refused}) == 4
+      assert Outcome.exit_code({:error, {:sandbox, :teardown}}) == 4
     end
 
     test "a failure after VALIDATE confirmed exits by its class" do

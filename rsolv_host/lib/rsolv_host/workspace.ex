@@ -18,7 +18,12 @@ defmodule RsolvHost.Workspace do
   # repositoryformatversion 1 and its extensions.objectFormat kept.
   @git_config "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n"
 
-  @doc "Copies the tree at `src` into a new directory `dest`. Option: `:exec`."
+  @doc """
+  Copies the tree at `src` into a new directory `dest`. Options: `:exec`,
+  `:timeout_ms`, what's left of the caller's time (cp gets that or 10
+  minutes, whichever is less), and `:sanitize` (default true): false copies
+  the tree as it is and walks nothing in it, for a tree a sandbox wrote.
+  """
   @spec copy(Path.t(), Path.t(), keyword()) ::
           :ok | {:error, :exists | {:sandbox_setup, :copy} | {:sandbox, :enoent}}
   def copy(src, dest, opts \\ []) do
@@ -29,13 +34,23 @@ defmodule RsolvHost.Workspace do
     else
       File.mkdir_p!(dest)
 
-      case exec.run("cp", ["-a", "--", src <> "/.", dest], timeout_ms: @copy_timeout_ms) do
-        {:ok, %{status: 0}} -> dest |> Path.join(".git") |> sanitize()
-        {:error, :enoent} -> {:error, {:sandbox, :enoent}}
-        _failed -> {:error, {:sandbox_setup, :copy}}
+      timeout_ms = opts |> Keyword.get(:timeout_ms, @copy_timeout_ms) |> min(@copy_timeout_ms)
+
+      case exec.run("cp", ["-a", "--", src <> "/.", dest], timeout_ms: timeout_ms) do
+        {:ok, %{status: 0}} ->
+          sanitized(dest, Keyword.get(opts, :sanitize, true))
+
+        {:error, :enoent} ->
+          {:error, {:sandbox, :enoent}}
+
+        _failed ->
+          {:error, {:sandbox_setup, :copy}}
       end
     end
   end
+
+  defp sanitized(dest, true), do: dest |> Path.join(".git") |> sanitize()
+  defp sanitized(_dest, false), do: :ok
 
   # File.rm_rf/1 and File.lstat/1 never follow a symlink. A .git that isn't a
   # directory (a gitfile) names a repository outside every mount.
@@ -50,8 +65,11 @@ defmodule RsolvHost.Workspace do
 
   defp sanitize(_not_a_directory, _git), do: :ok
 
+  # Lists `dir` only once lstat says it's a directory: a symlinked `refs`
+  # would list, and drop locks in, whatever it names.
   defp drop_locks(dir) do
-    for {:ok, names} <- [File.ls(dir)],
+    for {:ok, %File.Stat{type: :directory}} <- [File.lstat(dir)],
+        {:ok, names} <- [File.ls(dir)],
         name <- names,
         path = Path.join(dir, name),
         do: drop_lock(File.lstat!(path), path)

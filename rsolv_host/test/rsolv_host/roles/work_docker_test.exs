@@ -6,13 +6,15 @@ defmodule RsolvHost.Roles.WorkDockerTest do
 
   @moduletag :docker
   @moduletag :tmp_dir
+
+  setup do: RsolvHost.VerifyDocker.unique_tmp_dir()
   @moduletag timeout: 600_000
   @image "buildpack-deps:bookworm-curl@sha256:f5c5d07ea24ee91272739fe451c280aa4b7fa5120b9278815db5fcd713d83772"
 
   describe "a job the runner stops with SIGTERM" do
     test "removes the sandbox, proxy and network the role made, and nothing it didn't",
          %{tmp_dir: dir} do
-      run = "#{System.unique_integer([:positive])}"
+      run = RsolvHost.VerifyDocker.unique_run()
       names = ["rsolv-#{run}-7-work", "rsolv-#{run}-7-work-proxy", "rsolv-#{run}-7-net"]
       mine = %{repo: "acme/app", run: run, issue: "7", attempt: "1"}
       twin = KilledVm.bystander(mine, @image)
@@ -97,7 +99,7 @@ defmodule RsolvHost.Roles.WorkDockerTest do
       env = %{
         "RUNNER_TEMP" => dir,
         "GITHUB_WORKSPACE" => checkout,
-        "GITHUB_RUN_ID" => "#{System.unique_integer([:positive])}",
+        "GITHUB_RUN_ID" => RsolvHost.VerifyDocker.unique_run(),
         "GITHUB_RUN_ATTEMPT" => "2",
         "GITHUB_REPOSITORY" => "acme/app",
         "RSOLV_API_URL" => "https://api.rsolv.ai.",

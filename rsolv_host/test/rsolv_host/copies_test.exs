@@ -1,6 +1,7 @@
 defmodule RsolvHost.CopiesTest do
   use ExUnit.Case, async: true
 
+  alias RsolvCore.ChangeSet
   alias RsolvCore.ChangeSet.Entry
   alias RsolvHost.Copies
 
@@ -16,27 +17,33 @@ defmodule RsolvHost.CopiesTest do
       new_blob_sha: "x"
     }
 
-  defp modify(path),
+  # `base`: the bytes the base holds at `path`.
+  defp modify(path, base),
     do: %Entry{
       path: path,
       op: :modify,
       base_mode: "100755",
-      base_blob_sha: "x",
+      base_blob_sha: ChangeSet.blob_sha(base),
       mode: "100755",
       new_blob_sha: "y"
     }
 
-  defp delete(path),
+  defp delete(path, base),
     do: %Entry{
       path: path,
       op: :delete,
       base_mode: "100644",
-      base_blob_sha: "x",
+      base_blob_sha: ChangeSet.blob_sha(base),
       mode: nil,
       new_blob_sha: nil
     }
 
-  describe "write_images/3" do
+  def entry(:modify, path, base), do: modify(path, base)
+  def entry(:delete, path, base), do: delete(path, base)
+
+  @base_a %{"a.rb" => "base\n"}
+
+  describe "write_images/4" do
     test "writes adds into new directories, rewrites modifies in place and removes deletes",
          %{tmp_dir: dir} do
       File.write!(Path.join(dir, "old.js"), "x")
@@ -45,11 +52,12 @@ defmodule RsolvHost.CopiesTest do
 
       assert Copies.write_images(
                dir,
-               [add("test/deep/a_test.js"), delete("old.js"), modify("run.sh")],
+               [add("test/deep/a_test.js"), delete("old.js", "x"), modify("run.sh", "old")],
                %{
                  "test/deep/a_test.js" => "t\n",
                  "run.sh" => "new"
-               }
+               },
+               %{"old.js" => "x", "run.sh" => "old"}
              ) == :ok
 
       assert File.read!(Path.join(dir, "test/deep/a_test.js")) == "t\n"
@@ -65,7 +73,7 @@ defmodule RsolvHost.CopiesTest do
       File.mkdir_p!(copy)
       File.ln_s!(outside, Path.join(copy, "link"))
 
-      assert Copies.write_images(copy, [add("link/x.js")], %{"link/x.js" => "pwned"}) ==
+      assert Copies.write_images(copy, [add("link/x.js")], %{"link/x.js" => "pwned"}, %{}) ==
                {:error, {:unsafe_path, "link/x.js"}}
 
       assert File.ls!(outside) == []
@@ -78,32 +86,136 @@ defmodule RsolvHost.CopiesTest do
       File.mkdir_p!(copy)
       File.ln_s!(target, Path.join(copy, "a.js"))
 
-      assert Copies.write_images(copy, [modify("a.js")], %{"a.js" => "x"}) ==
+      assert Copies.write_images(copy, [modify("a.js", "keep")], %{"a.js" => "x"}, %{
+               "a.js" => "keep"
+             }) ==
                {:error, {:unsafe_path, "a.js"}}
 
       assert File.read!(target) == "keep"
     end
 
-    test "replaces a hardlinked file with a new one, never writing through to the other link",
+    defp sha256(path), do: :crypto.hash(:sha256, File.read!(path))
+
+    test "refuses to modify a file with another link, before writing anything (B4)",
          %{tmp_dir: dir} do
-      outside = Path.join(dir, "outside.js")
-      copy = Path.join(dir, "copy")
+      a = Path.join(dir, "a.rb")
+      b = Path.join(dir, "b.rb")
+      File.write!(a, "base\n")
+      File.ln!(a, b)
+      before = {sha256(a), sha256(b)}
+
+      assert Copies.write_images(dir, [modify("a.rb", "base\n")], %{"a.rb" => "fixed\n"}, @base_a) ==
+               {:error, {:unsafe_path, "a.rb"}}
+
+      assert {sha256(a), sha256(b)} == before
+      assert File.ls!(dir) |> Enum.sort() == ["a.rb", "b.rb"]
+    end
+
+    test "refuses to delete a file with another link", %{tmp_dir: dir} do
+      a = Path.join(dir, "a.rb")
+      File.write!(a, "base\n")
+      File.ln!(a, Path.join(dir, "b.rb"))
+
+      assert Copies.write_images(dir, [delete("a.rb", "base\n")], %{}, @base_a) ==
+               {:error, {:unsafe_path, "a.rb"}}
+
+      assert File.read!(a) == "base\n"
+    end
+
+    test "with a byte copy, not a link, changes only the overlaid file", %{tmp_dir: dir} do
+      a = Path.join(dir, "a.rb")
+      b = Path.join(dir, "b.rb")
+      File.write!(a, "base\n")
+      File.cp!(a, b)
+      b_before = sha256(b)
+
+      assert Copies.write_images(dir, [modify("a.rb", "base\n")], %{"a.rb" => "fixed\n"}, @base_a) ==
+               :ok
+
+      assert File.read!(a) == "fixed\n"
+      assert sha256(b) == b_before
+    end
+
+    for op <- [:modify, :delete] do
+      test "refuses to #{op} a file that no longer holds its base blob", %{tmp_dir: dir} do
+        a = Path.join(dir, "a.rb")
+        File.write!(a, "changed during BUILD\n")
+        entry = apply(__MODULE__, :entry, [unquote(op), "a.rb", "base\n"])
+
+        assert Copies.write_images(dir, [entry], %{"a.rb" => "fixed\n"}, @base_a) ==
+                 {:error, {:unsafe_path, "a.rb"}}
+
+        assert File.read!(a) == "changed during BUILD\n"
+      end
+    end
+
+    test "refuses a target BUILD made a 10 GiB sparse file, from its size alone, without reading it (B4)",
+         %{tmp_dir: dir} do
+      a = Path.join(dir, "a.rb")
+      {:ok, file} = :file.open(a, [:write, :raw])
+      {:ok, _at} = :file.position(file, 10 * 1024 ** 3)
+      :ok = :file.truncate(file)
+      :ok = :file.close(file)
+      before = :erlang.memory(:binary)
+      started = System.monotonic_time(:millisecond)
+
+      assert Copies.write_images(dir, [modify("a.rb", "base\n")], %{"a.rb" => "fixed\n"}, @base_a) ==
+               {:error, {:unsafe_path, "a.rb"}}
+
+      assert System.monotonic_time(:millisecond) - started < 2_000
+      assert :erlang.memory(:binary) - before < 16 * 1024 * 1024
+      assert File.stat!(a).size == 10 * 1024 ** 3
+    end
+
+    test "refuses a target of the base's length holding other bytes", %{tmp_dir: dir} do
+      File.write!(Path.join(dir, "a.rb"), "BASE\n")
+
+      assert Copies.write_images(dir, [modify("a.rb", "base\n")], %{"a.rb" => "fixed\n"}, @base_a) ==
+               {:error, {:unsafe_path, "a.rb"}}
+    end
+
+    test "refuses a modify or delete whose base bytes it wasn't given", %{tmp_dir: dir} do
+      File.write!(Path.join(dir, "a.rb"), "base\n")
+
+      for entry <- [modify("a.rb", "base\n"), delete("a.rb", "base\n")] do
+        assert Copies.write_images(dir, [entry], %{"a.rb" => "fixed\n"}, %{}) ==
+                 {:error, {:unsafe_path, "a.rb"}}
+      end
+
+      assert File.read!(Path.join(dir, "a.rb")) == "base\n"
+    end
+
+    test "refuses base bytes that aren't the entry's base blob", %{tmp_dir: dir} do
+      File.write!(Path.join(dir, "a.rb"), "other\n")
+
+      assert Copies.write_images(dir, [modify("a.rb", "base\n")], %{"a.rb" => "fixed\n"}, %{
+               "a.rb" => "other\n"
+             }) == {:error, {:unsafe_path, "a.rb"}}
+    end
+
+    test "refuses an add over anything already there", %{tmp_dir: dir} do
+      outside = Path.join(dir, "outside")
       File.write!(outside, "keep")
-      File.chmod!(outside, 0o755)
-      File.mkdir_p!(copy)
-      File.ln!(outside, Path.join(copy, "a.js"))
+      copy = Path.join(dir, "copy")
+      File.mkdir_p!(Path.join(copy, "dir.rb"))
+      File.write!(Path.join(copy, "file.rb"), "keep")
+      File.ln_s!(outside, Path.join(copy, "link.rb"))
+      {_out, 0} = System.cmd("mkfifo", [Path.join(copy, "fifo.rb")])
 
-      assert Copies.write_images(copy, [modify("a.js")], %{"a.js" => "new"}) == :ok
+      for path <- ~w(file.rb dir.rb link.rb fifo.rb) do
+        assert Copies.write_images(copy, [add(path)], %{path => "x"}, %{}) ==
+                 {:error, {:unsafe_path, path}},
+               path
+      end
 
+      assert File.read!(Path.join(copy, "file.rb")) == "keep"
       assert File.read!(outside) == "keep"
-      assert File.read!(Path.join(copy, "a.js")) == "new"
-      assert %File.Stat{links: 1, type: :regular} = File.lstat!(Path.join(copy, "a.js"))
-      assert Bitwise.band(File.stat!(Path.join(copy, "a.js")).mode, 0o777) == 0o755
-      assert File.ls!(copy) == ["a.js"]
+      assert File.dir?(Path.join(copy, "dir.rb"))
+      assert File.lstat!(Path.join(copy, "fifo.rb")).type == :other
     end
 
     test "gives an add its mode", %{tmp_dir: dir} do
-      assert Copies.write_images(dir, [add("a.js")], %{"a.js" => "x"}) == :ok
+      assert Copies.write_images(dir, [add("a.js")], %{"a.js" => "x"}, %{}) == :ok
       assert Bitwise.band(File.stat!(Path.join(dir, "a.js")).mode, 0o777) == 0o644
     end
 
@@ -115,7 +227,9 @@ defmodule RsolvHost.CopiesTest do
       File.mkdir_p!(copy)
       File.ln_s!(outside, Path.join(copy, "link"))
 
-      assert Copies.write_images(copy, [delete("link/old.js")], %{}) ==
+      assert Copies.write_images(copy, [delete("link/old.js", "keep")], %{}, %{
+               "link/old.js" => "keep"
+             }) ==
                {:error, {:unsafe_path, "link/old.js"}}
 
       assert File.read!(Path.join(outside, "old.js")) == "keep"
@@ -125,9 +239,10 @@ defmodule RsolvHost.CopiesTest do
       File.mkdir_p!(Path.join(dir, "d"))
       File.write!(Path.join(dir, "f"), "x")
 
-      assert Copies.write_images(dir, [add("d")], %{"d" => "x"}) == {:error, {:unsafe_path, "d"}}
+      assert Copies.write_images(dir, [add("d")], %{"d" => "x"}, %{}) ==
+               {:error, {:unsafe_path, "d"}}
 
-      assert Copies.write_images(dir, [add("f/x.js")], %{"f/x.js" => "x"}) ==
+      assert Copies.write_images(dir, [add("f/x.js")], %{"f/x.js" => "x"}, %{}) ==
                {:error, {:unsafe_path, "f/x.js"}}
     end
 
@@ -136,7 +251,7 @@ defmodule RsolvHost.CopiesTest do
       File.mkdir_p!(copy)
 
       for path <- ["../escape.js", ".git/config", "/abs.js"] do
-        assert Copies.write_images(copy, [add(path)], %{path => "x"}) ==
+        assert Copies.write_images(copy, [add(path)], %{path => "x"}, %{}) ==
                  {:error, {:unsafe_path, path}}
       end
 

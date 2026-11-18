@@ -60,7 +60,20 @@ jobs:
       - run: mix compile --warnings-as-errors
       - run: mix format --check-formatted
       - run: mix credo --strict
-      - run: mix test --warnings-as-errors --include docker
+      # The full test output, kept as an artifact when the job fails, so an
+      # intermittent failure is named even when the log is long or truncated.
+      - name: mix test --warnings-as-errors --include docker
+        shell: bash
+        run: |
+          set -o pipefail
+          mix test --warnings-as-errors --include docker 2>&1 | tee host-test.log
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: host-test-log-${{ matrix.runner }}
+          path: rsolv_host/host-test.log
+          if-no-files-found: ignore
+          retention-days: 14
   package:
     # Builds the glibc ERTS and the Burrito binary natively on each architecture,
     # smoke-tests the real binary, and keeps it as a CI artifact. No release here.

@@ -9,8 +9,10 @@ defmodule RsolvHost.Sandbox do
   no runner variables (every `-e` sets an explicit value) and only the copy
   mounted. With `egress: :proxy` (the default) its only network is an internal
   one whose sole other member is a squid proxy; with `egress: :none` it has no
-  network at all. Setup fails closed: if any step fails, everything is removed
-  and nothing runs unfiltered.
+  network at all. With `read_only: true` (verify's TEST phase) its root
+  filesystem is read-only: it can write only its copy, its HOME, the `/tmp`
+  tmpfs and a 64 MiB `/dev/shm`. Setup fails closed: if any step fails,
+  everything is removed and nothing runs unfiltered.
   """
 
   alias RsolvHost.{ActionsLog, Egress, Frame, Workspace}
@@ -24,6 +26,7 @@ defmodule RsolvHost.Sandbox do
     :deadline,
     :created,
     :copy_dir,
+    :home,
     labels: %{},
     ids: %{},
     dirs: [],
@@ -39,6 +42,7 @@ defmodule RsolvHost.Sandbox do
           deadline: integer() | nil,
           created: pid() | nil,
           copy_dir: Path.t() | nil,
+          home: Path.t() | nil,
           labels: %{String.t() => String.t()},
           ids: %{optional(:sandbox | :proxy | :network) => String.t()},
           dirs: [Path.t()],
@@ -51,6 +55,11 @@ defmodule RsolvHost.Sandbox do
   # bind-mounted copy and HOME have no portable disk quota.
   @limits ["--memory", "4g", "--memory-swap", "4g", "--cpus", "2"]
   @tmp "/tmp:exec,size=1g"
+  # Docker keeps no log of a container's stdout: the host reads only exec
+  # output, under its caps, and a json-file log (which a sandbox can write
+  # through /proc/1/fd/1) is on the runner's disk, unrotated and unmeasured.
+  @no_log ["--log-driver", "none"]
+  @shm "64m"
   @setup_timeout_ms 60_000
   @du_timeout_ms 30_000
   @stop_wait_ms 35_000
@@ -64,7 +73,7 @@ defmodule RsolvHost.Sandbox do
   @doc """
   The `docker run` argv for the sandbox. `opts` has `:name`, `:network`,
   `:copy_dir`, `:home_dir`, `:uid`, `:gid`, `:proxy_ip`, `:image` and
-  optionally `:egress` and `:labels` (label => value).
+  optionally `:egress`, `:labels` (label => value) and `:read_only`.
   """
   @spec run_args(map()) :: [String.t()]
   def run_args(opts) do
@@ -81,6 +90,7 @@ defmodule RsolvHost.Sandbox do
       "127.0.0.1"
     ] ++
       labels(Map.get(opts, :labels, %{})) ++
+      @no_log ++
       [
         "--user",
         "#{opts.uid}:#{opts.gid}",
@@ -90,6 +100,7 @@ defmodule RsolvHost.Sandbox do
         "no-new-privileges"
       ] ++
       ["--pids-limit", "4096", "--tmpfs", @tmp] ++
+      read_only(Map.get(opts, :read_only, false)) ++
       @limits ++
       ["-e", "LANG=C.UTF-8", "-e", "CI=true", "-e", "HOME=/opt/home"] ++
       proxy_env(egress, opts.proxy_ip) ++
@@ -99,6 +110,9 @@ defmodule RsolvHost.Sandbox do
 
   defp labels(labels),
     do: for({key, value} <- Enum.sort(labels), arg <- ["--label", key <> "=" <> value], do: arg)
+
+  defp read_only(true), do: ["--read-only", "--shm-size", @shm]
+  defp read_only(false), do: []
 
   defp network(:proxy, network), do: network
   defp network(:none, _network), do: "none"
@@ -126,9 +140,13 @@ defmodule RsolvHost.Sandbox do
   `:stat` (how the copy is stat'ed, default `File.stat!/1`), `:exec`,
   `:labels` (on its containers and network, for `remove_stale/2`),
   `:created` (a `trap_sigterm/2` registry, told every container and network
-  ID as it's made) and `:deadline` (monotonic milliseconds: no setup step
-  runs past it, and one it stops is `:session_timeout`). It removes them by
-  those IDs, never by name.
+  ID as it's made), `:deadline` (monotonic milliseconds: no setup step
+  runs past it, and one it stops is `:session_timeout`), `:home_dir` (a HOME
+  from `make_home/2` to mount, which the sandbox then neither makes nor
+  removes; by default it makes its own), `:read_only` (`run_args/1`) and
+  `:confirm` (a failed setup is `{:sandbox, :teardown}` unless Docker then
+  confirms nothing by the sandbox's or proxy's name is left). It removes
+  them by those IDs, never by name.
   """
   @spec start(keyword()) ::
           {:ok, t()}
@@ -144,56 +162,64 @@ defmodule RsolvHost.Sandbox do
     egress = Keyword.get(opts, :egress, :proxy)
 
     rsolv = Path.join(Keyword.fetch!(opts, :runner_temp), "rsolv")
-
-    sbx = %__MODULE__{
-      dirs: Enum.map(["home-", "proxy-"], &Path.join(rsolv, &1 <> Keyword.fetch!(opts, :name))),
-      container: Keyword.fetch!(opts, :name),
-      copy_dir: Keyword.fetch!(opts, :copy_dir),
-      network: if(egress == :proxy, do: Keyword.fetch!(opts, :network)),
-      proxy: if(egress == :proxy, do: Keyword.fetch!(opts, :name) <> "-proxy"),
-      exec: Keyword.get_lazy(opts, :exec, &RsolvHost.exec/0),
-      labels: Keyword.get(opts, :labels, %{}),
-      created: Keyword.get(opts, :created),
-      deadline: Keyword.get(opts, :deadline),
-      egress: egress
-    }
+    name = Keyword.fetch!(opts, :name)
 
     with :ok <- pinned(image),
-         home_dir = home(opts),
-         {:ok, uid, gid} <-
-           user(
-             Keyword.get(opts, :stat, &File.stat!/1).(Keyword.fetch!(opts, :copy_dir)),
-             File.stat!(home_dir)
-           ) do
-      run = fn sbx ->
-        create(
-          sbx,
-          :sandbox,
-          :sandbox_run,
-          run_args(%{
-            name: sbx.container,
-            network: sbx.network,
-            copy_dir: Keyword.fetch!(opts, :copy_dir),
-            home_dir: home_dir,
-            uid: uid,
-            gid: gid,
-            proxy_ip: sbx.proxy_ip,
-            image: image,
-            egress: egress,
-            labels: sbx.labels
-          }),
-          @pull_timeout_ms
-        )
-      end
+         {:ok, home, owned} <- start_home(opts) do
+      sbx = %__MODULE__{
+        dirs: owned ++ [Path.join(rsolv, "proxy-" <> name)],
+        home: home,
+        container: name,
+        copy_dir: Keyword.fetch!(opts, :copy_dir),
+        network: if(egress == :proxy, do: Keyword.fetch!(opts, :network)),
+        proxy: if(egress == :proxy, do: name <> "-proxy"),
+        exec: Keyword.get_lazy(opts, :exec, &RsolvHost.exec/0),
+        labels: Keyword.get(opts, :labels, %{}),
+        created: Keyword.get(opts, :created),
+        deadline: Keyword.get(opts, :deadline),
+        egress: egress
+      }
 
-      sbx |> setup(proxy_steps(sbx, opts) ++ [run]) |> started()
-    else
-      {:error, {:sandbox_setup, _step}} = error ->
-        stop(sbx)
-        error
+      start(sbx, image, opts)
+    end
+  end
 
-      error ->
-        error
+  defp start(sbx, image, opts) do
+    case user(Keyword.get(opts, :stat, &File.stat!/1).(sbx.copy_dir), File.stat!(sbx.home)) do
+      {:ok, uid, gid} ->
+        run(sbx, image, opts, uid, gid)
+
+      {:error, reason} ->
+        failed(sbx, reason, opts)
+    end
+  end
+
+  defp run(sbx, image, opts, uid, gid) do
+    run = fn sbx ->
+      create(
+        sbx,
+        :sandbox,
+        :sandbox_run,
+        run_args(%{
+          name: sbx.container,
+          network: sbx.network,
+          copy_dir: sbx.copy_dir,
+          home_dir: sbx.home,
+          uid: uid,
+          gid: gid,
+          proxy_ip: sbx.proxy_ip,
+          image: image,
+          egress: sbx.egress,
+          labels: sbx.labels,
+          read_only: Keyword.get(opts, :read_only, false)
+        }),
+        @pull_timeout_ms
+      )
+    end
+
+    case setup(sbx, proxy_steps(sbx, opts) ++ [run]) do
+      {:ok, sbx} -> {:ok, sbx}
+      {:error, reason, sbx} -> failed(sbx, reason, opts)
     end
   end
 
@@ -207,11 +233,19 @@ defmodule RsolvHost.Sandbox do
     end)
   end
 
-  defp started({:ok, sbx}), do: {:ok, sbx}
-
-  defp started({:error, reason, sbx}) do
+  # What a failed setup made is removed by ID. With `confirm: true`, Docker
+  # must then say no container by the sandbox's or proxy's name is left (one
+  # it made before its ID was recorded has that name), or the answer is
+  # `{:sandbox, :teardown}`: something may still run with the copy mounted.
+  defp failed(sbx, reason, opts) do
     stop(sbx)
-    {:error, reason}
+
+    names = [sbx.container | List.wrap(sbx.proxy)]
+
+    if Keyword.get(opts, :confirm, false) and
+         not Enum.all?(names, &gone?(sbx.exec, &1, @setup_timeout_ms)),
+       do: {:error, {:sandbox, :teardown}},
+       else: {:error, reason}
   end
 
   # The sandbox user is the copy's owner, which must be the host's own user (the
@@ -235,21 +269,40 @@ defmodule RsolvHost.Sandbox do
     end
   end
 
-  # The sandbox user's HOME (caches, toolchains): made by the host, so it's owned
-  # by the copy's owner whatever the image, and on disk rather than in a tmpfs.
-  # The host never reads it.
-  defp home(opts) do
-    home =
-      Path.join([
-        Keyword.fetch!(opts, :runner_temp),
-        "rsolv",
-        "home-" <> Keyword.fetch!(opts, :name)
-      ])
+  # A HOME it was given is mounted, never removed; otherwise it makes one,
+  # which `stop/2` removes. One already there is a setup failure, and stays.
+  defp start_home(opts) do
+    case Keyword.fetch(opts, :home_dir) do
+      {:ok, home} ->
+        {:ok, home, []}
 
+      :error ->
+        case make_home(Keyword.fetch!(opts, :runner_temp), Keyword.fetch!(opts, :name)) do
+          {:ok, home} -> {:ok, home, [home]}
+          {:error, :exists} -> {:error, {:sandbox_setup, :home}}
+        end
+    end
+  end
+
+  @doc """
+  Makes the sandbox user's HOME (caches, toolchains), `RUNNER_TEMP/rsolv/home-<name>`:
+  a new 0700 directory, made by the host, so it's owned by the copy's owner
+  whatever the image, and on disk rather than in a tmpfs. One already there
+  is `{:error, :exists}`, and is left as it is. The host never reads it.
+  """
+  @spec make_home(Path.t(), String.t()) :: {:ok, Path.t()} | {:error, :exists}
+  def make_home(runner_temp, name) do
+    home = Path.join([runner_temp, "rsolv", "home-" <> name])
     File.mkdir_p!(Path.dirname(home))
-    :ok = File.mkdir(home)
-    File.chmod!(home, 0o700)
-    home
+
+    case File.mkdir(home) do
+      :ok ->
+        File.chmod!(home, 0o700)
+        {:ok, home}
+
+      {:error, :eexist} ->
+        {:error, :exists}
+    end
   end
 
   defp proxy_steps(%{egress: :none}, _opts), do: []
@@ -275,6 +328,7 @@ defmodule RsolvHost.Sandbox do
         :proxy,
         :proxy_run,
         ["run", "-d", "--name", &1.proxy | labels(&1.labels)] ++
+          @no_log ++
           ["-v", conf <> ":/etc/squid/squid.conf:ro"] ++
           ["-v", allowlist <> ":/etc/squid/allowlist.txt:ro", proxy_image],
         @pull_timeout_ms
@@ -373,16 +427,19 @@ defmodule RsolvHost.Sandbox do
   @doc """
   Runs `argv` in the sandbox as `docker exec -i <container> timeout -k 10 <s>
   <argv…>`, where `s` is `:timeout_ms` in whole seconds (at least 1), with a host
-  deadline 30 s later. Takes `run/3`'s `:input` and `:max_bytes`.
+  deadline 30 s later. Takes `run/3`'s `:input` and `:max_bytes`, and `:env`
+  (name => value), each set with `-e`.
   """
   @spec exec(t(), [String.t()], keyword()) :: RsolvHost.Exec.result()
   def exec(sbx, argv, opts) do
+    {env, opts} = Keyword.pop(opts, :env, %{})
     timeout_ms = Keyword.get(opts, :timeout_ms, 60_000)
     seconds = timeout_ms |> div(1_000) |> max(1) |> Integer.to_string()
+    env = for {name, value} <- Enum.sort(env), arg <- ["-e", name <> "=" <> value], do: arg
 
     sbx.exec.run(
       "docker",
-      ["exec", "-i", sbx.container, "timeout", "-k", @kill_after_s, seconds | argv],
+      ["exec", "-i" | env] ++ [sbx.container, "timeout", "-k", @kill_after_s, seconds | argv],
       Keyword.merge(opts, timeout_ms: timeout_ms + @host_grace_ms)
     )
   end
@@ -419,17 +476,31 @@ defmodule RsolvHost.Sandbox do
   total from a du that read everything within 30 s is `:error`: a directory
   the sandbox made unreadable would hide what's beneath it.
 
+  Alongside it, `df -B1 --output=used,iused` gives the used bytes and inodes
+  of the filesystem the copy is on (under `RUNNER_TEMP`): du can't see a file
+  unlinked while still open, nor count inodes. Answers `%{du:, fs:, inodes:}`.
+
   ponytail: a file the project removes mid-walk also fails du, so a churning
   install can be stopped as over budget; retry the measure if that shows up.
   """
-  @spec disk_used(t()) :: {:ok, non_neg_integer()} | :error
-  def disk_used(%__MODULE__{dirs: [home | _]} = sbx) do
-    args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, home]
+  @spec disk_used(t()) ::
+          {:ok, %{du: non_neg_integer(), fs: non_neg_integer(), inodes: non_neg_integer()}}
+          | :error
+  def disk_used(sbx) do
+    args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, sbx.home]
+    opts = [timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024]
 
-    with {:ok, %{status: 0, output: output}} <-
-           sbx.exec.run("du", args, timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024),
-         [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output) do
-      {:ok, String.to_integer(total)}
+    with {:ok, %{status: 0, output: output}} <- sbx.exec.run("du", args, opts),
+         [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output),
+         {:ok, %{status: 0, output: df}} <-
+           sbx.exec.run("df", ["-B1", "--output=used,iused", "--", sbx.copy_dir], opts),
+         [_, fs, inodes] <- Regex.run(~r/^\s*(\d+)\s+(\d+)\s*$/m, df) do
+      {:ok,
+       %{
+         du: String.to_integer(total),
+         fs: String.to_integer(fs),
+         inodes: String.to_integer(inodes)
+       }}
     else
       _no_total -> :error
     end
@@ -437,7 +508,8 @@ defmodule RsolvHost.Sandbox do
 
   @doc """
   Runs `fun` (the sandbox's steps) while a watchdog measures `disk_used/1`
-  every `poll_ms`: past `max_bytes`, or with no measure, it kills the
+  every `poll_ms`: past any of `limits` (`%{du:, fs:, inodes:}`), or with no
+  measure, it kills the
   sandbox, and the answer is `{:error, :disk_limit}` whatever `fun` returned.
   When `fun` returns, the watchdog finishes the measure in flight and takes
   one more; either over budget, or no answer within 35 s (du's 30 s and a
@@ -448,13 +520,13 @@ defmodule RsolvHost.Sandbox do
   `poll_ms` (plus du's own time); a hard bound needs a quota (xfs project
   quotas, btrfs subvolumes) or a size-limited loop device per copy.
   """
-  @spec watched(t(), non_neg_integer(), pos_integer(), (-> result)) ::
+  @spec watched(t(), map(), pos_integer(), (-> result)) ::
           result | {:error, :disk_limit}
         when result: term()
-  def watched(sbx, max_bytes, poll_ms, fun) do
+  def watched(sbx, limits, poll_ms, fun) do
     ref = make_ref()
     role = self()
-    {:ok, watchdog} = Task.start_link(fn -> watch(sbx, max_bytes, poll_ms, {role, ref}) end)
+    {:ok, watchdog} = Task.start_link(fn -> watch(sbx, limits, poll_ms, {role, ref}) end)
 
     result =
       try do
@@ -484,15 +556,15 @@ defmodule RsolvHost.Sandbox do
 
   # Tells the role {ref, :disk_limit} as soon as a measure fails, or, once
   # asked to stop, the verdict of one last measure.
-  defp watch(sbx, max_bytes, poll_ms, {role, ref} = tell) do
+  defp watch(sbx, limits, poll_ms, {role, ref} = tell) do
     receive do
       {:stop, ^ref} ->
-        send(role, {ref, verdict(disk_used(sbx), max_bytes)})
+        send(role, {ref, verdict(disk_used(sbx), limits)})
     after
       poll_ms ->
-        case verdict(disk_used(sbx), max_bytes) do
+        case verdict(disk_used(sbx), limits) do
           :within ->
-            watch(sbx, max_bytes, poll_ms, tell)
+            watch(sbx, limits, poll_ms, tell)
 
           :disk_limit ->
             send(role, {ref, :disk_limit})
@@ -501,8 +573,13 @@ defmodule RsolvHost.Sandbox do
     end
   end
 
-  defp verdict({:ok, used}, max_bytes) when used <= max_bytes, do: :within
-  defp verdict(_over_or_unmeasured, _max_bytes), do: :disk_limit
+  defp verdict({:ok, used}, limits) do
+    if Enum.all?(limits, fn {key, max} -> Map.fetch!(used, key) <= max end),
+      do: :within,
+      else: :disk_limit
+  end
+
+  defp verdict(:error, _limits), do: :disk_limit
 
   @doc "Takes the sandbox off the proxy's network: from here on it has no network."
   @spec disconnect(t()) :: :ok | {:error, term()}
@@ -533,6 +610,51 @@ defmodule RsolvHost.Sandbox do
     end
   end
 
+  @doc """
+  `stop/2`, confirmed (RFC-150 §5, B2 and B7): `docker rm -f` of the sandbox
+  and its proxy must exit 0, and then `docker inspect` of each must answer
+  that there's no such container. Only then does it remove the network and
+  the directories the sandbox made, and answer `:ok`. A failure, a timeout,
+  any other answer, or a sandbox whose container ID was never recorded, is
+  `:error`, and every directory stays: something may still be running in
+  it. With a `deadline` (monotonic milliseconds), each call gets at most
+  what's left before it, and one with nothing left is `:error`.
+  """
+  @spec stop_confirmed(t() | nil, IO.device(), integer() | nil) :: :ok | :error
+  def stop_confirmed(sbx, io \\ :stdio, deadline \\ nil)
+  def stop_confirmed(nil, _io, _deadline), do: :ok
+
+  def stop_confirmed(%__MODULE__{ids: %{sandbox: _}} = sbx, io, deadline) do
+    ids = Enum.flat_map([:sandbox, :proxy], &List.wrap(sbx.ids[&1]))
+    # 60 s per call, or what's left before the deadline.
+    limit = fn -> @setup_timeout_ms |> within(deadline) |> elem(0) end
+
+    with :ok <- remove(sbx.exec, ["rm", "-f"], ids, limit.()),
+         true <- Enum.all?(ids, &gone?(sbx.exec, &1, limit.())) do
+      remove(sbx.exec, ["network", "rm"], List.wrap(sbx.ids[:network]), limit.())
+      Enum.each(sbx.dirs, &remove_dir(&1, io))
+    else
+      _not_confirmed -> :error
+    end
+  end
+
+  def stop_confirmed(_unrecorded, _io, _deadline), do: :error
+
+  defp gone?(_exec, _id, 0), do: false
+
+  defp gone?(exec, id, limit_ms) do
+    case exec.run("docker", ["inspect", "--type", "container", "--format", "{{.Id}}", id],
+           timeout_ms: limit_ms
+         ) do
+      {:ok, %{status: status, output: output}} when status != 0 ->
+        String.trim(output) =~
+          ~r/\A(?:Error response from daemon|Error|error): No such (?:container|object): #{Regex.escape(id)}\z/i
+
+      _found_or_unanswered ->
+        false
+    end
+  end
+
   @doc "Removes `dir` (`RsolvHost.Workspace.remove/1`), or writes a `::warning::` naming what's left."
   @spec remove_dir(Path.t(), IO.device()) :: :ok
   def remove_dir(dir, io \\ :stdio) do
@@ -545,10 +667,12 @@ defmodule RsolvHost.Sandbox do
     end
   end
 
-  defp remove(_exec, _command, []), do: :ok
+  defp remove(exec, command, ids, limit_ms \\ @setup_timeout_ms)
+  defp remove(_exec, _command, [], _limit_ms), do: :ok
+  defp remove(_exec, _command, _ids, 0), do: :error
 
-  defp remove(exec, command, ids) do
-    case exec.run("docker", command ++ ids, timeout_ms: @setup_timeout_ms) do
+  defp remove(exec, command, ids, limit_ms) do
+    case exec.run("docker", command ++ ids, timeout_ms: limit_ms) do
       {:ok, %{status: 0}} -> :ok
       _failed -> :error
     end

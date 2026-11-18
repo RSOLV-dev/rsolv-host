@@ -15,7 +15,7 @@ defmodule RsolvHost.CLITest do
     test "version prints the version and exits 0" do
       out = capture_io(fn -> assert CLI.main(["version"], @env, @root) == 0 end)
 
-      assert out == "rsolv-host 0.1.0\n"
+      assert out == "rsolv-host 0.2.0\n"
     end
 
     test "when work has no --issue, prints usage and exits 2" do
@@ -42,7 +42,7 @@ defmodule RsolvHost.CLITest do
 
       assert [line] = String.split(out, "\n", trim: true)
       assert line =~ ~r/\A::error title=RSOLV configuration::.*RUNNER_TEMP/
-      refute out =~ "rsolv-host 0.1.0"
+      refute out =~ "rsolv-host 0.2.0"
     end
   end
 
