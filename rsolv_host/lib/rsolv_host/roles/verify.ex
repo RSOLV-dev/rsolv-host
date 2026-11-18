@@ -98,17 +98,31 @@ defmodule RsolvHost.Roles.Verify do
   #
   # Before any sandbox, nothing needs clamping: the token exchange and four
   # platform calls (each at most 4 attempts of 30 s connect and 120 s
-  # receive, and 3 waits of at most 60 s: 13), the base-facts read (5) and
-  # two copies (10 each) take at most 90, before the sandboxes' deadline at
-  # 95 (`@reserve_ms` before the budget). RED gets half of what's left when
-  # it starts and GREEN the rest, and every sandbox stage's own limit
-  # (setup and image pulls, bootstrap 15, install up to 60, prepare 5, test
-  # up to 60, report 1) is clamped to its side's deadline: unclamped, one
-  # side could take 170. Past a deadline a step ends within timeout's 10 s
-  # KILL grace and the host's 30 s, a report within 41 s more, the disk
-  # baseline's du at most 30 s and the watchdog's last measure at most 35 s,
-  # and removing the sandbox at most 2 minutes: 4.5, inside the 5-minute
-  # reserve before the verification is posted.
+  # receive, and 3 waits of at most 60 s: 13) and the base-facts read (5)
+  # take at most 70, before the sandboxes' deadline at 95 (`@reserve_ms`
+  # before the budget). RED gets half of what's left when it starts and
+  # GREEN the rest. Within a side every stage's own limit is clamped to the
+  # side's deadline: BUILD's copy of the checkout (10), its setup and image
+  # pulls, bootstrap (15), install (up to 60) and prepare (5); the two
+  # copies for TEST (10 each); TEST's setup, test_prepare (5), test (up to
+  # 60) and report (1). Unclamped, one side could take over 3 hours.
+  # Confirming a sandbox gone is clamped to the role's deadline instead, so
+  # a side that used its time is still torn down: at most 4 minutes for
+  # BUILD (rm, two inspects, network rm) and 2 for TEST.
+  #
+  # Past the sandboxes' deadline, a step ends within timeout's 10 s KILL
+  # grace and the host's 30 s, a report within 41 s more, the disk
+  # baseline's du at most 30 s, the watchdog's last measure at most 35 s,
+  # and TEST's teardown at most 2 minutes: 4.5, inside the 5-minute reserve
+  # before the verification is posted. A BUILD the deadline cuts short
+  # skips TEST, but its teardown may take 4: then the post can outrun the
+  # reserve and end `session_timeout` (exit 3), never a verdict.
+  #
+  # Measured (plan H7, the pinned sandbox image on a workstation, H0's
+  # trees): a side's time is bootstrap's (the pytest demo about 25 s,
+  # railsgoat at #324's base about 150 s, nearly all Ruby and its gems).
+  # BUILD's teardown took about 0.6 s, TEST's 0.2 s, the copies for TEST at
+  # most 1 s, and the whole role 60 s (pytest) and 328 s (railsgoat).
   @budget_ms 100 * 60 * 1_000
   @reserve_ms 5 * 60 * 1_000
   @bound ~w(change_set_digest red_digest policy_version)
