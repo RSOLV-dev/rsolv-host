@@ -6,6 +6,8 @@ defmodule RsolvHost.SandboxDockerTest do
 
   @moduletag :docker
   @moduletag :tmp_dir
+
+  setup do: RsolvHost.VerifyDocker.unique_tmp_dir()
   @moduletag timeout: 600_000
   @probe_image "buildpack-deps:bookworm-curl@sha256:f5c5d07ea24ee91272739fe451c280aa4b7fa5120b9278815db5fcd713d83772"
   @elixir_image "elixir:1.19@sha256:7e27df3e4a684163e4a18e618eede53badb70e97e0c92a1845ab22e2e1d96da2"
@@ -22,7 +24,7 @@ defmodule RsolvHost.SandboxDockerTest do
 
     copy = Path.join(dir, "work")
     File.mkdir_p!(copy)
-    name = "rsolv-test-#{System.unique_integer([:positive])}"
+    name = "rsolv-test-#{RsolvHost.VerifyDocker.unique_run()}"
 
     {:ok, sbx} =
       Sandbox.start(
@@ -55,6 +57,12 @@ defmodule RsolvHost.SandboxDockerTest do
   ' >/dev/null 2>&1 &
   sleep 1
   """
+
+  # A budget of `bytes` past `used` for what du measures; the filesystem's
+  # bytes and inodes get room enough that the runner's other activity on it
+  # can't trip these du tests.
+  defp du_limits(used, bytes),
+    do: %{du: used.du + bytes, fs: used.fs + 5 * 1024 ** 3, inodes: used.inodes + 1_000_000}
 
   describe "a started sandbox" do
     test "holds none of the runner's secrets", %{sbx: sbx} do
@@ -146,7 +154,7 @@ defmodule RsolvHost.SandboxDockerTest do
       started = System.monotonic_time(:millisecond)
 
       result =
-        Sandbox.watched(sbx, used + 50 * 1024 * 1024, 500, fn ->
+        Sandbox.watched(sbx, du_limits(used, 50 * 1024 * 1024), 500, fn ->
           Sandbox.exec(
             sbx,
             [
@@ -172,7 +180,7 @@ defmodule RsolvHost.SandboxDockerTest do
       {:ok, used} = Sandbox.disk_used(sbx)
 
       result =
-        Sandbox.watched(sbx, used + 50 * 1024 * 1024, 60_000, fn ->
+        Sandbox.watched(sbx, du_limits(used, 50 * 1024 * 1024), 60_000, fn ->
           Sandbox.exec(sbx, ["sh", "-c", "head -c 100M /dev/zero > /work/big"],
             timeout_ms: 60_000
           )
@@ -185,7 +193,7 @@ defmodule RsolvHost.SandboxDockerTest do
       {:ok, used} = Sandbox.disk_used(sbx)
 
       assert {:ok, %{status: 0}} =
-               Sandbox.watched(sbx, used + 50 * 1024 * 1024, 60_000, fn ->
+               Sandbox.watched(sbx, du_limits(used, 50 * 1024 * 1024), 60_000, fn ->
                  Sandbox.exec(sbx, ["sh", "-c", "head -c 1M /dev/zero > /work/small"],
                    timeout_ms: 60_000
                  )
@@ -197,7 +205,7 @@ defmodule RsolvHost.SandboxDockerTest do
       on_exit(fn -> File.chmod(Path.join(sbx.copy_dir, "d"), 0o700) end)
 
       result =
-        Sandbox.watched(sbx, used + 5 * 1024 ** 3, 300, fn ->
+        Sandbox.watched(sbx, du_limits(used, 5 * 1024 ** 3), 300, fn ->
           Sandbox.exec(
             sbx,
             [

@@ -12,6 +12,8 @@ defmodule RsolvHost.Roles.VerifyBoundaryDockerTest do
 
   @moduletag :docker
   @moduletag :tmp_dir
+
+  setup do: VerifyDocker.unique_tmp_dir()
   @moduletag timeout: 900_000
 
   @base %{
@@ -400,6 +402,72 @@ defmodule RsolvHost.Roles.VerifyBoundaryDockerTest do
         assert result == {:error, {:sandbox, :disk_limit}}
         assert Map.take(body, ~w(error red green)) == %{"error" => "sandbox"}
       end
+    end
+  end
+
+  describe "review round 2 (Astra, Kimi)" do
+    defp docker_root_used do
+      {root, 0} = System.cmd("docker", ["info", "-f", "{{.DockerRootDir}}"])
+      {out, 0} = System.cmd("df", ["-B1", "--output=used", "--", String.trim(root)])
+      out |> String.split("\n", trim: true) |> List.last() |> String.trim() |> String.to_integer()
+    end
+
+    test "(t) TEST writing 100 MiB to /proc/1/fd/1 keeps no container log and doesn't grow the runner's disk",
+         context do
+      test = self()
+      single_removals = :counters.new(1, [])
+
+      # Just before RED's TEST container is removed: its log driver, and how
+      # much the Docker root's filesystem grew while it ran.
+      at_teardown = fn {"docker", ["rm", "-f", id] = args, opts} ->
+        {type, 0} =
+          System.cmd("docker", ["inspect", "-f", "{{.HostConfig.LogConfig.Type}}", id])
+
+        send(test, {:log, String.trim(type), docker_root_used()})
+        RsolvHost.Exec.run("docker", args, opts)
+      end
+
+      started = fn {"docker", args, opts} ->
+        send(test, {:before, docker_root_used()})
+        RsolvHost.Exec.run("docker", args, opts)
+      end
+
+      %{result: result} =
+        verify(
+          context,
+          plan(%{"test" => sh("head -c 104857600 /dev/zero > /proc/1/fd/1")}),
+          exec: [
+            {fn {"docker", ["run", "-d", "--name", name | _], _} ->
+               String.ends_with?(name, "-red-test")
+             end, started},
+            # The first one-ID `rm -f` is RED's TEST (a BUILD's names its proxy too).
+            {fn {"docker", ["rm", "-f", _id], _} ->
+               :counters.add(single_removals, 1, 1)
+               :counters.get(single_removals, 1) == 1
+             end, at_teardown}
+          ]
+        )
+
+      assert result == {:outcome, :verified, false}
+      assert_received {:before, before}
+      assert_received {:log, "none", after_test}
+      assert after_test - before < 50 * 1024 * 1024
+    end
+
+    test "(u) TEST writing past its budget into a file it unlinked while open is a sandbox error, though du can't see it",
+         context do
+      unlinked = "exec 3>/work/hidden; rm /work/hidden; head -c 67108864 /dev/zero >&3; sleep 5"
+
+      %{result: result, body: body} =
+        verify(context, plan(%{"test" => sh(unlinked)}),
+          deps: [disk_allowance_bytes: 16 * 1024 * 1024, disk_poll_ms: 200],
+          answers: %{
+            "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+          }
+        )
+
+      assert result == {:error, {:sandbox, :disk_limit}}
+      assert Map.take(body, ~w(error red green)) == %{"error" => "sandbox"}
     end
   end
 end

@@ -36,6 +36,58 @@ defmodule RsolvHost.VerifyDocker do
   def sh(script), do: ["vendor/bin/phpunit", script]
 
   @doc """
+  A run ID no other test run can pick: it names the run's containers and
+  their `rsolv.run` label, which cleanup removes by. `System.unique_integer/1`
+  repeats across VMs, so two concurrent runs could share one.
+  """
+  @spec unique_run() :: String.t()
+  def unique_run, do: Integer.to_string(:rand.uniform(10 ** 15) + 10 ** 15)
+
+  @doc """
+  A new directory of its own for a test, under the system temp directory and
+  named by a random run ID, removed when the test ends. ExUnit's `tmp_dir` is
+  the same path for the same test in every run of one checkout, and wiped
+  when that test starts, so two runs at once would share and delete it.
+  Use as `setup do: VerifyDocker.unique_tmp_dir()`.
+  """
+  @spec unique_tmp_dir() :: %{tmp_dir: Path.t()}
+  def unique_tmp_dir do
+    dir = Path.join(System.tmp_dir!(), "rsolv-docker-test-" <> unique_run())
+    File.mkdir_p!(dir)
+    on_exit(fn -> remove_tree(dir) end)
+    %{tmp_dir: dir}
+  end
+
+  # What a test's sandboxes left can be chmod 000; give the owner rwx back first.
+  defp remove_tree(dir) do
+    System.cmd("chmod", ["-R", "u+rwx", "--", dir], stderr_to_stdout: true)
+    File.rm_rf(dir)
+  end
+
+  @doc """
+  The tree at `url` and `sha`, fetched once per machine into the system temp
+  directory: into a directory of this run's own first, then renamed into
+  place, so a concurrent run never reads a half-fetched tree.
+  """
+  @spec cached_tree(String.t(), String.t()) :: Path.t()
+  def cached_tree(url, sha) do
+    tree = Path.join(System.tmp_dir!(), "rsolv-tree-#{sha}")
+
+    unless File.dir?(Path.join(tree, ".git")) do
+      fetch = tree <> ".fetch-" <> unique_run()
+      File.mkdir_p!(fetch)
+      git(fetch, ["init", "-q"])
+      git(fetch, ["fetch", "-q", "--depth", "1", url, sha])
+      git(fetch, ["checkout", "-q", "FETCH_HEAD"])
+
+      # Another run may have renamed its fetch into place first: keep that.
+      with {:error, _exists} <- File.rename(fetch, tree), do: File.rm_rf!(fetch)
+    end
+
+    tree
+  end
+
+  @doc """
   Commits `files` (path => bytes) to a new checkout under `dir`, and points
   the role at the pinned sandbox image until the test ends, when every
   container and network of the run is removed. Options: `:from` (a tree
@@ -47,7 +99,7 @@ defmodule RsolvHost.VerifyDocker do
   def checkout(dir, files, opts \\ []) do
     previous = Application.get_env(:rsolv_host, :sandbox_image)
     Application.put_env(:rsolv_host, :sandbox_image, @sandbox_image)
-    run = "#{System.unique_integer([:positive])}"
+    run = unique_run()
 
     on_exit(fn ->
       Application.put_env(:rsolv_host, :sandbox_image, previous)

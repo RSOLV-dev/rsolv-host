@@ -9,6 +9,8 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
 
   @moduletag :docker
   @moduletag :tmp_dir
+
+  setup do: RsolvHost.VerifyDocker.unique_tmp_dir()
   @moduletag timeout: 600_000
   @image "buildpack-deps:bookworm-curl@sha256:f5c5d07ea24ee91272739fe451c280aa4b7fa5120b9278815db5fcd713d83772"
 
@@ -51,7 +53,7 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
   # Runs `script` as the RED step's hostile test, in a sandbox on `copy`,
   # with `args` as its positional parameters ("$1"…).
   defp hostile(dir, copy, script, args \\ []) do
-    name = "rsolv-test-#{System.unique_integer([:positive])}"
+    name = "rsolv-test-#{RsolvHost.VerifyDocker.unique_run()}"
 
     {:ok, sbx} =
       Sandbox.start(
@@ -157,7 +159,7 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
   describe "a sandbox that plants a hostile .git (acceptance 5a)" do
     test "causes nothing on the host, even if git read its tree", context do
       # A path the planted config can name unquoted, outside every mount.
-      marker = Path.join(System.tmp_dir!(), "rsolv-5a-#{System.unique_integer([:positive])}")
+      marker = Path.join(System.tmp_dir!(), "rsolv-5a-#{RsolvHost.VerifyDocker.unique_run()}")
       on_exit(fn -> File.rm(marker) end)
 
       hostile(context.dir, context.red, """
@@ -194,7 +196,7 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
 
   describe "removing what an earlier attempt left" do
     test "removes only this repository's run and issue, at a lower attempt", _context do
-      run = "#{System.unique_integer([:positive])}"
+      run = RsolvHost.VerifyDocker.unique_run()
       mine = %{repo: "acme/app", run: run, issue: "7"}
 
       earlier = KilledVm.bystander(Map.put(mine, :attempt, "1"), @image)
@@ -216,7 +218,7 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
   describe "a job the runner stops with SIGTERM" do
     # The reviewer's killed.exs, as a test: a separate VM, stopped mid-step.
     test "removes the sandbox, proxy and network it made, and nothing it didn't", context do
-      run = "#{System.unique_integer([:positive])}"
+      run = RsolvHost.VerifyDocker.unique_run()
       name = "rsolv-test-killed-#{run}"
       mine = %{repo: "acme/app", run: run, issue: "7", attempt: "1"}
       twin = KilledVm.bystander(mine, @image)
@@ -273,7 +275,7 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
 
     # Docker made them, but the VM stopped before it recorded their IDs.
     test "removes what this VM made but hadn't recorded, by its labels", _context do
-      run = "#{System.unique_integer([:positive])}"
+      run = RsolvHost.VerifyDocker.unique_run()
       name = "rsolv-test-unrecorded-#{run}"
       mine = %{repo: "acme/app", run: run, issue: "7", attempt: "1"}
       twin = KilledVm.bystander(mine, @image)

@@ -11,6 +11,8 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
 
   @moduletag :docker
   @moduletag :tmp_dir
+
+  setup do: VerifyDocker.unique_tmp_dir()
   @moduletag timeout: 1_800_000
 
   describe "(i) the pytest stale hybrid, three ways (spec §4.3)" do
@@ -165,17 +167,21 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
         started = System.monotonic_time(:millisecond)
 
         %{body: body} =
+          run =
           VerifyDocker.verify(context, change, plan,
             deps: [budget_ms: 5 * 60_000 + 50_000],
             answers: %{"verification" => {200, %{verification: "verify_error", reasons: []}}}
           )
 
-        assert body["error"] == "prepare_failed_" <> unquote(side)
+        assert body["error"] == "prepare_failed_" <> unquote(side), why(run)
         assert System.monotonic_time(:millisecond) - started < 5 * 60_000
         refute ran?("echo ran > /work/rsolv-report", unquote(side))
       end
     end
   end
+
+  # The role's result and its annotations, for a failure message.
+  defp why(%{result: result, out: out}), do: "result: #{inspect(result)}\n#{out}"
 
   # Whether `side`'s TEST exec'd an argv holding `arg`.
   defp ran?(arg, side) do
@@ -196,18 +202,7 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
     @red_spec ~s|require "spec_helper"\n\nRSpec.describe "RED" do\n  it { expect(1).to eq 2 }\nend\n|
 
     # Fetched once per machine, at the pinned commit.
-    setup do
-      tree = Path.join(System.tmp_dir!(), "rsolv-railsgoat-#{@railsgoat_sha}")
-
-      unless File.dir?(Path.join(tree, ".git")) do
-        File.mkdir_p!(tree)
-        VerifyDocker.git(tree, ["init", "-q"])
-        VerifyDocker.git(tree, ["fetch", "-q", "--depth", "1", @railsgoat, @railsgoat_sha])
-        VerifyDocker.git(tree, ["checkout", "-q", "FETCH_HEAD"])
-      end
-
-      %{railsgoat: tree}
-    end
+    setup do: %{railsgoat: VerifyDocker.cached_tree(@railsgoat, @railsgoat_sha)}
 
     # railsgoat at #324's base, with a committed test DB holding a marker row
     # (its .gitignore emptied so it's committed), and `extra` files.
@@ -313,6 +308,7 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
         )
 
       %{body: body} =
+        run =
         rails_verify(
           context,
           change,
@@ -329,7 +325,7 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
           answers: @verify_error
         )
 
-      assert body["red"] && body["green"], inspect(body["error"])
+      assert body["red"] && body["green"], why(run)
 
       for side <- ["red", "green"] do
         report = report(body, side)
@@ -361,12 +357,13 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
 
       # The initializer is part of the RED snapshot, so RED's TEST has it.
       %{body: body} =
+        run =
         rails_verify(context, change, %{},
           answers: @verify_error,
           red_paths: ["config/initializers/zz_red.rb", "spec/red_spec.rb"]
         )
 
-      assert body["error"] == "prepare_failed_red"
+      assert body["error"] == "prepare_failed_red", why(run)
       refute rspec_ran?("red")
     end
 
@@ -379,9 +376,9 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
         {"spec/red_spec.rb", nil, @red_spec}
       ]
 
-      %{body: body} = rails_verify(context, change, %{}, answers: @verify_error)
+      %{body: body} = run = rails_verify(context, change, %{}, answers: @verify_error)
 
-      assert body["error"] == "prepare_failed_green"
+      assert body["error"] == "prepare_failed_green", why(run)
       assert rspec_ran?("red")
       refute rspec_ran?("green")
     end
@@ -407,9 +404,9 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
 
       change = [{"spec/red_spec.rb", nil, @red_spec}]
 
-      %{body: body} = rails_verify(context, change, %{}, answers: @verify_error)
+      %{body: body} = run = rails_verify(context, change, %{}, answers: @verify_error)
 
-      assert body["error"] == "prepare_failed_red"
+      assert body["error"] == "prepare_failed_red", why(run)
       refute rspec_ran?("red")
     end
   end
