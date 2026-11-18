@@ -49,6 +49,40 @@ defmodule RsolvHost.WorkspaceTest do
       assert Workspace.copy("/src", Path.join(dir, "w")) == {:error, {:sandbox_setup, :copy}}
     end
 
+    for {label, link} <- [
+          {"refs itself", ".git/refs"},
+          {"a directory under refs", ".git/refs/heads"}
+        ] do
+      test "never follows a symlinked #{label} out of the copy to drop a .lock (review: Astra P1)",
+           %{tmp_dir: dir} do
+        host = Path.join(dir, "host")
+        File.mkdir_p!(host)
+        File.write!(Path.join(host, "x.lock"), "host's own\n")
+
+        src = Path.join(dir, "src")
+        File.mkdir_p!(Path.dirname(Path.join(src, unquote(link))))
+        File.write!(Path.join(src, ".git/HEAD"), "ref: refs/heads/main\n")
+        File.ln_s!(host, Path.join(src, unquote(link)))
+
+        assert Workspace.copy(src, Path.join(dir, "dest"), exec: RsolvHost.Exec) == :ok
+        assert File.read!(Path.join(host, "x.lock")) == "host's own\n"
+      end
+    end
+
+    test "with sanitize: false, copies a tree as it is and walks nothing in it", %{tmp_dir: dir} do
+      src = Path.join(dir, "src")
+      File.mkdir_p!(Path.join(src, ".git/refs/heads"))
+      File.write!(Path.join(src, ".git/refs/heads/main.lock"), "")
+      File.write!(Path.join(src, ".git/config"), "[core]\n")
+      File.write!(Path.join(src, ".git/hooks"), "")
+      dest = Path.join(dir, "dest")
+
+      assert Workspace.copy(src, dest, exec: RsolvHost.Exec, sanitize: false) == :ok
+      assert File.exists?(Path.join(dest, ".git/refs/heads/main.lock"))
+      assert File.read!(Path.join(dest, ".git/config")) == "[core]\n"
+      assert File.exists?(Path.join(dest, ".git/hooks"))
+    end
+
     test "keeps a symlink a symlink instead of following it", %{tmp_dir: dir} do
       src = Path.join(dir, "src")
       File.mkdir_p!(src)

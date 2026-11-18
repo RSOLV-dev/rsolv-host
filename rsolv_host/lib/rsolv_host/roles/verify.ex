@@ -341,10 +341,11 @@ defmodule RsolvHost.Roles.Verify do
     end
   end
 
-  # A copy gets what's left of its side's time.
-  defp copy(src, dest, deadline) do
+  # A copy gets what's left of its side's time. Only the checkout's is
+  # sanitized: the host walks nothing in a tree BUILD wrote.
+  defp copy(src, dest, deadline, opts \\ []) do
     with left when left > 0 <- deadline - now(),
-         :ok <- Workspace.copy(src, dest, timeout_ms: left) do
+         :ok <- Workspace.copy(src, dest, [timeout_ms: left] ++ opts) do
       :ok
     else
       left when is_integer(left) -> {:verify_error, "sandbox", {:sandbox, :deadline}}
@@ -355,8 +356,8 @@ defmodule RsolvHost.Roles.Verify do
 
   defp built({{:ok, evidence}, :ok}, ctx, side, dirs, deadline) do
     result =
-      with :ok <- copy(dirs.build, dirs.test, deadline),
-           :ok <- copy(dirs.build_home, dirs.test_home, deadline) do
+      with :ok <- copy(dirs.build, dirs.test, deadline, sanitize: false),
+           :ok <- copy(dirs.build_home, dirs.test_home, deadline, sanitize: false) do
         if observe = ctx.deps[:observe], do: observe.(Map.put(dirs, :side, side))
         {:ok, evidence}
       end

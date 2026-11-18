@@ -1163,6 +1163,37 @@ defmodule RsolvHost.Roles.VerifyTest do
       end
     end
 
+    test "walks nothing in a tree BUILD wrote: a symlinked .git/refs it planted is copied as a link, and what it names is untouched",
+         context do
+      platform(context)
+      host = Path.join(context.tmp_dir, "host")
+      File.mkdir_p!(host)
+      File.write!(Path.join(host, "x.lock"), "host's own\n")
+      rsolv = Path.join(context.tmp_dir, "rsolv")
+
+      sandbox([
+        {&(runs?(&1, "npx") and "--yes" in elem(&1, 1) and side?(&1, "red")),
+         fn _call ->
+           git = Path.join([rsolv, "rsolv-41-2-7-verify-red-build", ".git"])
+           File.write!(Path.join(git, "index.lock"), "BUILD's\n")
+           File.rm_rf!(Path.join(git, "refs"))
+           File.ln_s!(host, Path.join(git, "refs"))
+           {:ok, %{status: 0, output: ""}}
+         end}
+      ])
+
+      test = self()
+
+      observe = fn %{side: side, test: copy} ->
+        send(test, {:lock, side, File.read(Path.join(copy, ".git/index.lock"))})
+      end
+
+      Verify.run(%{issue: 7}, context.env, deps(context) ++ [observe: observe])
+
+      assert File.read!(Path.join(host, "x.lock")) == "host's own\n"
+      assert_received {:lock, "red", {:ok, "BUILD's\n"}}
+    end
+
     test "BUILD never sees a fix byte: every change-set path holds its base", context do
       platform(context)
       test = self()
