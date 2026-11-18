@@ -22,6 +22,10 @@ attested binaries) is the design those changes must meet, not something you can 
 - **What `rsolv-host` holds.** A short-lived RSOLV run token, obtained from GitHub Actions OIDC
   (no RSOLV secret is configured anywhere), and, in the scan and publish jobs only, the job's own
   `GITHUB_TOKEN`. Neither ever enters the sandbox.
+- **Verify.** Each side (RED, then GREEN) first builds on the base commit alone, in a sandbox
+  that never sees a byte of the fix and that Docker must confirm removed. The fix is then
+  written into a fresh copy of that build, refusing any file the build changed or linked, and
+  the tests run in a second sandbox with no network and a read-only root filesystem.
 - **What it trusts.** Nothing the sandbox returns: tool output, the patch and test reports are
   size-capped, untrusted bytes. After a sandbox starts, `rsolv-host` never runs git or opens a
   path in the mounted tree.
@@ -84,8 +88,9 @@ What falls in each class:
   writable, the sandbox breaking its CLI contract: a malformed or oversized frame, more frames or
   issues than allowed, an issue it didn't file, a malformed patch. The scanner's stdout and stderr
   share the frame channel, so `rsolv-sandbox scan` must write nothing to stderr. In the verify
-  job: git failing to read the base commit, and a verify error (a sandbox failure, or the
-  project's install failing without the fix), which a new attempt may retry.
+  job: git failing to read the base commit, and a verify error (a sandbox failure, a sandbox
+  Docker couldn't confirm removed, the project's install failing without the fix, or its build
+  changing a file the fix changes), which a new attempt may retry.
 
 The `work` role writes the step outputs `outcome` and `has_patch` (`true` or `false`), and a
 job-summary row. `outcome` is one of:

@@ -90,6 +90,7 @@ defmodule RsolvHost.Outcome do
   def classify({:platform, 409, code}) when code in @ended, do: :configuration
   def classify({:platform, 413, _code}), do: :configuration
   def classify(:verify_error), do: :sandbox
+  def classify(:overlay_refused), do: :sandbox
   def classify(:base_read_failed), do: :sandbox
   # Local git on the job's own checkout: a repository that slow stays that slow.
   def classify(:base_read_timeout), do: :configuration
@@ -275,6 +276,14 @@ defmodule RsolvHost.Outcome do
   defp message(:base_read_failed, _class),
     do:
       "Reading the base commit with git failed on this runner. Check that git is installed and the checkout is intact."
+
+  defp message(:overlay_refused, _class),
+    do:
+      "The project's build on the base commit changed or linked a file the fix changes, so RSOLV couldn't write the fix in safely. Nothing will be published."
+
+  defp message({:sandbox, :teardown}, :sandbox),
+    do:
+      "Docker didn't confirm a verify sandbox removed, so verification stopped there. Check Docker on this runner; a warning above names what was left under $RUNNER_TEMP."
 
   defp message({:sandbox, :enoent}, :sandbox),
     do: "Docker is not available on this runner (no `docker` on PATH)."
