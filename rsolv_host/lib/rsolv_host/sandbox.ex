@@ -138,8 +138,10 @@ defmodule RsolvHost.Sandbox do
   ID as it's made), `:deadline` (monotonic milliseconds: no setup step
   runs past it, and one it stops is `:session_timeout`), `:home_dir` (a HOME
   from `make_home/2` to mount, which the sandbox then neither makes nor
-  removes; by default it makes its own) and `:read_only` (`run_args/1`). It
-  removes them by those IDs, never by name.
+  removes; by default it makes its own), `:read_only` (`run_args/1`) and
+  `:confirm` (a failed setup is `{:sandbox, :teardown}` unless Docker then
+  confirms nothing by the sandbox's or proxy's name is left). It removes
+  them by those IDs, never by name.
   """
   @spec start(keyword()) ::
           {:ok, t()}
@@ -182,9 +184,8 @@ defmodule RsolvHost.Sandbox do
       {:ok, uid, gid} ->
         run(sbx, image, opts, uid, gid)
 
-      {:error, {:sandbox_setup, _step}} = error ->
-        stop(sbx)
-        error
+      {:error, reason} ->
+        failed(sbx, reason, opts)
     end
   end
 
@@ -211,7 +212,10 @@ defmodule RsolvHost.Sandbox do
       )
     end
 
-    sbx |> setup(proxy_steps(sbx, opts) ++ [run]) |> started()
+    case setup(sbx, proxy_steps(sbx, opts) ++ [run]) do
+      {:ok, sbx} -> {:ok, sbx}
+      {:error, reason, sbx} -> failed(sbx, reason, opts)
+    end
   end
 
   # Each step answers {:ok, sbx}; the sandbox made so far is removed on the first error.
@@ -224,11 +228,19 @@ defmodule RsolvHost.Sandbox do
     end)
   end
 
-  defp started({:ok, sbx}), do: {:ok, sbx}
-
-  defp started({:error, reason, sbx}) do
+  # What a failed setup made is removed by ID. With `confirm: true`, Docker
+  # must then say no container by the sandbox's or proxy's name is left (one
+  # it made before its ID was recorded has that name), or the answer is
+  # `{:sandbox, :teardown}`: something may still run with the copy mounted.
+  defp failed(sbx, reason, opts) do
     stop(sbx)
-    {:error, reason}
+
+    names = [sbx.container | List.wrap(sbx.proxy)]
+
+    if Keyword.get(opts, :confirm, false) and
+         not Enum.all?(names, &gone?(sbx.exec, &1, @setup_timeout_ms)),
+       do: {:error, {:sandbox, :teardown}},
+       else: {:error, reason}
   end
 
   # The sandbox user is the copy's owner, which must be the host's own user (the
@@ -610,7 +622,7 @@ defmodule RsolvHost.Sandbox do
          ) do
       {:ok, %{status: status, output: output}} when status != 0 ->
         String.trim(output) =~
-          ~r/\A(?:Error response from daemon|Error|error): No such (?:container|object): #{id}\z/i
+          ~r/\A(?:Error response from daemon|Error|error): No such (?:container|object): #{Regex.escape(id)}\z/i
 
       _found_or_unanswered ->
         false

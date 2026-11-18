@@ -567,6 +567,36 @@ defmodule RsolvHost.SandboxTest do
      end}
   end
 
+  describe "start/1 with confirm: true, when setup fails" do
+    test "answers the step once Docker says no container by either name is left", %{tmp_dir: dir} do
+      FakeExec.script(
+        [
+          {fn {"docker", ["network", "connect" | _], _} -> true end,
+           {:ok, %{status: 1, output: ""}}},
+          gone()
+        ] ++ inspect_rules()
+      )
+
+      assert Sandbox.start(start_opts(dir, confirm: true)) ==
+               {:error, {:sandbox_setup, :proxy_connect}}
+
+      assert ["rsolv-41-7-work", "rsolv-41-7-work-proxy"] ==
+               for(["inspect", "--type", "container", _, _, name] <- docker_args(), do: name)
+    end
+
+    test "is a teardown error when a container by its name is still there", %{tmp_dir: dir} do
+      FakeExec.script([
+        {fn {"docker", ["run", "-d", "--name", "rsolv-41-7-work" | _], _} -> true end,
+         {:error, :timeout}},
+        {fn {"docker", ["inspect", "--type", "container" | _], _} -> true end,
+         {:ok, %{status: 0, output: "abc\n"}}}
+      ])
+
+      assert Sandbox.start(start_opts(dir, egress: :none, confirm: true)) ==
+               {:error, {:sandbox, :teardown}}
+    end
+  end
+
   describe "stop_confirmed/1" do
     defp owned(dir),
       do: Enum.map(["home-", "proxy-"], &Path.join([dir, "rsolv", &1 <> "rsolv-41-7-work"]))

@@ -896,6 +896,44 @@ defmodule RsolvHost.Roles.VerifyTest do
       end
     end
 
+    for {phase, name} <- [
+          {"BUILD", "rsolv-41-2-7-verify-red-build"},
+          {"TEST", "rsolv-41-2-7-verify-red-test"}
+        ] do
+      test "a #{phase} sandbox that can't start, once Docker confirms nothing by its name is left, leaves no copy or HOME (review: Kimi LOW)",
+           context do
+        platform(context, %{
+          "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+        })
+
+        sandbox([
+          {fn {"docker", ["run", "-d", "--name", unquote(name) | _], _} -> true end,
+           {:ok, %{status: 1, output: ""}}}
+        ])
+
+        assert run(context) == {:error, {:sandbox_setup, :sandbox_run}}
+        assert body()["error"] == "sandbox"
+        assert File.ls!(Path.join(context.tmp_dir, "rsolv")) == ["run-token-verify-7.json"]
+      end
+
+      test "a #{phase} sandbox that can't start, with a container by its name still there, keeps its copy and HOME",
+           context do
+        platform(context, %{
+          "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+        })
+
+        sandbox([
+          {fn {"docker", ["run", "-d", "--name", unquote(name) | _], _} -> true end,
+           {:error, :timeout}},
+          {fn {"docker", ["inspect", "--type", "container", _, _, unquote(name)], _} -> true end,
+           {:ok, %{status: 0, output: "abc\n"}}}
+        ])
+
+        assert run(context) == {:error, {:sandbox, :teardown}}
+        assert unquote(name) in File.ls!(Path.join(context.tmp_dir, "rsolv"))
+      end
+    end
+
     test "a docker exec that fails is a sandbox error (exit 4)", context do
       platform(context, %{
         "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}

@@ -375,7 +375,10 @@ defmodule RsolvHost.Roles.Verify do
   defp built({_result, :error}, ctx, side, dirs, _deadline),
     do: unconfirmed(ctx, side <> " BUILD", [dirs.build, dirs.build_home])
 
-  defp built({failed, :not_started}, _ctx, _side, _dirs, _deadline), do: failed
+  defp built({failed, :not_started}, ctx, _side, dirs, _deadline) do
+    remove(ctx, [dirs.build, dirs.build_home])
+    failed
+  end
 
   # TEST (B4-B7): the overlay, then an offline sandbox with a read-only root,
   # running only `test_prepare`, `test` and the report, with the plan's env.
@@ -404,12 +407,15 @@ defmodule RsolvHost.Roles.Verify do
   defp tested({_result, :error}, ctx, side, dirs),
     do: unconfirmed(ctx, side <> " TEST", [dirs.test, dirs.test_home])
 
-  defp tested({failed, :not_started}, _ctx, _side, _dirs), do: failed
+  defp tested({failed, :not_started}, ctx, _side, dirs) do
+    remove(ctx, [dirs.test, dirs.test_home])
+    failed
+  end
 
   defp start(ctx, name, copy, home, deadline, opts) do
     [name: name, network: name <> "-net", copy_dir: copy, home_dir: home]
     |> Keyword.merge(runner_temp: ctx.env["RUNNER_TEMP"], labels: ctx.labels)
-    |> Keyword.merge(created: ctx.created, deadline: deadline)
+    |> Keyword.merge(created: ctx.created, deadline: deadline, confirm: true)
     |> Keyword.merge(Keyword.take(ctx.deps, [:probe, :stat]))
     |> Keyword.merge(opts)
     |> Sandbox.start()
@@ -431,6 +437,11 @@ defmodule RsolvHost.Roles.Verify do
 
     {result, Sandbox.stop_confirmed(sbx, ctx.io, ctx.deadline)}
   end
+
+  # A sandbox that didn't start: `:not_started` once Docker confirmed nothing
+  # it made is left (`confirm: true`), else unconfirmed.
+  defp contained({:error, {:sandbox, :teardown}}, _ctx, _fun),
+    do: {{:verify_error, "sandbox", {:sandbox, :teardown}}, :error}
 
   defp contained({:error, reason}, _ctx, _fun),
     do: {{:verify_error, "sandbox", sandbox_reason(reason)}, :not_started}
