@@ -267,7 +267,7 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
       )
     end
 
-    defp rails_verify(context, change, overrides, opts \\ []) do
+    defp rails_verify(context, change, overrides, opts) do
       red_paths = Keyword.get(opts, :red_paths, ["spec/red_spec.rb"])
       plan = rails_plan(change, red_paths, overrides)
       VerifyDocker.verify(context, change, plan, Keyword.delete(opts, :red_paths))
