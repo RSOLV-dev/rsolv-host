@@ -72,6 +72,7 @@ defmodule RsolvHost.SandboxTest do
                  "--dns",
                  "127.0.0.1"
                ] ++
+                 ["--log-driver", "none"] ++
                  [
                    "--user",
                    "1001:118",
@@ -143,6 +144,10 @@ defmodule RsolvHost.SandboxTest do
           })
 
         for ["-e", value] <- Enum.chunk_every(args, 2, 1), do: assert(value =~ "=")
+
+        # Docker keeps no log a sandbox can fill (review round 2: Astra).
+        assert ["--log-driver", "none"] in Enum.chunk_every(args, 2, 1)
+        refute "--log-opt" in args
 
         assert for(["-v", mount] <- Enum.chunk_every(args, 2, 1), do: mount) ==
                  ["/c/#{name}:/work", "/h/#{name}:/opt/home"]
@@ -256,6 +261,8 @@ defmodule RsolvHost.SandboxTest do
                  "-d",
                  "--name",
                  "rsolv-41-7-work-proxy",
+                 "--log-driver",
+                 "none",
                  "-v",
                  conf_mount,
                  "-v",
@@ -396,6 +403,10 @@ defmodule RsolvHost.SandboxTest do
     end
   end
 
+  # `df -B1 --output=used,iused` for the copy's filesystem.
+  defp df(bytes, inodes), do: ok("   Used  IUsed\n#{bytes} #{inodes}\n")
+  defp df_rule(bytes, inodes), do: {fn {"df", _, _} -> true end, df(bytes, inodes)}
+
   describe "disk_used/1" do
     setup %{tmp_dir: dir} do
       %{
@@ -408,20 +419,44 @@ defmodule RsolvHost.SandboxTest do
       }
     end
 
-    test "is du's total when du read everything", %{sbx: sbx} do
-      FakeExec.script([{fn {"du", _, _} -> true end, ok("10\t/c\n5\t/h\n15\ttotal\n")}])
+    test "is du's total, and the used bytes and inodes of the copy's filesystem by df",
+         %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end, ok("10\t/c\n5\t/h\n15\ttotal\n")},
+        df_rule(7_000, 42)
+      ])
 
-      assert Sandbox.disk_used(sbx) == {:ok, 15}
+      assert Sandbox.disk_used(sbx) == {:ok, %{du: 15, fs: 7_000, inodes: 42}}
+
+      assert {"df", ["-B1", "--output=used,iused", "--", copy], opts} =
+               Enum.find(FakeExec.calls(), &match?({"df", _, _}, &1))
+
+      assert copy == sbx.copy_dir and opts[:timeout_ms] <= 30_000
     end
 
     test "is no measure when du couldn't read everything, whatever total it printed", %{sbx: sbx} do
       FakeExec.script([
         {fn {"du", _, _} -> true end,
          {:ok,
-          %{status: 1, output: "du: cannot read directory '/c/d': Permission denied\n15\ttotal\n"}}}
+          %{status: 1, output: "du: cannot read directory '/c/d': Permission denied\n15\ttotal\n"}}},
+        df_rule(1, 1)
       ])
 
       assert Sandbox.disk_used(sbx) == :error
+    end
+
+    for {label, answer} <- [
+          {"fails", {:ok, %{status: 1, output: "df: /c: No such file\n"}}},
+          {"prints no numbers", {:ok, %{status: 0, output: "   Used  IUsed\n- -\n"}}}
+        ] do
+      test "is no measure when df #{label}", %{sbx: sbx} do
+        FakeExec.script([
+          {fn {"du", _, _} -> true end, ok("15\ttotal\n")},
+          {fn {"df", _, _} -> true end, unquote(Macro.escape(answer))}
+        ])
+
+        assert Sandbox.disk_used(sbx) == :error
+      end
     end
   end
 
@@ -438,11 +473,26 @@ defmodule RsolvHost.SandboxTest do
       }
     end
 
+    @limits %{du: 100, fs: 1_000, inodes: 10}
+
     test "measures once more when the step ends, before any poll, and refuses a total over budget",
          %{sbx: sbx} do
-      FakeExec.script([{fn {"du", _, _} -> true end, ok("101\ttotal\n")}])
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("101\ttotal\n")}, df_rule(0, 0)])
 
-      assert Sandbox.watched(sbx, 100, 60_000, fn -> :done end) == {:error, :disk_limit}
+      assert Sandbox.watched(sbx, @limits, 60_000, fn -> :done end) == {:error, :disk_limit}
+    end
+
+    test "refuses the copy's filesystem past its bytes, though du is within: a file unlinked while open (review round 2: Kimi)",
+         %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("1\ttotal\n")}, df_rule(1_001, 0)])
+
+      assert Sandbox.watched(sbx, @limits, 60_000, fn -> :done end) == {:error, :disk_limit}
+    end
+
+    test "refuses the copy's filesystem past its inodes (review round 2: Kimi)", %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("1\ttotal\n")}, df_rule(0, 11)])
+
+      assert Sandbox.watched(sbx, @limits, 60_000, fn -> :done end) == {:error, :disk_limit}
     end
 
     test "waits for a measure in flight when the step ends", %{sbx: sbx} do
@@ -451,16 +501,18 @@ defmodule RsolvHost.SandboxTest do
          fn _call ->
            Process.sleep(300)
            ok("101\ttotal\n")
-         end}
+         end},
+        df_rule(0, 0)
       ])
 
-      assert Sandbox.watched(sbx, 100, 10, fn -> Process.sleep(50) end) == {:error, :disk_limit}
+      assert Sandbox.watched(sbx, @limits, 10, fn -> Process.sleep(50) end) ==
+               {:error, :disk_limit}
     end
 
     test "keeps the step's result within budget", %{sbx: sbx} do
-      FakeExec.script([{fn {"du", _, _} -> true end, ok("100\ttotal\n")}])
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("100\ttotal\n")}, df_rule(1_000, 10)])
 
-      assert Sandbox.watched(sbx, 100, 60_000, fn -> :done end) == :done
+      assert Sandbox.watched(sbx, @limits, 60_000, fn -> :done end) == :done
     end
   end
 

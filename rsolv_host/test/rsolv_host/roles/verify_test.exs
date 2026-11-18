@@ -226,6 +226,8 @@ defmodule RsolvHost.Roles.VerifyTest do
           {fn {exe, _, _} -> exe in ["env", "cp"] end, real},
           {fn {"du", _, _} -> true end,
            {:ok, %{status: 0, output: "4096\t/c\n4096\t/h\n8192\ttotal\n"}}},
+          {fn {"df", _, _} -> true end,
+           {:ok, %{status: 0, output: "   Used  IUsed\n1000000 5000\n"}}},
           gone(),
           {fn {"docker", ["inspect", "-f", t, _], _} -> t =~ "bridge" end,
            {:ok, %{status: 0, output: "172.17.0.5"}}},
@@ -460,7 +462,7 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       assert for({exe, _, _} <- after_first_sandbox, exe != "docker", do: exe)
              |> Enum.uniq()
-             |> Enum.sort() == ["cp", "du"]
+             |> Enum.sort() == ["cp", "df", "du"]
 
       rsolv = Path.join(context.tmp_dir, "rsolv")
 
@@ -828,6 +830,40 @@ defmodule RsolvHost.Roles.VerifyTest do
                  &1
                )
              )
+    end
+
+    for {label, over} <- [
+          {"blocks (a file unlinked while open, which du can't see)",
+           "#{1_000_000 + 5 * 1024 ** 3 + 1} 5000"},
+          {"inodes", "1000000 #{5000 + 1_000_001}"}
+        ] do
+      test "a TEST that grows its filesystem's used #{label} past the budget is a sandbox error (review round 2: Kimi)",
+           context do
+        platform(context, %{
+          "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+        })
+
+        testing = :counters.new(1, [])
+
+        sandbox([
+          {fn {"df", _, _} -> true end,
+           fn _call ->
+             used = if :counters.get(testing, 1) == 1, do: unquote(over), else: "1000000 5000"
+             {:ok, %{status: 0, output: "   Used  IUsed\n#{used}\n"}}
+           end},
+          {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")),
+           fn _call ->
+             :counters.put(testing, 1, 1)
+             Process.sleep(300)
+             {:ok, %{status: 0, output: ""}}
+           end}
+        ])
+
+        result = Verify.run(%{issue: 7}, context.env, deps(context) ++ [disk_poll_ms: 20])
+
+        assert result == {:error, {:sandbox, :disk_limit}}
+        assert_received {:request, "verification", %{"error" => "sandbox"}}
+      end
     end
 
     test "a side within its budget is never killed", context do

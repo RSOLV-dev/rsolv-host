@@ -42,9 +42,16 @@ defmodule RsolvHost.Roles.Verify do
   have no hard quota: Docker's `--storage-opt size` needs overlay2 on xfs
   with `pquota`, which GitHub-hosted runners (ext4) don't have, and a
   size-limited loop filesystem needs root. So a watchdog polls them, from
-  before bootstrap until each phase ends, and a phase past its budget is a
-  sandbox error (exit 4), never a verdict; between polls it can overshoot by
-  what it writes in 5 s.
+  before bootstrap until each phase ends: their size (`du`), and the used
+  bytes and inodes of the filesystem they're on (`df`, which also sees a file
+  unlinked while still open). A phase past its budget is a sandbox error
+  (exit 4), never a verdict; between polls it can overshoot by what it
+  writes in 5 s. Docker keeps no container log (`--log-driver none`).
+
+  Assumption: that overshoot is acceptable because the runner is disposable
+  and runs this one job (GitHub-hosted runners, ephemeral ARC runners), so
+  filling its disk can only fail this job. Persistent or shared self-hosted
+  runners aren't supported for verify.
 
   The verdicts are outcomes (exit 0): `verified`, `verify_failed` and
   `rejected` (by policy, or for want of a plan). What the code under test
@@ -101,6 +108,9 @@ defmodule RsolvHost.Roles.Verify do
   # names the overshoot). A GitHub-hosted runner has about 14 GB free.
   @disk_allowance_bytes 5 * 1024 * 1024 * 1024
   @disk_poll_ms 5_000
+  # ponytail: a million new inodes a phase, well past a large node_modules;
+  # raise with evidence.
+  @inode_allowance 1_000_000
   # The role's time (RFC-150 §5), under `rsolv-verify.yml`'s
   # `timeout-minutes: 120`, in minutes:
   #
@@ -519,10 +529,19 @@ defmodule RsolvHost.Roles.Verify do
     |> elem(0)
   end
 
+  # The phase may grow its copy and HOME (du), and their filesystem's used
+  # bytes and inodes (df), by the allowances, from `used` when it started.
   defp watched({:ok, used}, ctx, sbx, fun) do
     poll_ms = Keyword.get(ctx.deps, :disk_poll_ms, @disk_poll_ms)
     allowance = Keyword.get(ctx.deps, :disk_allowance_bytes, @disk_allowance_bytes)
-    Sandbox.watched(sbx, used + allowance, poll_ms, fun)
+
+    limits = %{
+      du: used.du + allowance,
+      fs: used.fs + allowance,
+      inodes: used.inodes + @inode_allowance
+    }
+
+    Sandbox.watched(sbx, limits, poll_ms, fun)
   end
 
   defp watched(:error, _ctx, _sbx, _fun), do: {:error, :disk_limit}

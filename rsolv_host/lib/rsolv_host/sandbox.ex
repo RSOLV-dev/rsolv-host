@@ -55,6 +55,10 @@ defmodule RsolvHost.Sandbox do
   # bind-mounted copy and HOME have no portable disk quota.
   @limits ["--memory", "4g", "--memory-swap", "4g", "--cpus", "2"]
   @tmp "/tmp:exec,size=1g"
+  # Docker keeps no log of a container's stdout: the host reads only exec
+  # output, under its caps, and a json-file log (which a sandbox can write
+  # through /proc/1/fd/1) is on the runner's disk, unrotated and unmeasured.
+  @no_log ["--log-driver", "none"]
   @shm "64m"
   @setup_timeout_ms 60_000
   @du_timeout_ms 30_000
@@ -86,6 +90,7 @@ defmodule RsolvHost.Sandbox do
       "127.0.0.1"
     ] ++
       labels(Map.get(opts, :labels, %{})) ++
+      @no_log ++
       [
         "--user",
         "#{opts.uid}:#{opts.gid}",
@@ -323,6 +328,7 @@ defmodule RsolvHost.Sandbox do
         :proxy,
         :proxy_run,
         ["run", "-d", "--name", &1.proxy | labels(&1.labels)] ++
+          @no_log ++
           ["-v", conf <> ":/etc/squid/squid.conf:ro"] ++
           ["-v", allowlist <> ":/etc/squid/allowlist.txt:ro", proxy_image],
         @pull_timeout_ms
@@ -470,17 +476,31 @@ defmodule RsolvHost.Sandbox do
   total from a du that read everything within 30 s is `:error`: a directory
   the sandbox made unreadable would hide what's beneath it.
 
+  Alongside it, `df -B1 --output=used,iused` gives the used bytes and inodes
+  of the filesystem the copy is on (under `RUNNER_TEMP`): du can't see a file
+  unlinked while still open, nor count inodes. Answers `%{du:, fs:, inodes:}`.
+
   ponytail: a file the project removes mid-walk also fails du, so a churning
   install can be stopped as over budget; retry the measure if that shows up.
   """
-  @spec disk_used(t()) :: {:ok, non_neg_integer()} | :error
+  @spec disk_used(t()) ::
+          {:ok, %{du: non_neg_integer(), fs: non_neg_integer(), inodes: non_neg_integer()}}
+          | :error
   def disk_used(sbx) do
     args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, sbx.home]
+    opts = [timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024]
 
-    with {:ok, %{status: 0, output: output}} <-
-           sbx.exec.run("du", args, timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024),
-         [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output) do
-      {:ok, String.to_integer(total)}
+    with {:ok, %{status: 0, output: output}} <- sbx.exec.run("du", args, opts),
+         [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output),
+         {:ok, %{status: 0, output: df}} <-
+           sbx.exec.run("df", ["-B1", "--output=used,iused", "--", sbx.copy_dir], opts),
+         [_, fs, inodes] <- Regex.run(~r/^\s*(\d+)\s+(\d+)\s*$/m, df) do
+      {:ok,
+       %{
+         du: String.to_integer(total),
+         fs: String.to_integer(fs),
+         inodes: String.to_integer(inodes)
+       }}
     else
       _no_total -> :error
     end
@@ -488,7 +508,8 @@ defmodule RsolvHost.Sandbox do
 
   @doc """
   Runs `fun` (the sandbox's steps) while a watchdog measures `disk_used/1`
-  every `poll_ms`: past `max_bytes`, or with no measure, it kills the
+  every `poll_ms`: past any of `limits` (`%{du:, fs:, inodes:}`), or with no
+  measure, it kills the
   sandbox, and the answer is `{:error, :disk_limit}` whatever `fun` returned.
   When `fun` returns, the watchdog finishes the measure in flight and takes
   one more; either over budget, or no answer within 35 s (du's 30 s and a
@@ -499,13 +520,13 @@ defmodule RsolvHost.Sandbox do
   `poll_ms` (plus du's own time); a hard bound needs a quota (xfs project
   quotas, btrfs subvolumes) or a size-limited loop device per copy.
   """
-  @spec watched(t(), non_neg_integer(), pos_integer(), (-> result)) ::
+  @spec watched(t(), map(), pos_integer(), (-> result)) ::
           result | {:error, :disk_limit}
         when result: term()
-  def watched(sbx, max_bytes, poll_ms, fun) do
+  def watched(sbx, limits, poll_ms, fun) do
     ref = make_ref()
     role = self()
-    {:ok, watchdog} = Task.start_link(fn -> watch(sbx, max_bytes, poll_ms, {role, ref}) end)
+    {:ok, watchdog} = Task.start_link(fn -> watch(sbx, limits, poll_ms, {role, ref}) end)
 
     result =
       try do
@@ -535,15 +556,15 @@ defmodule RsolvHost.Sandbox do
 
   # Tells the role {ref, :disk_limit} as soon as a measure fails, or, once
   # asked to stop, the verdict of one last measure.
-  defp watch(sbx, max_bytes, poll_ms, {role, ref} = tell) do
+  defp watch(sbx, limits, poll_ms, {role, ref} = tell) do
     receive do
       {:stop, ^ref} ->
-        send(role, {ref, verdict(disk_used(sbx), max_bytes)})
+        send(role, {ref, verdict(disk_used(sbx), limits)})
     after
       poll_ms ->
-        case verdict(disk_used(sbx), max_bytes) do
+        case verdict(disk_used(sbx), limits) do
           :within ->
-            watch(sbx, max_bytes, poll_ms, tell)
+            watch(sbx, limits, poll_ms, tell)
 
           :disk_limit ->
             send(role, {ref, :disk_limit})
@@ -552,8 +573,13 @@ defmodule RsolvHost.Sandbox do
     end
   end
 
-  defp verdict({:ok, used}, max_bytes) when used <= max_bytes, do: :within
-  defp verdict(_over_or_unmeasured, _max_bytes), do: :disk_limit
+  defp verdict({:ok, used}, limits) do
+    if Enum.all?(limits, fn {key, max} -> Map.fetch!(used, key) <= max end),
+      do: :within,
+      else: :disk_limit
+  end
+
+  defp verdict(:error, _limits), do: :disk_limit
 
   @doc "Takes the sandbox off the proxy's network: from here on it has no network."
   @spec disconnect(t()) :: :ok | {:error, term()}

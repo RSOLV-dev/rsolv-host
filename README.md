@@ -26,8 +26,11 @@ attested binaries) is the design those changes must meet, not something you can 
   that never sees a byte of the fix and that Docker must confirm removed. The fix is then
   written into a fresh copy of that build, refusing any file the build changed or linked, and
   the tests run in a second sandbox with no network. Both sandboxes have a read-only root; the
-  copy and HOME they write have no hard disk quota, so `rsolv-host` polls their size and stops a
-  sandbox past its budget, which fails the job rather than judging the fix.
+  copy and HOME they write have no hard disk quota, so `rsolv-host` polls their size and the
+  filesystem's used space and inodes, and stops a sandbox past its budget, which fails the job
+  rather than judging the fix. Between polls a sandbox can overshoot, which is acceptable only
+  because verify assumes a disposable runner that runs this one job (GitHub-hosted, or an
+  ephemeral ARC runner): persistent or shared self-hosted runners aren't supported for verify.
 - **What it trusts.** Nothing the sandbox returns: tool output, the patch and test reports are
   size-capped, untrusted bytes. After a sandbox starts, `rsolv-host` never runs git or opens a
   path in the mounted tree.
