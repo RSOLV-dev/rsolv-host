@@ -110,9 +110,12 @@ defmodule RsolvHost.Roles.VerifyDockerTest do
       %{status: 0} =
         hostile(context.dir, context.red, ~s(ln -s "$1" /work/escape), [context.green])
 
-      assert Copies.write_images(context.red, [add("escape/src/b.js")], %{
-               "escape/src/b.js" => "pwned"
-             }) == {:error, {:unsafe_path, "escape/src/b.js"}}
+      assert Copies.write_images(
+               context.red,
+               [add("escape/src/b.js")],
+               %{"escape/src/b.js" => "pwned"},
+               %{}
+             ) == {:error, {:unsafe_path, "escape/src/b.js"}}
 
       refute File.exists?(Path.join(context.green, "src/b.js"))
     end

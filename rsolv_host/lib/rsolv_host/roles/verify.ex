@@ -193,6 +193,7 @@ defmodule RsolvHost.Roles.Verify do
     with {:ok, ctx} <- bound(ctx),
          {:ok, paths} <- touched_paths(ctx),
          {:ok, facts} <- BaseFactsReader.read(ctx.workspace, ctx.base, paths),
+         ctx = Map.put(ctx, :base_bytes, base_bytes(facts)),
          {:ok, verdict} <- call(ctx, :base_facts, [BaseFacts.to_json(facts)]),
          :ok <- accepted(verdict),
          {:ok, plan} <- plan(ctx, verdict),
@@ -235,6 +236,17 @@ defmodule RsolvHost.Roles.Verify do
       error -> error
     end
   end
+
+  # Every touched regular base blob's bytes, read from git before any sandbox:
+  # what `Copies` checks an overlay target against.
+  defp base_bytes(facts),
+    do:
+      for(
+        {path, %{type: :blob, content: bytes}} <- facts.paths,
+        is_binary(bytes),
+        into: %{},
+        do: {path, bytes}
+      )
 
   defp accepted(%{"status" => "accepted"}), do: :ok
   defp accepted(%{"status" => "rejected"}), do: {:outcome, :rejected, false}
@@ -367,7 +379,7 @@ defmodule RsolvHost.Roles.Verify do
   # TEST (B4-B7): the overlay, then an offline sandbox with a read-only root,
   # running only `test_prepare`, `test` and the report, with the plan's env.
   defp test(ctx, plan, {entries, images}, side, dirs, deadline) do
-    case Copies.write_images(dirs.test, entries, images) do
+    case Copies.write_images(dirs.test, entries, images, ctx.base_bytes) do
       :ok ->
         ctx
         |> start(dirs.name <> "-test", dirs.test, dirs.test_home, deadline,

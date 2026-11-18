@@ -8,10 +8,14 @@ defmodule RsolvHost.Copies do
 
   - An add's path must be absent: its file is created `O_EXCL`.
   - A modify's or delete's path must be a regular file with one link that
-    still holds its base blob (`base_blob_sha`), checked before anything is
-    written: a BUILD that linked or rewrote it is refused, and no other
-    pathname can change. A modify writes a new file in the copy's root and
-    renames it into place.
+    still holds exactly its base bytes, checked before anything is written:
+    a BUILD that linked or rewrote it is refused, and no other pathname can
+    change. The base bytes are trusted ones the caller read from git before
+    any sandbox (`RsolvCore.BaseFacts`, at most 5 MiB), and must hash to the
+    entry's `base_blob_sha`. The target's size must equal theirs before it's
+    opened, and no more than that is read, so a huge or sparse file BUILD
+    left there is refused from its `lstat` alone. A modify writes a new file
+    in the copy's root and renames it into place.
 
   What it wrote is then checked again with `File.lstat/1`. Any refusal is
   `{:error, {:unsafe_path, path}}`.
@@ -20,14 +24,19 @@ defmodule RsolvHost.Copies do
   alias RsolvCore.{BaseFacts, ChangeSet}
   alias RsolvCore.ChangeSet.Entry
 
-  @doc "Applies `entries` to the copy at `dir`, with `images` (path => bytes) for adds and modifies."
-  @spec write_images(Path.t(), [Entry.t()], %{String.t() => binary()}) ::
-          :ok | {:error, {:unsafe_path, String.t()}}
-  def write_images(dir, entries, images) do
+  @doc """
+  Applies `entries` to the copy at `dir`, with `images` (path => bytes) for
+  adds and modifies, and `base` (path => the base's trusted bytes) for
+  modifies and deletes.
+  """
+  @spec write_images(Path.t(), [Entry.t()], %{String.t() => binary()}, %{
+          String.t() => binary()
+        }) :: :ok | {:error, {:unsafe_path, String.t()}}
+  def write_images(dir, entries, images, base) do
     Enum.reduce_while(entries, :ok, fn %Entry{path: path} = entry, :ok ->
       with true <- ChangeSet.valid_path?(path),
            :ok <- parents(dir, entry),
-           :ok <- write(dir, Path.join(dir, path), entry, images) do
+           :ok <- write(dir, Path.join(dir, path), entry, images, base) do
         {:cont, :ok}
       else
         _unsafe -> {:halt, {:error, {:unsafe_path, path}}}
@@ -35,29 +44,46 @@ defmodule RsolvHost.Copies do
     end)
   end
 
-  defp write(_dir, target, %Entry{op: :delete} = entry, _images) do
-    with :ok <- based(target, entry), do: File.rm(target)
+  defp write(_dir, target, %Entry{op: :delete} = entry, _images, base) do
+    with :ok <- based(target, entry, base), do: File.rm(target)
   end
 
   # O_EXCL: nothing already at the path is followed or reused.
-  defp write(_dir, target, %Entry{op: :add, path: path, mode: mode}, images) do
+  defp write(_dir, target, %Entry{op: :add, path: path, mode: mode}, images, _base) do
     with :ok <- create(target, Map.fetch!(images, path), file_mode(mode)), do: written(target)
   end
 
-  defp write(dir, target, %Entry{op: :modify, path: path, mode: mode} = entry, images) do
-    with :ok <- based(target, entry),
+  defp write(dir, target, %Entry{op: :modify, path: path, mode: mode} = entry, images, base) do
+    with :ok <- based(target, entry, base),
          :ok <- replace(dir, target, Map.fetch!(images, path), file_mode(mode)),
          do: written(target)
   end
 
-  # The base's own file, and its only name: read only once lstat says it's
-  # a regular file, so a FIFO or a symlink is never opened.
-  defp based(target, %Entry{base_blob_sha: sha}) do
-    with {:ok, %File.Stat{type: :regular, links: 1}} <- File.lstat(target),
-         {:ok, bytes} <- File.read(target),
+  # The base's own bytes, under its only name. Opened only once lstat says
+  # it's a regular file of exactly the base's size (so never a FIFO, a
+  # symlink or anything bigger), and read for at most one byte more.
+  defp based(target, %Entry{path: path, base_blob_sha: sha}, base) do
+    with {:ok, bytes} <- Map.fetch(base, path),
          true <- ChangeSet.blob_sha(bytes) == sha,
+         size = byte_size(bytes),
+         {:ok, %File.Stat{type: :regular, links: 1, size: ^size}} <- File.lstat(target),
+         {:ok, ^bytes} <- read_at_most(target, size),
          do: :ok,
-         else: (_moved_linked_or_changed -> :error)
+         else: (_missing_moved_linked_or_changed -> :error)
+  end
+
+  defp read_at_most(path, size) do
+    with {:ok, file} <- :file.open(path, [:read, :binary, :raw]) do
+      try do
+        case :file.read(file, size + 1) do
+          {:ok, data} -> {:ok, data}
+          :eof -> {:ok, ""}
+          error -> error
+        end
+      after
+        :file.close(file)
+      end
+    end
   end
 
   defp written(target) do
