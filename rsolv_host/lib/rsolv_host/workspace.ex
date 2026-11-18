@@ -38,9 +38,7 @@ defmodule RsolvHost.Workspace do
 
       case exec.run("cp", ["-a", "--", src <> "/.", dest], timeout_ms: timeout_ms) do
         {:ok, %{status: 0}} ->
-          if Keyword.get(opts, :sanitize, true),
-            do: dest |> Path.join(".git") |> sanitize(),
-            else: :ok
+          sanitized(dest, Keyword.get(opts, :sanitize, true))
 
         {:error, :enoent} ->
           {:error, {:sandbox, :enoent}}
@@ -50,6 +48,9 @@ defmodule RsolvHost.Workspace do
       end
     end
   end
+
+  defp sanitized(dest, true), do: dest |> Path.join(".git") |> sanitize()
+  defp sanitized(_dest, false), do: :ok
 
   # File.rm_rf/1 and File.lstat/1 never follow a symlink. A .git that isn't a
   # directory (a gitfile) names a repository outside every mount.
