@@ -1,33 +1,19 @@
 defmodule RsolvHost.Roles.VerifyBoundaryDockerTest do
   # The verify role's trust boundary (design spec §2.3, §8), end to end on a
-  # real Docker with the pinned sandbox image; only the platform is stubbed.
-  #
-  # The base checkout carries `vendor/bin/phpunit`, a one-line shell harness
-  # standing in for project tooling: it's base code, and the one plan
-  # executable a tree can supply, so each test drives real shell steps
-  # through an ordinary plan. Every sentinel is on the host side (tmp_dir,
-  # `deps[:observe]`, or the bytes the host posts), and every comparison is
-  # by SHA-256, exit status or the reported bytes.
+  # real Docker with the pinned sandbox image (`RsolvHost.VerifyDocker`).
+  # Each test drives shell steps through the base's harness; every sentinel
+  # is on the host side (tmp_dir, `deps[:observe]`, or the bytes the host
+  # posts), and every comparison is by SHA-256, exit status or reported bytes.
   use ExUnit.Case, async: false
 
-  import RsolvHost.PlatformStub
+  import RsolvHost.VerifyDocker, except: [verify: 3, verify: 4]
 
-  alias RsolvCore.ChangeSet
-  alias RsolvHost.{Exec, FakeExec, Oidc, Platform}
-  alias RsolvHost.Roles.Verify
+  alias RsolvHost.VerifyDocker
 
   @moduletag :docker
   @moduletag :tmp_dir
   @moduletag timeout: 900_000
 
-  @sandbox_image (fn ->
-                    config = File.read!(Path.expand("../../../config/config.exs", __DIR__))
-                    [_, image] = Regex.run(~r/sandbox_image:\s*"([^"]+)"/, config)
-                    image
-                  end).()
-
-  @run_id "0b0e5f7c-7d3c-4d8e-9a55-3f6f1b0c2a11"
-  @harness ~s(#!/bin/sh\n# Stands in for project tooling: runs its one argument.\nexec /bin/sh -c "$1"\n)
   @base %{
     "app/a.rb" => "class A; end # base\n",
     "app/b.rb" => "class B; end # base\n",
@@ -43,205 +29,18 @@ defmodule RsolvHost.Roles.VerifyBoundaryDockerTest do
   @fix_paths Map.keys(@fixed)
   @report "/work/rsolv-report"
 
-  defp git(dir, args) do
-    env = [
-      {"GIT_CONFIG_GLOBAL", "/dev/null"},
-      {"GIT_CONFIG_NOSYSTEM", "1"},
-      {"GIT_AUTHOR_NAME", "t"},
-      {"GIT_AUTHOR_EMAIL", "t@example.com"},
-      {"GIT_COMMITTER_NAME", "t"},
-      {"GIT_COMMITTER_EMAIL", "t@example.com"}
-    ]
-
-    {out, 0} = System.cmd("git", args, cd: dir, env: env, stderr_to_stdout: true)
-    String.trim(out)
-  end
-
   setup %{tmp_dir: dir} do
-    previous = Application.get_env(:rsolv_host, :sandbox_image)
-    Application.put_env(:rsolv_host, :sandbox_image, @sandbox_image)
-    run = "#{System.unique_integer([:positive])}"
-
-    on_exit(fn ->
-      Application.put_env(:rsolv_host, :sandbox_image, previous)
-      remove_run(run)
-    end)
-
-    checkout = Path.join(dir, "checkout")
-
-    for {path, bytes} <- Map.put(@base, "vendor/bin/phpunit", @harness) do
-      File.mkdir_p!(Path.dirname(Path.join(checkout, path)))
-      File.write!(Path.join(checkout, path), bytes)
-    end
-
-    File.chmod!(Path.join(checkout, "vendor/bin/phpunit"), 0o755)
-    git(checkout, ["init", "-q"])
-    git(checkout, ["add", "-A"])
-    git(checkout, ["commit", "-q", "-m", "base"])
-
-    env = %{
-      "RUNNER_TEMP" => dir,
-      "GITHUB_WORKSPACE" => checkout,
-      "GITHUB_RUN_ID" => run,
-      "GITHUB_RUN_ATTEMPT" => "1",
-      "GITHUB_REPOSITORY" => "acme/app",
-      "ACTIONS_ID_TOKEN_REQUEST_URL" => "https://token.actions.example/id?v=1",
-      "ACTIONS_ID_TOKEN_REQUEST_TOKEN" => "t"
-    }
-
-    %{env: env, checkout: checkout, base: git(checkout, ["rev-parse", "HEAD"]), run: run}
-  end
-
-  # Whatever a test's role run left: its containers, then its networks.
-  defp remove_run(run) do
-    for {list, rm} <- [
-          {["ps", "-aq"], ["rm", "-f"]},
-          {["network", "ls", "-q"], ["network", "rm"]}
-        ] do
-      {ids, _} = System.cmd("docker", list ++ ["--filter", "label=rsolv.run=#{run}"])
-      ids = String.split(ids, "\n", trim: true)
-      if ids != [], do: System.cmd("docker", rm ++ ids, stderr_to_stdout: true)
-    end
-  end
-
-  defp entry(path, op, base, new) do
-    %{
-      "path" => path,
-      "op" => op,
-      "base_mode" => base && "100644",
-      "base_blob_sha" => base && ChangeSet.blob_sha(base),
-      "mode" => "100644",
-      "new_blob_sha" => ChangeSet.blob_sha(new)
-    }
-  end
-
-  defp change_set do
-    Enum.sort_by(
-      [
-        entry(@red_path, "add", nil, @red)
-        | for({p, new} <- @fixed, do: entry(p, "modify", @base[p], new))
-      ],
-      & &1["path"]
+    checkout(dir, Map.put(@base, "vendor/bin/phpunit", harness()),
+      executable: ["vendor/bin/phpunit"]
     )
   end
 
-  defp digest(json), do: json |> ChangeSet.from_json() |> elem(1) |> ChangeSet.digest()
+  defp change,
+    do: [{@red_path, nil, @red} | for({path, new} <- @fixed, do: {path, @base[path], new})]
 
-  defp sh(script), do: ["vendor/bin/phpunit", script]
+  defp plan(overrides), do: plan(change(), [@red_path], overrides)
 
-  # A v2 plan whose steps are harness scripts: `prepare` runs in BUILD,
-  # `test_prepare` and `test` in TEST, and the report is `@report`.
-  defp plan(overrides) do
-    red = Enum.filter(change_set(), &(&1["path"] == @red_path))
-
-    Map.merge(
-      %{
-        "v" => 2,
-        "framework" => "rspec",
-        "install" => [],
-        "prepare" => [],
-        "test_prepare" => [],
-        "env" => %{},
-        "test" => sh("true"),
-        "report" => %{"format" => "rspec_json", "argv" => ["cat", "--", @report]},
-        "install_timeout_s" => 600,
-        "test_timeout_s" => 600,
-        "change_set" => change_set(),
-        "change_set_digest" => digest(change_set()),
-        "red_paths" => [@red_path],
-        "red_digest" => digest(red),
-        "policy_version" => "2026-11-v4"
-      },
-      overrides
-    )
-  end
-
-  defp platform(context, plan, answers) do
-    test = self()
-    Req.Test.stub(Oidc, &Req.Test.json(&1, %{value: "e30.e30.sig"}))
-
-    images =
-      Map.new([
-        {@red_path, Base.encode64(@red)} | for({p, b} <- @fixed, do: {p, Base.encode64(b)})
-      ])
-
-    defaults = %{
-      "touched-paths" => {200, %{paths: Enum.map(change_set(), & &1["path"]), work_attempt: 1}},
-      "base-facts" =>
-        {200,
-         %{
-           status: "accepted",
-           reasons: [],
-           flags: [],
-           change_set_digest: plan["change_set_digest"],
-           red_digest: plan["red_digest"],
-           policy_version: plan["policy_version"]
-         }},
-      "verify-plan" => {200, plan},
-      "post-images" => {200, %{files: images}},
-      "verification" => {200, %{verification: "green", reasons: []}}
-    }
-
-    answers = Map.merge(defaults, answers)
-
-    Req.Test.stub(Platform, fn conn ->
-      case {conn.method, conn.request_path} do
-        {"POST", "/api/v1/runs/token"} ->
-          send(test, {:event, {:platform, "token"}})
-          Req.Test.json(conn, Map.put(token(), :base_sha, context.base))
-
-        {method, "/api/v1/runs/" <> @run_id <> "/issues/7/" <> name} ->
-          answer(conn, method, name, answers[name], test)
-      end
-    end)
-  end
-
-  defp answer(conn, method, name, {status, json}, test) do
-    {body, conn} = if method == "POST", do: body(conn), else: {nil, conn}
-    send(test, {:event, {:platform, name}})
-    send(test, {:request, name, method, body})
-    conn |> Plug.Conn.put_status(status) |> Req.Test.json(json)
-  end
-
-  # Every exec is real, except what `overrides` answers first. Each docker
-  # run is told to the test, so requests can be ordered against sandboxes.
-  defp real(overrides) do
-    test = self()
-
-    FakeExec.script(
-      overrides ++
-        [
-          {fn _call -> true end,
-           fn {exe, args, opts} ->
-             if match?({"docker", ["run" | _]}, {exe, args}),
-               do: send(test, {:event, :docker_run})
-
-             Exec.run(exe, args, opts)
-           end}
-        ]
-    )
-  end
-
-  defp verify(context, plan, opts \\ []) do
-    platform(context, plan, Keyword.get(opts, :answers, %{}))
-    real(Keyword.get(opts, :exec, []))
-    {:ok, io} = StringIO.open("")
-    result = Verify.run(%{issue: 7}, context.env, [io: io] ++ Keyword.get(opts, :deps, []))
-    {:ok, {_in, out}} = StringIO.close(io)
-    %{result: result, body: posted(), out: out}
-  end
-
-  defp posted do
-    receive do
-      {:request, "verification", "POST", body} -> body
-    after
-      0 -> nil
-    end
-  end
-
-  defp report(body, side), do: Base.decode64!(body[side]["report"])
-
-  defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+  defp verify(context, plan, opts \\ []), do: VerifyDocker.verify(context, change(), plan, opts)
 
   defp tree_sha(dir) do
     for path <- Path.wildcard(Path.join(dir, "**"), match_dot: true), File.regular?(path) do
@@ -251,20 +50,6 @@ defmodule RsolvHost.Roles.VerifyBoundaryDockerTest do
   end
 
   defp rsolv_dirs(context), do: File.ls!(Path.join(context.env["RUNNER_TEMP"], "rsolv"))
-
-  defp containers(context) do
-    {out, 0} =
-      System.cmd("docker", [
-        "ps",
-        "-a",
-        "--filter",
-        "label=rsolv.run=#{context.run}",
-        "--format",
-        "{{.Names}}"
-      ])
-
-    String.split(out, "\n", trim: true)
-  end
 
   describe "BUILD sees only the base (B1)" do
     test "(a) prepare's sha256sum of every change-set target, carried into TEST, is the base's",
@@ -504,7 +289,7 @@ defmodule RsolvHost.Roles.VerifyBoundaryDockerTest do
 
       %{body: body} = verify(context, plan(%{"test" => sh(tamper)}))
 
-      events = collect_events()
+      events = events()
       after_sandbox = Enum.drop_while(events, &(&1 != :docker_run))
       assert for({:platform, name} <- after_sandbox, do: name) == ["verification"]
 
@@ -539,14 +324,6 @@ defmodule RsolvHost.Roles.VerifyBoundaryDockerTest do
                  "prepare" => [Base.encode64("0123456789"), %{"truncated" => true}]
                }
       end
-    end
-  end
-
-  defp collect_events(acc \\ []) do
-    receive do
-      {:event, event} -> collect_events([event | acc])
-    after
-      0 -> Enum.reverse(acc)
     end
   end
 end
