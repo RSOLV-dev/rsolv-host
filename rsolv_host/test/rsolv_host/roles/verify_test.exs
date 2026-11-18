@@ -193,6 +193,16 @@ defmodule RsolvHost.Roles.VerifyTest do
     end
   end
 
+  # What coreutils `timeout` in the sandbox answers once a step's time is up:
+  # it waits out the seconds the host gave it, then exits `status`.
+  defp in_container_timeout(status \\ 124) do
+    fn {"docker", args, _} ->
+      [_timeout, "-k", _kill, seconds | _argv] = Enum.drop_while(args, &(&1 != "timeout"))
+      Process.sleep(String.to_integer(seconds) * 1_000 + 50)
+      {:ok, %{status: status, output: ""}}
+    end
+  end
+
   # `docker inspect` answering that a container it's asked about is gone.
   defp gone,
     do:
@@ -790,11 +800,13 @@ defmodule RsolvHost.Roles.VerifyTest do
     test "a RED test past its time limit is a timed-out side, GREEN still runs, and the platform's verify error isn't retried",
          context do
       platform(context, %{
+        "verify-plan" => {200, Map.put(plan(), "test_timeout_s", 1)},
         "verification" => {200, %{verification: "verify_error", reasons: ["timeout_red"]}}
       })
 
       sandbox([
-        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")), {:error, :timeout}}
+        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")),
+         in_container_timeout()}
       ])
 
       result = run(context)
@@ -844,21 +856,43 @@ defmodule RsolvHost.Roles.VerifyTest do
     end
 
     for {label, answer} <- [
-          {"past its time limit", {:error, :timeout}},
-          {"over its output cap", {:error, :output_too_large}}
+          {"past its time limit", quote(do: in_container_timeout())},
+          {"over its output cap", Macro.escape({:error, :output_too_large})}
         ] do
       test "an install #{label} is the side's install failure, never a timeout", context do
         platform(context, %{
+          "verify-plan" => {200, Map.put(plan(), "install_timeout_s", 1)},
           "verification" => {200, %{verification: "failed", reasons: ["install_failed_green"]}}
         })
 
         sandbox([
-          {&(runs?(&1, "npx") and "--yes" in elem(&1, 1) and side?(&1, "green")),
-           unquote(Macro.escape(answer))}
+          {&(runs?(&1, "npx") and "--yes" in elem(&1, 1) and side?(&1, "green")), unquote(answer)}
         ])
 
         assert run(context) == {:outcome, :verify_failed, false}
         assert_received {:request, "verification", %{"error" => "install_failed_green"}}
+      end
+    end
+
+    for {step, matcher} <- [
+          {"install", quote(do: &(runs?(&1, "npx") and "--yes" in elem(&1, 1)))},
+          {"test_prepare", quote(do: &runs?(&1, "bundle"))},
+          {"test", quote(do: &(runs?(&1, "npx") and "jest" in elem(&1, 1)))},
+          {"report", quote(do: &runs?(&1, "cat"))}
+        ] do
+      test "a #{step} docker exec the host stops past its grace is a sandbox error (exit 4), never a test timeout (review: Kimi MEDIUM)",
+           context do
+        v2(context, %{
+          "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+        })
+
+        sandbox([{unquote(matcher), {:error, :timeout}}])
+
+        result = run(context)
+
+        assert body()["error"] == "sandbox"
+        assert result == {:error, {:sandbox, :timeout}}
+        assert Outcome.exit_code(result) == 4
       end
     end
 
@@ -1364,19 +1398,21 @@ defmodule RsolvHost.Roles.VerifyTest do
 
     for side <- ["red", "green"],
         {label, answer} <- [
-          {"exits 1", {:ok, %{status: 1, output: "boom"}}},
-          {"times out", {:error, :timeout}},
-          {"floods its output", {:error, :output_too_large}}
+          {"exits 1", Macro.escape({:ok, %{status: 1, output: "boom"}})},
+          {"times out", quote(do: in_container_timeout())},
+          {"floods its output", Macro.escape({:error, :output_too_large})}
         ] do
       test "a #{side} TEST prepare step that #{label} is prepare_failed_#{side}, and the test never runs",
            context do
         v2(context, %{"verification" => {200, %{verification: "verify_error", reasons: []}}})
 
         sandbox([
-          {&(runs?(&1, "bundle") and side?(&1, unquote(side))), unquote(Macro.escape(answer))}
+          {&(runs?(&1, "bundle") and side?(&1, unquote(side))), unquote(answer)}
         ])
 
-        run(context)
+        # A budget that leaves each side seconds, so a step that times out
+        # does so on its clamped limit.
+        Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: 5 * 60_000 + 8_000])
 
         assert body()["error"] == "prepare_failed_" <> unquote(side)
         refute Enum.any?(events(unquote(side)), &match?({:test, _, _}, &1))

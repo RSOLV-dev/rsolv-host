@@ -621,7 +621,9 @@ defmodule RsolvHost.Roles.Verify do
          ) do
       {:ok, status, output} ->
         log(ctx, output)
-        {:ok, side_result(status, false, report_bytes(sbx, plan, output, deadline))}
+
+        with {:ok, report} <- report_bytes(sbx, plan, output, deadline),
+             do: {:ok, side_result(status, false, report)}
 
       {:timed_out, status} ->
         {:ok, side_result(status, true, "")}
@@ -639,8 +641,10 @@ defmodule RsolvHost.Roles.Verify do
 
   # Runs `argv` with what's left before `deadline`, in whole seconds (the
   # sandbox's `timeout` takes seconds). A step stopped by `timeout` once its
-  # time was up, or by the host past its grace, is `{:timed_out, status}`;
-  # the same status any earlier is the step's own.
+  # time was up is `{:timed_out, status}`; the same status any earlier is the
+  # step's own. Only that is the code under test timing out: the docker CLI
+  # the host stopped past its grace is `{:error, :timeout}`, the sandbox's
+  # failure.
   defp timed(sbx, argv, deadline, max_bytes, env) do
     start = now()
     limit_ms = div(deadline - start, 1_000) * 1_000
@@ -657,19 +661,26 @@ defmodule RsolvHost.Roles.Verify do
     do: {:timed_out, status}
 
   defp timed_out({:ok, %{status: status, output: output}}, _late), do: {:ok, status, output}
-  defp timed_out({:error, :timeout}, _late), do: {:timed_out, 124}
   defp timed_out(error, _late), do: error
 
   defp report_bytes(_sbx, %{report: %{argv: nil}}, output, _deadline)
        when byte_size(output) <= @report_max_bytes,
-       do: output
+       do: {:ok, output}
 
-  defp report_bytes(_sbx, %{report: %{argv: nil}}, _output, _deadline), do: ""
+  defp report_bytes(_sbx, %{report: %{argv: nil}}, _output, _deadline), do: {:ok, ""}
 
+  # A report that's missing, late or too large goes up empty; Docker failing
+  # to read it is the sandbox's failure.
   defp report_bytes(sbx, %{report: %{argv: argv}} = plan, _output, deadline) do
     case timed(sbx, argv, min(now() + @report_timeout_ms, deadline), @report_max_bytes, plan.env) do
-      {:ok, 0, bytes} -> bytes
-      _missing_late_or_too_large -> ""
+      {:ok, 0, bytes} ->
+        {:ok, bytes}
+
+      {:error, reason} when reason != :output_too_large ->
+        {:verify_error, "sandbox", {:sandbox, reason}}
+
+      _missing_late_or_too_large ->
+        {:ok, ""}
     end
   end
 
