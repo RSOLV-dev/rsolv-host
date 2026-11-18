@@ -285,6 +285,14 @@ defmodule RsolvHost.Outcome do
     do:
       "Docker didn't confirm a verify sandbox removed, so verification stopped there. Check Docker on this runner; a warning above names what was left under $RUNNER_TEMP."
 
+  defp message({:sandbox, :disk_limit}, :sandbox),
+    do:
+      "A verify sandbox wrote past its disk budget and was stopped; nothing was judged. Check the runner's free disk, then re-run the issue's workflow."
+
+  defp message({:sandbox, :timeout}, :sandbox),
+    do:
+      "Docker didn't answer a verify step in time, so nothing was judged. Check Docker on this runner, then re-run the issue's workflow."
+
   defp message({:sandbox, :enoent}, :sandbox),
     do: "Docker is not available on this runner (no `docker` on PATH)."
 

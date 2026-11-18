@@ -326,4 +326,80 @@ defmodule RsolvHost.Roles.VerifyBoundaryDockerTest do
       end
     end
   end
+
+  describe "after the review (Astra, Kimi)" do
+    test "(c2) a BUILD that leaves a 10 GiB sparse file at a fix target makes GREEN's overlay refuse, without reading it",
+         context do
+      %{result: result, body: body} =
+        verify(context, plan(%{"prepare" => [sh("truncate -s 10G app/a.rb")]}),
+          answers: %{"verification" => {200, %{verification: "verify_error", reasons: []}}}
+        )
+
+      assert result == {:error, :overlay_refused}
+      assert body["error"] == "install_failed_green"
+    end
+
+    test "(q) a BUILD that swaps .git/refs for a symlink to a host directory: the host deletes nothing there",
+         context do
+      host = Path.join(context.env["RUNNER_TEMP"], "host-refs")
+      File.mkdir_p!(host)
+      File.write!(Path.join(host, "x.lock"), "host's own\n")
+
+      %{result: result} =
+        verify(
+          context,
+          plan(%{"prepare" => [sh("rm -rf .git/refs && ln -s '#{host}' .git/refs")]})
+        )
+
+      assert result == {:outcome, :verified, false}
+      assert File.read!(Path.join(host, "x.lock")) == "host's own\n"
+    end
+
+    test "(r) BUILD's root is read-only: it can write only /work, HOME, /tmp and /dev/shm",
+         context do
+      touches =
+        Enum.map_join(
+          ~w(/x /var/tmp/x /etc/x /usr/local/x /opt/x /run/x /work/x $HOME/x /tmp/x /dev/shm/x),
+          "; ",
+          &"if touch #{&1} 2>/work/e; then echo '#{&1} ok'; else echo '#{&1}' $(cat /work/e); fi"
+        )
+
+      %{body: body} = verify(context, plan(%{"prepare" => [sh(touches)]}))
+
+      lines =
+        body["build_evidence"]["red"]["prepare"]
+        |> hd()
+        |> Base.decode64!()
+        |> String.split("\n", trim: true)
+        |> Map.new(&List.to_tuple(String.split(&1, " ", parts: 2)))
+
+      for path <- ~w(/x /var/tmp/x /etc/x /usr/local/x /opt/x /run/x),
+          do: assert(lines[path] =~ "Read-only file system", "#{path}: #{lines[path]}")
+
+      for path <- ~w(/work/x $HOME/x /tmp/x /dev/shm/x), do: assert(lines[path] == "ok", path)
+    end
+
+    for phase <- ["BUILD", "TEST"] do
+      test "(s) a #{phase} writing past its disk budget is stopped, and is a sandbox error, never a verdict",
+           context do
+        fill = "head -c 67108864 /dev/zero > /work/fill; sleep 5"
+
+        overrides =
+          if unquote(phase) == "BUILD",
+            do: %{"prepare" => [sh(fill)]},
+            else: %{"test" => sh(fill)}
+
+        %{result: result, body: body} =
+          verify(context, plan(overrides),
+            deps: [disk_allowance_bytes: 16 * 1024 * 1024, disk_poll_ms: 200],
+            answers: %{
+              "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+            }
+          )
+
+        assert result == {:error, {:sandbox, :disk_limit}}
+        assert Map.take(body, ~w(error red green)) == %{"error" => "sandbox"}
+      end
+    end
+  end
 end

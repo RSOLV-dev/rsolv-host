@@ -174,6 +174,8 @@ defmodule RsolvHost.OutcomeTest do
             {:invalid_plan, "verify plan"},
             {:overlay_refused, "changed or linked a file the fix changes"},
             {{:sandbox, :teardown}, "didn't confirm a verify sandbox removed"},
+            {{:sandbox, :disk_limit}, "wrote past its disk budget"},
+            {{:sandbox, :timeout}, "Docker didn't answer"},
             {{:platform, 409, "issue_terminal"}, "already published or rejected"},
             {{:platform, 413, nil}, "too large for RSOLV to verify"}
           ] do

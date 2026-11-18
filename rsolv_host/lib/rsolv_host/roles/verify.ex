@@ -15,8 +15,8 @@ defmodule RsolvHost.Roles.Verify do
   attempt, issue, side and phase:
 
   1. **BUILD**, on base code only: a pristine copy of the checkout and a new
-     HOME. Bootstrap and `install` run behind the proxy, then the sandbox is
-     disconnected and `prepare` runs. Every `install` and `prepare` step's
+     HOME, with a read-only root. Bootstrap and `install` run behind the
+     proxy, then the sandbox is disconnected and `prepare` runs. Every `install` and `prepare` step's
      output is kept as that side's build evidence, which the host never
      interprets. Docker must then confirm the sandbox gone
      (`RsolvHost.Sandbox.stop_confirmed/3`) before anything reads what it
@@ -30,10 +30,21 @@ defmodule RsolvHost.Roles.Verify do
      one with the plan's `env`. Docker must confirm it gone before its
      directories are removed and before anything later starts.
 
-  The host never builds a command, and never runs git or opens a path in a
-  tree a sandbox has mounted: only the disk watchdog's `du` walks one,
-  following no symlink and reading no content (`RsolvHost.Sandbox.watched/4`),
-  and a phase past its disk budget is judged like an output flood.
+  The host never builds a command, never runs git in a tree a sandbox has
+  mounted, and never walks one: it copies BUILD's tree for TEST without
+  looking inside, opens only the overlay's own targets, each no-follow and
+  read no further than the base's size, and the disk watchdog's `du` follows
+  no symlink and reads no content (`RsolvHost.Sandbox.watched/4`).
+
+  Disk. Both phases have a read-only root, so a sandbox can write only its
+  copy and HOME (bind mounts on the runner's disk), a 1 GiB `/tmp` and a
+  64 MiB `/dev/shm` (both tmpfs, in its 4 GiB of memory). The copy and HOME
+  have no hard quota: Docker's `--storage-opt size` needs overlay2 on xfs
+  with `pquota`, which GitHub-hosted runners (ext4) don't have, and a
+  size-limited loop filesystem needs root. So a watchdog polls them, from
+  before bootstrap until each phase ends, and a phase past its budget is a
+  sandbox error (exit 4), never a verdict; between polls it can overshoot by
+  what it writes in 5 s.
 
   The verdicts are outcomes (exit 0): `verified`, `verify_failed` and
   `rejected` (by policy, or for want of a plan). What the code under test
@@ -43,9 +54,11 @@ defmodule RsolvHost.Roles.Verify do
   an overlay refused, is the side's install failure; a `test_prepare` step
   that does is its `prepare_failed`. A test that timed out is the platform's
   verify error, which the role ends as `verify_timed_out` (exit 2): running it
-  again would time out again. The sandbox failing (Docker, the image,
-  bootstrap, a teardown Docker can't confirm) is a verify error a new attempt
-  may retry (exit 4).
+  again would time out again; only the sandbox's own `timeout` counts, not the
+  docker CLI the host stopped. The sandbox failing (Docker, the image,
+  bootstrap, a docker CLI past its grace, a teardown Docker can't confirm, a
+  phase past its disk budget) is a verify error a new attempt may retry
+  (exit 4).
   """
 
   alias RsolvCore.{BaseFacts, VerifyPlan}
@@ -133,7 +146,7 @@ defmodule RsolvHost.Roles.Verify do
   `RsolvHost.Sandbox.start/1`), `:budget_ms`, the role's deadline: every
   platform request, retries and their waits included, ends by it
   (`RsolvHost.Http.deadline/3`), or the role ends `session_timeout`; and, for
-  tests, `:disk_poll_ms` and `:observe`, called with a side's directories
+  tests, `:disk_poll_ms`, `:disk_allowance_bytes` and `:observe`, called with a side's directories
   once its BUILD is copied for TEST and before the BUILD's are removed.
   """
   @spec run(map(), map(), keyword()) :: Outcome.result()
@@ -320,7 +333,7 @@ defmodule RsolvHost.Roles.Verify do
     with :ok <- home(ctx, dirs.name <> "-build"),
          :ok <- copy(ctx.workspace, dirs.build, deadline) |> or_remove(ctx, dirs) do
       ctx
-      |> start(dirs.name <> "-build", dirs.build, dirs.build_home, deadline, [])
+      |> start(dirs.name <> "-build", dirs.build, dirs.build_home, deadline, read_only: true)
       |> contained(ctx, &build_steps(ctx, &1, plan, side, deadline))
       |> built(ctx, side, dirs, deadline)
     end
@@ -465,21 +478,18 @@ defmodule RsolvHost.Roles.Verify do
   defp sandbox_reason(:session_timeout), do: {:sandbox, :deadline}
   defp sandbox_reason(reason), do: reason
 
-  # The project's steps run under the disk watchdog, from what the copy and
-  # HOME use once bootstrap has set up the toolchains.
+  # Bootstrap and the project's steps run under the disk watchdog, from what
+  # the copy and HOME use before bootstrap.
   defp build_steps(ctx, sbx, plan, side, deadline) do
     failed = {:verify_error, "install_failed_" <> side, :verify_error}
 
-    with :ok <- bootstrap(ctx, sbx, deadline) do
-      sbx
-      |> Sandbox.disk_used()
-      |> watched(ctx, sbx, fn -> project(ctx, sbx, plan, failed, deadline) end)
-      |> built_within(ctx, side, failed)
-    end
+    sbx
+    |> Sandbox.disk_used()
+    |> watched(ctx, sbx, fn ->
+      with :ok <- bootstrap(ctx, sbx, deadline), do: project(ctx, sbx, plan, failed, deadline)
+    end)
+    |> within_disk(ctx, side)
   end
-
-  defp built_within({:error, :disk_limit}, ctx, side, failed), do: over_disk(ctx, side, failed)
-  defp built_within(result, _ctx, _side, _failed), do: result
 
   defp project(ctx, sbx, plan, failed, deadline) do
     install = min(now() + plan.install_timeout_s * 1_000, deadline)
@@ -511,20 +521,25 @@ defmodule RsolvHost.Roles.Verify do
 
   defp watched({:ok, used}, ctx, sbx, fun) do
     poll_ms = Keyword.get(ctx.deps, :disk_poll_ms, @disk_poll_ms)
-    Sandbox.watched(sbx, used + @disk_allowance_bytes, poll_ms, fun)
+    allowance = Keyword.get(ctx.deps, :disk_allowance_bytes, @disk_allowance_bytes)
+    Sandbox.watched(sbx, used + allowance, poll_ms, fun)
   end
 
   defp watched(:error, _ctx, _sbx, _fun), do: {:error, :disk_limit}
 
-  defp over_disk(ctx, side, failed) do
+  # Past the budget is the sandbox's failure (exit 4), never a side's result:
+  # the watchdog polls, so how far past depends on timing, not on the code.
+  defp within_disk({:error, :disk_limit}, ctx, side) do
     ActionsLog.warning(
       "RSOLV",
       "The #{side} sandbox wrote past its disk budget and was stopped (disk_limit).",
       ctx.io
     )
 
-    failed
+    {:verify_error, "sandbox", {:sandbox, :disk_limit}}
   end
+
+  defp within_disk(result, _ctx, _side), do: result
 
   # A new disk baseline for TEST, then `test_prepare` (each step its own
   # exec; its output is only logged) and the test, each under the watchdog.
@@ -532,14 +547,11 @@ defmodule RsolvHost.Roles.Verify do
     failed = {:verify_error, "prepare_failed_" <> side, :verify_error}
     used = Sandbox.disk_used(sbx)
 
-    case test_prepare(ctx, sbx, plan, used, failed, deadline) do
+    case ctx |> test_prepare(sbx, plan, used, failed, deadline) |> within_disk(ctx, side) do
       {:ok, _outputs} ->
         used
         |> watched(ctx, sbx, fn -> run_test(ctx, sbx, plan, deadline) end)
-        |> disk_limited(ctx, side)
-
-      {:error, :disk_limit} ->
-        over_disk(ctx, side, failed)
+        |> within_disk(ctx, side)
 
       failed_or_error ->
         failed_or_error
@@ -555,13 +567,6 @@ defmodule RsolvHost.Roles.Verify do
       run_steps(ctx, sbx, plan.test_prepare, prepare, failed, plan.env)
     end)
   end
-
-  # Judged as an output flood: the side's result, with an empty report.
-  defp disk_limited({:error, :disk_limit}, ctx, side) do
-    over_disk(ctx, side, {:ok, side_result(@killed_status, false, "")})
-  end
-
-  defp disk_limited(result, _ctx, _side), do: result
 
   # Bootstrap sets up the sandbox's own toolchains, so its failure is the
   # sandbox's (retryable), never the project's install failing.

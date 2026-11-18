@@ -736,23 +736,31 @@ defmodule RsolvHost.Roles.VerifyTest do
   describe "run/3's disk budget" do
     defp du(bytes), do: {:ok, %{status: 0, output: "#{bytes}\t/c\n0\t/h\n#{bytes}\ttotal\n"}}
 
-    test "measures the copy and its home with a no-follow du, after bootstrap", context do
+    test "measures the copy and its home with a no-follow du before bootstrap, which runs under the watchdog (review: Kimi HIGH)",
+         context do
       platform(context)
       sandbox()
 
       run(context)
 
-      assert [{"du", args, opts} | _] = for({"du", _, _} = call <- FakeExec.calls(), do: call)
+      calls = FakeExec.calls()
+      first_du = Enum.find_index(calls, &match?({"du", _, _}, &1))
+
+      first_bootstrap =
+        Enum.find_index(calls, &match?({"docker", ["exec" | _], _}, &1))
+
+      assert first_du < first_bootstrap
+      assert [{"du", args, opts} | _] = for({"du", _, _} = call <- calls, do: call)
       copy = Path.join([context.tmp_dir, "rsolv", "rsolv-41-2-7-verify-red-build"])
       home = Path.join([context.tmp_dir, "rsolv", "home-rsolv-41-2-7-verify-red-build"])
       assert args == ["-s", "-c", "-x", "-P", "-B1", "--", copy, home]
       assert opts[:timeout_ms] <= 30_000
     end
 
-    test "a side writing past its budget is killed, and is a side result with an empty report",
+    test "a TEST writing past its budget is killed, and is a sandbox error, never a side result (review: Kimi HIGH)",
          context do
       platform(context, %{
-        "verification" => {200, %{verification: "failed", reasons: ["unparseable_report_red"]}}
+        "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
       })
 
       testing = :counters.new(1, [])
@@ -773,16 +781,53 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       result = Verify.run(%{issue: 7}, context.env, deps(context) ++ [disk_poll_ms: 20])
 
-      assert result == {:outcome, :verify_failed, false}
-
-      assert_received {:request, "verification",
-                       %{"red" => %{"exit_code" => 137, "timed_out" => false, "report" => ""}}}
+      assert result == {:error, {:sandbox, :disk_limit}}
+      assert Outcome.exit_code(result) == 4
+      assert_received {:request, "verification", %{"error" => "sandbox"} = body}
+      refute Map.has_key?(body, "red")
 
       red = FakeExec.docker_id("rsolv-41-2-7-verify-red-test")
       assert Enum.any?(docker_calls(), &match?({"docker", ["kill", ^red], _}, &1))
 
       {:ok, {_in, out}} = StringIO.close(context.io)
       assert out =~ "disk_limit"
+    end
+
+    test "a BUILD bootstrap writing past its budget is a sandbox error (review: Kimi HIGH)",
+         context do
+      platform(context, %{
+        "verification" => {200, %{verification: "verify_error", reasons: ["sandbox"]}}
+      })
+
+      booting = :counters.new(1, [])
+
+      sandbox([
+        {fn {"du", _, _} -> true end,
+         fn _call ->
+           if :counters.get(booting, 1) == 1, do: du(1_000 + 5 * 1024 ** 3 + 1), else: du(1_000)
+         end},
+        {fn {"docker", ["exec" | args], _} = call ->
+           List.last(args) == "bootstrap" and side?(call, "red")
+         end,
+         fn _call ->
+           :counters.put(booting, 1, 1)
+           Process.sleep(300)
+           {:ok, %{status: 0, output: ~s({"ok":true,"ecosystems":[],"log_tail":""})}}
+         end}
+      ])
+
+      result = Verify.run(%{issue: 7}, context.env, deps(context) ++ [disk_poll_ms: 20])
+
+      assert result == {:error, {:sandbox, :disk_limit}}
+      assert_received {:request, "verification", %{"error" => "sandbox"}}
+
+      refute Enum.any?(
+               docker_calls(),
+               &match?(
+                 {"docker", ["run", "-d", "--name", "rsolv-41-2-7-verify-red-test" | _], _},
+                 &1
+               )
+             )
     end
 
     test "a side within its budget is never killed", context do
@@ -1164,7 +1209,7 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       for side <- ["red", "green"] do
         assert events(side) == [
-                 {:run_build, false},
+                 {:run_build, true},
                  {:bootstrap, false, []},
                  {:install, false, []},
                  :disconnect,
@@ -1217,7 +1262,7 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       for side <- ["red", "green"] do
         assert events(side) == [
-                 {:run_build, false},
+                 {:run_build, true},
                  {:bootstrap, false, []},
                  {:install, false, []},
                  :disconnect,
@@ -1459,7 +1504,7 @@ defmodule RsolvHost.Roles.VerifyTest do
     end
 
     for side <- ["red", "green"] do
-      test "a #{side} TEST prepare step past the disk budget is prepare_failed_#{side}",
+      test "a #{side} TEST prepare step past the disk budget is a sandbox error, never prepare_failed (review: Kimi HIGH)",
            context do
         v2(context, %{"verification" => {200, %{verification: "verify_error", reasons: []}}})
         preparing = :counters.new(1, [])
@@ -1481,7 +1526,7 @@ defmodule RsolvHost.Roles.VerifyTest do
 
         Verify.run(%{issue: 7}, context.env, deps(context) ++ [disk_poll_ms: 20])
 
-        assert body()["error"] == "prepare_failed_" <> unquote(side)
+        assert body()["error"] == "sandbox"
         refute Enum.any?(events(unquote(side)), &match?({:test, _, _}, &1))
       end
     end
