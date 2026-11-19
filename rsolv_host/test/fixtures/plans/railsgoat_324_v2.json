@@ -61,7 +61,7 @@
     ]
   ],
   "install_timeout_s": 1800,
-  "policy_version": "2026-11-v4",
+  "policy_version": "2026-11-v5",
   "prepare": [],
   "red_digest": "sha256:c7a65795783e1da45b74b1e8a6dd20d90a1f190232e5ee327e68c09deea32667",
   "red_paths": [

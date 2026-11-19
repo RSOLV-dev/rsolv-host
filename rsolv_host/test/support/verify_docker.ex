@@ -216,7 +216,7 @@ defmodule RsolvHost.VerifyDocker do
         "change_set_digest" => digest(entries),
         "red_paths" => red_paths,
         "red_digest" => digest(Enum.filter(entries, &(&1["path"] in red_paths))),
-        "policy_version" => "2026-11-v4"
+        "policy_version" => "2026-11-v5"
       },
       overrides
     )
