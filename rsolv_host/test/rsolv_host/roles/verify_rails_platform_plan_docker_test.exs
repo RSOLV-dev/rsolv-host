@@ -70,7 +70,16 @@ defmodule RsolvHost.Roles.VerifyRailsPlatformPlanDockerTest do
     red = report(body, "red") |> JSON.decode!()
     green = report(body, "green") |> JSON.decode!()
     assert body["red"]["exit_code"] == 1, inspect(red)
-    assert red["summary"]["failure_count"] == 2, inspect(red["summary"])
+    # railsgoat runs specs in random order, db:prepare seeds two users into
+    # the fresh DB, and DatabaseCleaner truncates only after each example. So
+    # the OR 1=1 case fails RED only when it runs second; run first, its
+    # `[0]` is a seeded user. The case that targets the victim by id fails
+    # either way.
+    assert red["summary"]["failure_count"] in 1..2, inspect(red["summary"])
+
+    assert %{"status" => "failed"} =
+             Enum.find(red["examples"], &(&1["description"] =~ "modify another user's data"))
+
     assert red["summary"]["errors_outside_of_examples_count"] == 0
     assert body["green"]["exit_code"] == 0, inspect(green)
     assert green["summary"]["failure_count"] == 0
