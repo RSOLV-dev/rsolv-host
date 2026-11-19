@@ -1569,6 +1569,44 @@ defmodule RsolvHost.Roles.VerifyTest do
       end
     end
 
+    # The side's time spent before the step could start (here by TEST's
+    # `docker run`, as a first image pull would): the step never ran, so it's
+    # the sandbox's deadline (exit 4), never the project's prepare failing nor
+    # a test timing out (CI run 44470014524, arm).
+    for side <- ["red", "green"], stage <- ["test_prepare", "test"] do
+      test "a #{side} #{stage} its side's deadline left no second to start never runs, and is the sandbox's deadline (exit 4)",
+           context do
+        plan = if unquote(stage) == "test", do: plan(), else: plan_v2()
+
+        platform(context, %{
+          "verify-plan" => {200, plan},
+          "verification" => {200, %{verification: "verify_error", reasons: []}}
+        })
+
+        sandbox([
+          {fn {"docker", ["run", "-d", "--name", name | _], opts} ->
+             name == "rsolv-41-2-7-verify-#{unquote(side)}-test" and
+               Process.sleep(opts[:timeout_ms] - 300) == :ok
+           end,
+           fn {"docker", ["run", "-d", "--name", name | _], _} ->
+             {:ok, %{status: 0, output: FakeExec.docker_id(name) <> "\n"}}
+           end}
+        ])
+
+        result =
+          Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: 5 * 60_000 + 8_000])
+
+        assert body()["error"] == "sandbox"
+        assert result == {:error, {:sandbox, :deadline}}
+        assert Outcome.exit_code(result) == 4
+
+        refute Enum.any?(
+                 events(unquote(side)),
+                 &match?({step, true, _env} when step in [:test_prepare, :test], &1)
+               )
+      end
+    end
+
     for side <- ["red", "green"] do
       test "a #{side} TEST prepare step past the disk budget is a sandbox error, never prepare_failed (review: Kimi HIGH)",
            context do
