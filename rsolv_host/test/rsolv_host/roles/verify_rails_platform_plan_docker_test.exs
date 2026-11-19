@@ -126,7 +126,17 @@ defmodule RsolvHost.Roles.VerifyRailsPlatformPlanDockerTest do
     assert body["red"] && body["green"], why(run)
     out("verification_railsgoat_migration.json", body)
 
-    assert body["red"]["exit_code"] == 1, report(body, "red")
+    red = report(body, "red") |> JSON.decode!()
+    assert body["red"]["exit_code"] == 1, inspect(red)
+
+    # RED fails for the missing column alone: one example, one assertion
+    # failure, no load error.
+    assert %{"example_count" => 1, "failure_count" => 1, "errors_outside_of_examples_count" => 0} =
+             red["summary"]
+
+    assert [%{"status" => "failed", "exception" => %{"message" => message}}] = red["examples"]
+    assert message =~ ~s(to include "flag")
+
     assert body["green"]["exit_code"] == 0, report(body, "green")
     refute run.out =~ ~r/PendingMigrationError|EnvironmentMismatchError|Could not find table/
     refute Map.has_key?(body, "files")
@@ -171,5 +181,10 @@ defmodule RsolvHost.Roles.VerifyRailsPlatformPlanDockerTest do
       assert summary["errors_outside_of_examples_count"] == 1, "#{side}: #{inspect(summary)}"
       assert body[side]["exit_code"] != 0
     end
+
+    # The load error is the fix's own NameError, not something else failing.
+    messages = report(body, "green") |> JSON.decode!() |> Map.fetch!("messages") |> Enum.join()
+    assert messages =~ "NameError"
+    assert messages =~ "NoSuchThing"
   end
 end

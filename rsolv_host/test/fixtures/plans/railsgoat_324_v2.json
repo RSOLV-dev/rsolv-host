@@ -26,6 +26,14 @@
       "config",
       "set",
       "--local",
+      "gemfile",
+      "/work/Gemfile"
+    ],
+    [
+      "bundle",
+      "config",
+      "set",
+      "--local",
       "frozen",
       "true"
     ],

@@ -2,6 +2,8 @@
   "attributes": {},
   "base_sha": "3d4736f2ec46a647727c108a431b3716fcf3c192",
   "paths": {
+    ".bundle": { "type": "missing" },
+    ".bundle/config": { "type": "missing" },
     ".config": { "type": "missing" },
     ".mise": { "type": "missing" },
     ".mise.local.toml": { "type": "missing" },

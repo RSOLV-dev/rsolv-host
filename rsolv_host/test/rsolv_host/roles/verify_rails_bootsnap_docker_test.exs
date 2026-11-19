@@ -21,7 +21,6 @@ defmodule RsolvHost.Roles.VerifyRailsBootsnapDockerTest do
                    "../../fixtures/plans/railsgoat_324_v2.json",
                    __DIR__
                  )
-  @report "/tmp/rsolv-report.json"
   @db ~w(storage/test.sqlite3 storage/test.sqlite3-journal storage/test.sqlite3-wal
          storage/test.sqlite3-shm)
 

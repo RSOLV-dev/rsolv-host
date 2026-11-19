@@ -1,4 +1,5 @@
 [
+  ".bundle/config",
   ".config",
   ".mise",
   ".mise.local.toml",
