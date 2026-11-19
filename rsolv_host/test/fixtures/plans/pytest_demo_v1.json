@@ -1,0 +1,76 @@
+{
+  "change_set": [
+    {
+      "base_blob_sha": "6ae487db6c89cf6ecc2fe3bbe5879ed7971226b6",
+      "base_mode": "100644",
+      "mode": "100644",
+      "new_blob_sha": "7ce55701678cbc5258b0e565e2e0152db5dc027c",
+      "op": "modify",
+      "path": "app/render.py"
+    },
+    {
+      "base_blob_sha": null,
+      "base_mode": null,
+      "mode": "100644",
+      "new_blob_sha": "5a81703b6ff97e6cf0d4c1f71013e33ca56df233",
+      "op": "add",
+      "path": "tests/test_xss.py"
+    }
+  ],
+  "change_set_digest": "sha256:baca22e8b68dbd9f2c7a2b94f7602835658060e0b41adcc61649cfe4b96806e3",
+  "framework": "pytest",
+  "install": [
+    [
+      "python",
+      "-m",
+      "pip",
+      "install",
+      "--no-input",
+      "pytest==8.3.3"
+    ],
+    [
+      "python",
+      "-m",
+      "pip",
+      "freeze",
+      "--all"
+    ]
+  ],
+  "install_timeout_s": 1800,
+  "policy_version": "2026-11-v4",
+  "prepare": [
+    [
+      "rm",
+      "-rf",
+      "--",
+      "app/__pycache__"
+    ]
+  ],
+  "red_digest": "sha256:635d6baecd682543df5d70084728f4e3eda49d525ec16d472b9b1d7952eff97d",
+  "red_paths": [
+    "tests/test_xss.py"
+  ],
+  "report": {
+    "argv": [
+      "cat",
+      "--",
+      "/tmp/rsolv-report.xml"
+    ],
+    "format": "junit_xml"
+  },
+  "test": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "-o",
+    "junit_family=xunit1",
+    "--junitxml=/tmp/rsolv-report.xml",
+    "tests/test_xss.py"
+  ],
+  "test_timeout_s": 900,
+  "v": 1
+}
+
