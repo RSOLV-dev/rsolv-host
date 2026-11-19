@@ -6,7 +6,7 @@ defmodule RsolvHost.MixProject do
   def project do
     [
       app: :rsolv_host,
-      version: "0.2.0",
+      version: "0.2.1",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: if(Mix.env() == :test, do: ["lib", "test/support"], else: ["lib"]),
