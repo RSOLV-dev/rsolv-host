@@ -2,6 +2,8 @@
   "attributes": {},
   "base_sha": "3d4736f2ec46a647727c108a431b3716fcf3c192",
   "paths": {
+    ".bundle": { "type": "missing" },
+    ".bundle/config": { "type": "missing" },
     ".config": { "type": "missing" },
     ".mise": { "type": "missing" },
     ".mise.local.toml": { "type": "missing" },
@@ -44,7 +46,6 @@
       "type": "blob"
     },
     "db": { "type": "tree" },
-    "db/test.sqlite3": { "type": "missing" },
     "gems.locked": { "type": "missing" },
     "gems.rb": { "type": "missing" },
     "jest.config.js": { "type": "missing" },
@@ -69,7 +70,6 @@
     "sitecustomize.py": { "type": "missing" },
     "spec": { "type": "missing" },
     "storage": { "type": "missing" },
-    "storage/test.sqlite3": { "type": "missing" },
     "test": { "type": "missing" },
     "test/test_helper.exs": { "type": "missing" },
     "tox.ini": { "type": "missing" },

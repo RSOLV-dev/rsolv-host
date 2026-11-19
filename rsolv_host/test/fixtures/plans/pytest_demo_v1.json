@@ -37,7 +37,7 @@
     ]
   ],
   "install_timeout_s": 1800,
-  "policy_version": "2026-11-v4",
+  "policy_version": "2026-11-v5",
   "prepare": [
     [
       "rm",
