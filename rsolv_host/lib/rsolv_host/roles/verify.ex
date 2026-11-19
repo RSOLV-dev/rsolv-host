@@ -67,9 +67,9 @@ defmodule RsolvHost.Roles.Verify do
   evidence rule for `build_evidence_unsupported` (both exit 2), two builds that
   installed different packages `build_env_drift` (exit 3), anything else a
   `verify_error` (exit 4). The sandbox failing (Docker, the image,
-  bootstrap, a docker CLI past its grace, a teardown Docker can't confirm, a
-  phase past its disk budget) is a verify error a new attempt may retry
-  (exit 4).
+  bootstrap, a docker CLI past its grace, a side's deadline before a step
+  could start, a teardown Docker can't confirm, a phase past its disk
+  budget) is a verify error a new attempt may retry (exit 4).
   """
 
   alias RsolvCore.{BaseFacts, VerifyPlan}
@@ -683,13 +683,14 @@ defmodule RsolvHost.Roles.Verify do
   # time was up is `{:timed_out, status}`; the same status any earlier is the
   # step's own. Only that is the code under test timing out: the docker CLI
   # the host stopped past its grace is `{:error, :timeout}`, the sandbox's
-  # failure.
+  # failure. So is a step its side's deadline left no whole second to start:
+  # it never ran, so nothing of the project's timed out (`{:error, :deadline}`).
   defp timed(sbx, argv, deadline, max_bytes, env) do
     start = now()
     limit_ms = div(deadline - start, 1_000) * 1_000
 
     if limit_ms < 1_000 do
-      {:timed_out, 124}
+      {:error, :deadline}
     else
       result = Sandbox.exec(sbx, argv, timeout_ms: limit_ms, max_bytes: max_bytes, env: env)
       timed_out(result, now() - start >= limit_ms)
@@ -714,6 +715,10 @@ defmodule RsolvHost.Roles.Verify do
     case timed(sbx, argv, min(now() + @report_timeout_ms, deadline), @report_max_bytes, plan.env) do
       {:ok, 0, bytes} ->
         {:ok, bytes}
+
+      # The test ran: no time left to read its report is a late report.
+      {:error, :deadline} ->
+        {:ok, ""}
 
       {:error, reason} when reason != :output_too_large ->
         {:verify_error, "sandbox", {:sandbox, reason}}

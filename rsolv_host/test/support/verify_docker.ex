@@ -65,6 +65,21 @@ defmodule RsolvHost.VerifyDocker do
   end
 
   @doc """
+  Pulls the pinned sandbox and proxy images. The role pulls them inside
+  `docker run`, under a side's deadline; a test whose budget leaves a side
+  seconds calls this first, so a cold image cache on the runner isn't what
+  spends them.
+  """
+  @spec pull_images() :: :ok
+  def pull_images do
+    for image <- [@sandbox_image, Application.fetch_env!(:rsolv_host, :proxy_image)] do
+      {_out, 0} = System.cmd("docker", ["pull", "-q", image], stderr_to_stdout: true)
+    end
+
+    :ok
+  end
+
+  @doc """
   The tree at `url` and `sha`, fetched once per machine into the system temp
   directory: into a directory of this run's own first, then renamed into
   place, so a concurrent run never reads a half-fetched tree.
@@ -320,9 +335,17 @@ defmodule RsolvHost.VerifyDocker do
     end
   end
 
-  @doc "A side's report, decoded."
-  @spec report(map(), String.t()) :: binary()
-  def report(body, side), do: Base.decode64!(body[side]["report"])
+  @doc "A side's report, decoded; a body with no such side fails the test, naming the body."
+  @spec report(map() | nil, String.t()) :: binary()
+  def report(body, side) do
+    case body do
+      %{^side => %{"report" => report}} when is_binary(report) ->
+        Base.decode64!(report)
+
+      _no_side ->
+        ExUnit.Assertions.flunk("no #{side} report in the verification: #{inspect(body)}")
+    end
+  end
 
   @doc "The hex SHA-256 of `bytes`."
   @spec sha256(binary()) :: String.t()

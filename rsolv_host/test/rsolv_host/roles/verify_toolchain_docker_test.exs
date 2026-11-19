@@ -131,8 +131,9 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
           "test" => sh(show)
         })
 
-      %{body: body} = VerifyDocker.verify(context, change, plan)
+      %{body: body} = run = VerifyDocker.verify(context, change, plan)
 
+      assert body["red"] && body["green"], why(run)
       red = report(body, "red")
       assert red == report(body, "green")
       assert red =~ ~s(BUNDLE_FROZEN: "true")
@@ -142,6 +143,10 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
 
   describe "TEST prepare past its clamped time limit (spec §3.1)" do
     setup %{tmp_dir: dir} do
+      # The role pulls the images under a side's deadline: a first pull here
+      # would spend RED's time, and RED would end before TEST starts.
+      VerifyDocker.pull_images()
+
       checkout(
         dir,
         %{"app/a.rb" => "base\n", "vendor/bin/phpunit" => harness()},
@@ -149,8 +154,9 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
       )
     end
 
-    # The role's budget leaves each side seconds, so a step that sleeps is
-    # stopped by the clamp, not by its own 5 minutes.
+    # The role's budget leaves the sides 2 minutes (RED half), so a step that
+    # sleeps is stopped by the clamp, not by its own 5 minutes; RED's BUILD
+    # and TEST setup fit in its minute on a slow (arm) runner too.
     for {side, sleeper} <- [
           {"red", "sleep 600"},
           {"green", "if grep -q fix app/a.rb; then sleep 600; fi"}
@@ -169,7 +175,7 @@ defmodule RsolvHost.Roles.VerifyToolchainDockerTest do
         %{body: body} =
           run =
           VerifyDocker.verify(context, change, plan,
-            deps: [budget_ms: 5 * 60_000 + 50_000],
+            deps: [budget_ms: 5 * 60_000 + 120_000],
             answers: %{"verification" => {200, %{verification: "verify_error", reasons: []}}}
           )
 

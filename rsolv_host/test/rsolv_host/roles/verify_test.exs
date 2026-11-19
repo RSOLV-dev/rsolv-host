@@ -1140,6 +1140,27 @@ defmodule RsolvHost.Roles.VerifyTest do
       assert Outcome.exit_code(result) == 4
     end
 
+    test "a report its side's deadline left no second to read goes up empty: the test ran, so it's the side's result",
+         context do
+      platform(context)
+
+      # RED's test ends, exit 1, with under a second of RED's time left: it
+      # used every whole second its `timeout` was given, and more.
+      sandbox([
+        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")),
+         fn {"docker", args, _} ->
+           [_timeout, "-k", _kill, seconds | _argv] = Enum.drop_while(args, &(&1 != "timeout"))
+           Process.sleep(String.to_integer(seconds) * 1_000 + 10)
+           {:ok, %{status: 1, output: "FAIL"}}
+         end}
+      ])
+
+      Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: 5 * 60_000 + 4_000])
+
+      assert %{"red" => red} = body()
+      assert red == %{"exit_code" => 1, "timed_out" => false, "report" => ""}
+    end
+
     for {label, answer} <- [
           {"missing", {:ok, %{status: 1, output: "cat: /tmp/r.json: No such file"}}},
           {"over the platform's 4 MiB cap", {:error, :output_too_large}}
@@ -1566,6 +1587,44 @@ defmodule RsolvHost.Roles.VerifyTest do
         assert body()["error"] == "prepare_failed_" <> unquote(side)
         refute Enum.any?(events(unquote(side)), &match?({:test, _, _}, &1))
         assert :gone_test in events(unquote(side))
+      end
+    end
+
+    # The side's time spent before the step could start (here by TEST's
+    # `docker run`, as a first image pull would): the step never ran, so it's
+    # the sandbox's deadline (exit 4), never the project's prepare failing nor
+    # a test timing out (CI run 44470014524, arm).
+    for side <- ["red", "green"], stage <- ["test_prepare", "test"] do
+      test "a #{side} #{stage} its side's deadline left no second to start never runs, and is the sandbox's deadline (exit 4)",
+           context do
+        plan = if unquote(stage) == "test", do: plan(), else: plan_v2()
+
+        platform(context, %{
+          "verify-plan" => {200, plan},
+          "verification" => {200, %{verification: "verify_error", reasons: []}}
+        })
+
+        sandbox([
+          {fn {"docker", ["run", "-d", "--name", name | _], opts} ->
+             name == "rsolv-41-2-7-verify-#{unquote(side)}-test" and
+               Process.sleep(opts[:timeout_ms] - 300) == :ok
+           end,
+           fn {"docker", ["run", "-d", "--name", name | _], _} ->
+             {:ok, %{status: 0, output: FakeExec.docker_id(name) <> "\n"}}
+           end}
+        ])
+
+        result =
+          Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: 5 * 60_000 + 8_000])
+
+        assert body()["error"] == "sandbox"
+        assert result == {:error, {:sandbox, :deadline}}
+        assert Outcome.exit_code(result) == 4
+
+        refute Enum.any?(
+                 events(unquote(side)),
+                 &match?({step, true, _env} when step in [:test_prepare, :test], &1)
+               )
       end
     end
 

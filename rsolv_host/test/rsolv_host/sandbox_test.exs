@@ -434,11 +434,61 @@ defmodule RsolvHost.SandboxTest do
       assert copy == sbx.copy_dir and opts[:timeout_ms] <= 30_000
     end
 
+    test "runs du and df in the C locale, whose messages it reads", %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("15\ttotal\n")}, df_rule(1, 1)])
+
+      Sandbox.disk_used(sbx)
+
+      for {exe, _args, opts} <- FakeExec.calls(),
+          exe in ["du", "df"],
+          do: assert(opts[:env] == [{"LC_ALL", "C"}], exe)
+
+      assert length(FakeExec.calls()) == 2
+    end
+
     test "is no measure when du couldn't read everything, whatever total it printed", %{sbx: sbx} do
       FakeExec.script([
         {fn {"du", _, _} -> true end,
          {:ok,
           %{status: 1, output: "du: cannot read directory '/c/d': Permission denied\n15\ttotal\n"}}},
+        df_rule(1, 1)
+      ])
+
+      assert Sandbox.disk_used(sbx) == :error
+    end
+
+    # What du 9.4 (Ubuntu 24.04, GitHub's runners) prints when an install
+    # removes files and directories mid-walk: exit 1, though nothing it
+    # couldn't read still exists (du 9.12 skips them silently). Seen as
+    # intermittent disk_limit on Ruby installs in CI (runs 44539120019,
+    # 44465085037, 44234905859).
+    test "is du's total when what it couldn't read had only vanished mid-walk", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         {:ok,
+          %{
+            status: 1,
+            output:
+              "du: cannot access '/h/.gem/tmp/f21': No such file or directory\n" <>
+                "du: cannot read directory '/h/.gem/ext': No such file or directory\n" <>
+                "10\t/c\n5\t/h\n15\ttotal\n"
+          }}},
+        df_rule(7_000, 42)
+      ])
+
+      assert Sandbox.disk_used(sbx) == {:ok, %{du: 15, fs: 7_000, inodes: 42}}
+    end
+
+    test "is no measure when anything else stopped du, alongside a vanished file", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         {:ok,
+          %{
+            status: 1,
+            output:
+              "du: cannot access '/h/x': No such file or directory\n" <>
+                "du: cannot read directory '/c/d': Permission denied\n15\ttotal\n"
+          }}},
         df_rule(1, 1)
       ])
 
