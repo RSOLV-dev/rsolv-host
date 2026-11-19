@@ -139,7 +139,8 @@ defmodule RsolvHost.OutcomeTest do
     test "each exits by its class" do
       for {reason, code} <- [
             {:verify_error, 4},
-            {:verify_timed_out, 2},
+            {:build_evidence_refused, 2},
+            {:build_env_drift, 3},
             {:base_read_timeout, 2},
             {:base_read_failed, 4},
             {{:sandbox, :bootstrap}, 4},
@@ -163,7 +164,8 @@ defmodule RsolvHost.OutcomeTest do
     test "name what happened" do
       for {reason, text} <- [
             {:verify_error, "could not finish verifying"},
-            {:verify_timed_out, "ran past their time limit"},
+            {:build_evidence_refused, "couldn't check the record of this run's two builds"},
+            {:build_env_drift, "installed different packages"},
             {:base_read_timeout, "took too long to read"},
             {:too_many_touched_paths, "than RSOLV verifies"},
             {:touched_path_too_deep, "than RSOLV verifies"},
@@ -181,6 +183,11 @@ defmodule RsolvHost.OutcomeTest do
           ] do
         assert capture(&Outcome.annotate(reason, &1)) =~ text, inspect(reason)
       end
+    end
+
+    test "never blame the project's tests for a build the platform couldn't judge" do
+      for reason <- [:verify_error, :build_evidence_refused, :build_env_drift],
+          do: refute(capture(&Outcome.annotate(reason, &1)) =~ "time limit", inspect(reason))
     end
   end
 
