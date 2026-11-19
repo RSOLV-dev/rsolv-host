@@ -480,8 +480,10 @@ defmodule RsolvHost.Sandbox do
   of the filesystem the copy is on (under `RUNNER_TEMP`): du can't see a file
   unlinked while still open, nor count inodes. Answers `%{du:, fs:, inodes:}`.
 
-  ponytail: a file the project removes mid-walk also fails du, so a churning
-  install can be stopped as over budget; retry the measure if that shows up.
+  A file or directory the project removed mid-walk (du 9.4 reports it and
+  exits 1) isn't a failed read: what's gone holds no bytes. One renamed
+  mid-walk can be missed for that measure; `df` still counts its bytes, as it
+  does a file unlinked while open.
   """
   @spec disk_used(t()) ::
           {:ok, %{du: non_neg_integer(), fs: non_neg_integer(), inodes: non_neg_integer()}}
@@ -490,7 +492,9 @@ defmodule RsolvHost.Sandbox do
     args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, sbx.home]
     opts = [timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024]
 
-    with {:ok, %{status: 0, output: output}} <- sbx.exec.run("du", args, opts),
+    with {:ok, %{status: status, output: output}} when status in [0, 1] <-
+           sbx.exec.run("du", args, opts),
+         true <- status == 0 or only_vanished?(output),
          [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output),
          {:ok, %{status: 0, output: df}} <-
            sbx.exec.run("df", ["-B1", "--output=used,iused", "--", sbx.copy_dir], opts),
@@ -504,6 +508,18 @@ defmodule RsolvHost.Sandbox do
     else
       _no_total -> :error
     end
+  end
+
+  # du 9.4 exits 1 for an entry removed between its listing and its stat or
+  # open, as installs do all the time; what's gone holds no bytes du missed.
+  # ponytail: matches C/English messages; another locale is no measure.
+  defp only_vanished?(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.reject(&(&1 =~ ~r/\A\d+\t/))
+    |> Enum.all?(
+      &(&1 =~ ~r/\Adu: cannot (access|read directory) .*: No such file or directory\z/)
+    )
   end
 
   @doc """

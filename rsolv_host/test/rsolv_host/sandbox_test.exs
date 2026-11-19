@@ -445,6 +445,44 @@ defmodule RsolvHost.SandboxTest do
       assert Sandbox.disk_used(sbx) == :error
     end
 
+    # What du 9.4 (Ubuntu 24.04, GitHub's runners) prints when an install
+    # removes files and directories mid-walk: exit 1, though nothing it
+    # couldn't read still exists (du 9.12 skips them silently). Seen as
+    # intermittent disk_limit on Ruby installs in CI (runs 44539120019,
+    # 44465085037, 44234905859).
+    test "is du's total when what it couldn't read had only vanished mid-walk", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         {:ok,
+          %{
+            status: 1,
+            output:
+              "du: cannot access '/h/.gem/tmp/f21': No such file or directory\n" <>
+                "du: cannot read directory '/h/.gem/ext': No such file or directory\n" <>
+                "10\t/c\n5\t/h\n15\ttotal\n"
+          }}},
+        df_rule(7_000, 42)
+      ])
+
+      assert Sandbox.disk_used(sbx) == {:ok, %{du: 15, fs: 7_000, inodes: 42}}
+    end
+
+    test "is no measure when anything else stopped du, alongside a vanished file", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         {:ok,
+          %{
+            status: 1,
+            output:
+              "du: cannot access '/h/x': No such file or directory\n" <>
+                "du: cannot read directory '/c/d': Permission denied\n15\ttotal\n"
+          }}},
+        df_rule(1, 1)
+      ])
+
+      assert Sandbox.disk_used(sbx) == :error
+    end
+
     for {label, answer} <- [
           {"fails", {:ok, %{status: 1, output: "df: /c: No such file\n"}}},
           {"prints no numbers", {:ok, %{status: 0, output: "   Used  IUsed\n- -\n"}}}
