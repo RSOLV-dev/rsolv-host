@@ -85,6 +85,7 @@ defmodule RsolvHost.Outcome do
   def classify(:base_check_too_large), do: :configuration
   def classify(:invalid_plan), do: :configuration
   def classify(:build_evidence_refused), do: :configuration
+  def classify(:build_evidence_unsupported), do: :configuration
   # pytest's dependencies float: a package released between the two builds.
   def classify(:build_env_drift), do: :transient
   def classify(:too_many_touched_paths), do: :configuration
@@ -249,7 +250,10 @@ defmodule RsolvHost.Outcome do
 
   defp message(:build_evidence_refused, _class),
     do:
-      "The RSOLV platform couldn't check the record of this run's two builds (the packages each installed), so it judged nothing; nothing will be published. Update to the current RSOLV workflow release; if this repeats, contact RSOLV support."
+      "RSOLV couldn't validate the build evidence (the packages each of this run's two builds installed), so it judged nothing; nothing will be published. If this repeats, contact RSOLV support."
+
+  defp message(:build_evidence_unsupported, _class),
+    do: "RSOLV can't verify this framework's build environment yet; nothing will be published."
 
   defp message(:build_env_drift, _class),
     do:

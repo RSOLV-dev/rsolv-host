@@ -83,8 +83,8 @@ What falls in each class:
   that no longer contains the scanned commit, a fix branch or pull request that already holds
   something else, a fix touching `.github/`, a verify checkout that isn't the scanned commit,
   base files or touched paths too many or too large to verify, a verify plan this host refuses, an issue already published
-  or rejected, build evidence from the verify job that the platform can't check, and a
-  base commit too slow to read with git on the runner.
+  or rejected, build evidence from the verify job that the platform can't check or can't
+  verify yet for the framework, and a base commit too slow to read with git on the runner.
 - **3, transient:** network failures, 429 and 5xx, a run token that expired or a token keeper
   that stopped answering, the platform or GitHub breaking the protocol (a malformed answer or
   event stream, or a touched path that isn't a safe repository path), a session past its time

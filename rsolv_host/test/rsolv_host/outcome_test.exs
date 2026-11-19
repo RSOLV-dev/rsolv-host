@@ -140,6 +140,7 @@ defmodule RsolvHost.OutcomeTest do
       for {reason, code} <- [
             {:verify_error, 4},
             {:build_evidence_refused, 2},
+            {:build_evidence_unsupported, 2},
             {:build_env_drift, 3},
             {:base_read_timeout, 2},
             {:base_read_failed, 4},
@@ -164,7 +165,8 @@ defmodule RsolvHost.OutcomeTest do
     test "name what happened" do
       for {reason, text} <- [
             {:verify_error, "could not finish verifying"},
-            {:build_evidence_refused, "couldn't check the record of this run's two builds"},
+            {:build_evidence_refused, "couldn't validate the build evidence"},
+            {:build_evidence_unsupported, "can't verify this framework's build environment yet"},
             {:build_env_drift, "installed different packages"},
             {:base_read_timeout, "took too long to read"},
             {:too_many_touched_paths, "than RSOLV verifies"},
@@ -188,6 +190,12 @@ defmodule RsolvHost.OutcomeTest do
     test "never blame the project's tests for a build the platform couldn't judge" do
       for reason <- [:verify_error, :build_evidence_refused, :build_env_drift],
           do: refute(capture(&Outcome.annotate(reason, &1)) =~ "time limit", inspect(reason))
+
+      # Neither is the customer's workflow's fault: platform policy, or a
+      # platform rule the host's evidence should have passed.
+      for reason <- [:build_evidence_refused, :build_evidence_unsupported],
+          do:
+            refute(capture(&Outcome.annotate(reason, &1)) =~ "workflow release", inspect(reason))
     end
   end
 

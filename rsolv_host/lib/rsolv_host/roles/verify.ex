@@ -63,7 +63,8 @@ defmodule RsolvHost.Roles.Verify do
   result, which the platform fails; only the sandbox's own `timeout` counts,
   not the docker CLI the host stopped. When both sides ran and the platform
   still judges a verify error, its reasons name why: build evidence it
-  couldn't check is `build_evidence_refused` (exit 2), two builds that
+  couldn't check is `build_evidence_refused` and a framework it has no
+  evidence rule for `build_evidence_unsupported` (both exit 2), two builds that
   installed different packages `build_env_drift` (exit 3), anything else a
   `verify_error` (exit 4). The sandbox failing (Docker, the image,
   bootstrap, a docker CLI past its grace, a teardown Docker can't confirm, a
@@ -754,6 +755,7 @@ defmodule RsolvHost.Roles.Verify do
   defp unjudged(reason, _verdict), do: reason
 
   defp build_reason("build_env_drift"), do: :build_env_drift
+  defp build_reason("build_evidence_unsupported:" <> _framework), do: :build_evidence_unsupported
   defp build_reason("build_evidence_" <> _why), do: :build_evidence_refused
   defp build_reason(_other), do: nil
 
