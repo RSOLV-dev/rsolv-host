@@ -93,11 +93,23 @@
       "tmp/cache/bootsnap",
       "tmp/cache/bootsnap-compile-cache",
       "tmp/cache/bootsnap-load-path-cache",
-      "db/schema_cache.yml",
-      "db/test.sqlite3",
-      "db/test.sqlite3-journal",
-      "db/test.sqlite3-wal",
-      "db/test.sqlite3-shm"
+      "db/schema_cache.yml"
+    ],
+    [
+      "find",
+      "db",
+      "-maxdepth",
+      "1",
+      "(",
+      "-type",
+      "f",
+      "-o",
+      "-type",
+      "l",
+      ")",
+      "-name",
+      "*.sqlite3*",
+      "-delete"
     ],
     [
       "bundle",

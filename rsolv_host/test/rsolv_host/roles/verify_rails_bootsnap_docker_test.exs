@@ -21,18 +21,14 @@ defmodule RsolvHost.Roles.VerifyRailsBootsnapDockerTest do
                    "../../fixtures/plans/railsgoat_324_v2.json",
                    __DIR__
                  )
-  @db ~w(storage/test.sqlite3 storage/test.sqlite3-journal storage/test.sqlite3-wal
-         storage/test.sqlite3-shm)
 
   setup do: VerifyDocker.unique_tmp_dir()
 
-  # The platform's three Rails test_prepare steps, for this app's DB.
-  defp rails_prepare(dbs \\ @db) do
-    [[_rm, _rf, _dashes | cleared], db_prepare, rm_report] =
-      platform_plan()["test_prepare"]
-
-    caches = Enum.reject(cleared, &String.starts_with?(&1, "db/test.sqlite3"))
-    [["rm", "-rf", "--" | caches ++ dbs], db_prepare, rm_report]
+  # The platform's four Rails test_prepare steps, its sqlite sweep over this
+  # app's db/ and storage/ (both trees here; railsgoat has only db/).
+  defp rails_prepare do
+    [caches, ["find", "db" | sweep], db_prepare, rm_report] = platform_plan()["test_prepare"]
+    [caches, ["find", "db", "storage" | sweep], db_prepare, rm_report]
   end
 
   defp platform_plan, do: @platform_plan |> File.read!() |> JSON.decode!()
@@ -130,6 +126,77 @@ defmodule RsolvHost.Roles.VerifyRailsBootsnapDockerTest do
     end
   end
 
+  # Spec §18 (review of rsolv-platform #366): whatever config/database.yml
+  # names, TEST's sweep deletes every committed sqlite file in db/ and
+  # storage/, so a database only ERB names is prepared fresh too.
+  describe "the sweep, for a database only ERB names (spec §18)" do
+    @erb_yml """
+    default: &default
+      adapter: sqlite3
+      pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+      timeout: 5000
+
+    test:
+      <<: *default
+      database: <%= ENV.fetch("TEST_DB") { "storage/x.sqlite3" } %>
+    """
+
+    test "deletes committed storage/x.sqlite3 and db/development.sqlite3; db:prepare makes x fresh",
+         %{tmp_dir: dir} do
+      marked = Path.join(dir, "marked.sqlite3")
+
+      {_out, 0} =
+        System.cmd("python3", [
+          "-c",
+          "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table m(v text)'); c.execute(\"insert into m values ('SWEEP-MARKER')\"); c.commit()",
+          marked
+        ])
+
+      context =
+        checkout(
+          dir,
+          %{
+            "config/database.yml" => @erb_yml,
+            "storage/x.sqlite3" => File.read!(marked),
+            "db/development.sqlite3" => File.read!(marked),
+            "vendor/bin/phpunit" => harness()
+          },
+          from: @app,
+          executable: ["vendor/bin/phpunit"]
+        )
+
+      red = ~s|require "spec_helper"\n\nRSpec.describe "x" do\n  it { expect(1).to eq 1 }\nend\n|
+      change = [{"spec/x_spec.rb", nil, red}]
+
+      checks =
+        Enum.join(
+          [
+            "echo x=$(test -f storage/x.sqlite3 && echo yes || echo no)",
+            "echo marker=$(grep -c -a SWEEP-MARKER storage/x.sqlite3)",
+            "echo dev=$(test -e db/development.sqlite3 && echo yes || echo no)"
+          ],
+          "; "
+        )
+
+      plan =
+        plan(change, "spec/x_spec.rb", %{
+          "test_prepare" => rails_prepare(),
+          "test" => sh("{ #{checks}; } > /work/rsolv-report 2>&1"),
+          "report" => %{"format" => "rspec_json", "argv" => ~w(cat -- /work/rsolv-report)}
+        })
+
+      %{body: body} = run = VerifyDocker.verify(context, change, plan)
+      assert body["red"] && body["green"], why(run)
+
+      for side <- ~w(red green) do
+        out = report(body, side)
+        assert out =~ "x=yes\n", "#{side}: #{out}"
+        assert out =~ "marker=0\n", "#{side}: #{out}"
+        assert out =~ "dev=no\n", "#{side}: #{out}"
+      end
+    end
+  end
+
   describe "a committed DB symlink, a multi-database test section (spec §5.4)" do
     @multi """
     default: &default
@@ -164,7 +231,6 @@ defmodule RsolvHost.Roles.VerifyRailsBootsnapDockerTest do
 
       red = ~s|require "spec_helper"\n\nRSpec.describe "x" do\n  it { expect(1).to eq 1 }\nend\n|
       change = [{"spec/x_spec.rb", nil, red}]
-      dbs = @db ++ Enum.map(@db, &String.replace(&1, "test.sqlite3", "test_cache.sqlite3"))
 
       checks =
         Enum.join(
@@ -180,7 +246,7 @@ defmodule RsolvHost.Roles.VerifyRailsBootsnapDockerTest do
       plan =
         plan(change, "spec/x_spec.rb", %{
           "test_prepare" => [
-            sh("echo OUTSIDE-MARKER > /tmp/outside.sqlite3") | rails_prepare(dbs)
+            sh("echo OUTSIDE-MARKER > /tmp/outside.sqlite3") | rails_prepare()
           ],
           "test" => sh("{ #{checks}; } > /work/rsolv-report 2>&1"),
           "report" => %{"format" => "rspec_json", "argv" => ~w(cat -- /work/rsolv-report)}
