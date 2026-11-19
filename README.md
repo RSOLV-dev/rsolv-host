@@ -83,20 +83,22 @@ What falls in each class:
   that no longer contains the scanned commit, a fix branch or pull request that already holds
   something else, a fix touching `.github/`, a verify checkout that isn't the scanned commit,
   base files or touched paths too many or too large to verify, a verify plan this host refuses, an issue already published
-  or rejected, the project's tests running past their time limit in the verify job, and a
-  base commit too slow to read with git on the runner.
+  or rejected, build evidence from the verify job that the platform can't check or can't
+  verify yet for the framework, and a base commit too slow to read with git on the runner.
 - **3, transient:** network failures, 429 and 5xx, a run token that expired or a token keeper
   that stopped answering, the platform or GitHub breaking the protocol (a malformed answer or
   event stream, or a touched path that isn't a safe repository path), a session past its time
-  budget, and a token exchange whose answer was lost (`409 already_exchanged` on the retry).
+  budget, a token exchange whose answer was lost (`409 already_exchanged` on the retry), and
+  the verify job's two builds installing different packages.
 - **4, sandbox:** Docker or a sandbox setup step failing, the run-token hand-off file not
   writable, the sandbox breaking its CLI contract: a malformed or oversized frame, more frames or
   issues than allowed, an issue it didn't file, a malformed patch. The scanner's stdout and stderr
   share the frame channel, so `rsolv-sandbox scan` must write nothing to stderr. In the verify
   job: git failing to read the base commit, and a verify error (a sandbox failure, a sandbox
   Docker couldn't confirm removed or that wrote past its disk budget, a Docker call that didn't
-  answer in time, the project's install failing without the fix, or its build changing a file
-  the fix changes), which a new attempt may retry.
+  answer in time, the project's install failing without the fix, its build changing a file
+  the fix changes, or a test report the platform couldn't read in time), which a new attempt
+  may retry.
 
 The `work` role writes the step outputs `outcome` and `has_patch` (`true` or `false`), and a
 job-summary row. `outcome` is one of:

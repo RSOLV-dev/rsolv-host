@@ -878,11 +878,11 @@ defmodule RsolvHost.Roles.VerifyTest do
   end
 
   describe "run/3 verify errors" do
-    test "a RED test past its time limit is a timed-out side, GREEN still runs, and the platform's verify error isn't retried",
+    test "a RED test past its time limit is a timed-out side, GREEN still runs, and the platform fails it",
          context do
       platform(context, %{
         "verify-plan" => {200, Map.put(plan(), "test_timeout_s", 1)},
-        "verification" => {200, %{verification: "verify_error", reasons: ["timeout_red"]}}
+        "verification" => {200, %{verification: "failed", reasons: ["red_timed_out"]}}
       })
 
       sandbox([
@@ -895,14 +895,13 @@ defmodule RsolvHost.Roles.VerifyTest do
       assert_received {:request, "verification", %{"red" => red, "green" => green}}
       assert red == %{"exit_code" => 124, "timed_out" => true, "report" => ""}
       assert %{"exit_code" => 0, "timed_out" => false} = green
-      assert result == {:error, :verify_timed_out}
-      assert Outcome.exit_code(result) == 2
+      assert result == {:outcome, :verify_failed, false}
     end
 
     test "a RED test stopped by its time limit keeps the status timeout gave it", context do
       platform(context, %{
         "verify-plan" => {200, Map.put(plan(), "test_timeout_s", 1)},
-        "verification" => {200, %{verification: "verify_error", reasons: ["timeout_red"]}}
+        "verification" => {200, %{verification: "failed", reasons: ["red_timed_out"]}}
       })
 
       sandbox([
@@ -917,6 +916,37 @@ defmodule RsolvHost.Roles.VerifyTest do
 
       assert_received {:request, "verification",
                        %{"red" => %{"exit_code" => 137, "timed_out" => true, "report" => ""}}}
+    end
+
+    # Both sides ran, so the platform's reasons, not the host, say why it
+    # judged nothing (staging run arubis/rsolv-v5-pytest-demo 44467074623:
+    # build_evidence_invalid ended as "tests ran past their time limit").
+    for {reasons, error, code} <- [
+          {["build_evidence_invalid:red", "build_evidence_invalid:green"],
+           :build_evidence_refused, 2},
+          {["build_evidence_invalid:green"], :build_evidence_refused, 2},
+          {["build_evidence_unsupported:jest"], :build_evidence_unsupported, 2},
+          {["report_timeout_red", "build_evidence_invalid:green"], :build_evidence_refused, 2},
+          {["build_env_drift"], :build_env_drift, 3},
+          {["report_timeout_red"], :verify_error, 4},
+          {[], :verify_error, 4},
+          {"not a list", :verify_error, 4}
+        ] do
+      test "the platform's verify error for #{inspect(reasons)} after both sides ran is #{error} (exit #{code})",
+           context do
+        platform(context, %{
+          "verification" =>
+            {200, %{verification: "verify_error", reasons: unquote(Macro.escape(reasons))}}
+        })
+
+        sandbox()
+
+        result = run(context)
+
+        assert_received {:request, "verification", %{"red" => _red, "green" => _green}}
+        assert result == {:error, unquote(error)}
+        assert Outcome.exit_code(result) == unquote(code)
+      end
     end
 
     test "a test whose output passes its cap is a side with an empty report, which the platform fails",

@@ -84,7 +84,10 @@ defmodule RsolvHost.Outcome do
   def classify(:base_facts_too_large), do: :configuration
   def classify(:base_check_too_large), do: :configuration
   def classify(:invalid_plan), do: :configuration
-  def classify(:verify_timed_out), do: :configuration
+  def classify(:build_evidence_refused), do: :configuration
+  def classify(:build_evidence_unsupported), do: :configuration
+  # pytest's dependencies float: a package released between the two builds.
+  def classify(:build_env_drift), do: :transient
   def classify(:too_many_touched_paths), do: :configuration
   def classify(:touched_path_too_deep), do: :configuration
   def classify({:platform, 409, code}) when code in @ended, do: :configuration
@@ -245,9 +248,16 @@ defmodule RsolvHost.Outcome do
     do:
       "This rsolv-host refused the RSOLV platform's verify plan and ran nothing. Update to the current RSOLV workflow release; if this repeats, contact RSOLV support."
 
-  defp message(:verify_timed_out, _class),
+  defp message(:build_evidence_refused, _class),
     do:
-      "The project's tests ran past their time limit, so RSOLV couldn't verify this fix; running them again would too. Nothing will be published."
+      "RSOLV couldn't validate the build evidence (the packages each of this run's two builds installed), so it judged nothing; nothing will be published. If this repeats, contact RSOLV support."
+
+  defp message(:build_evidence_unsupported, _class),
+    do: "RSOLV can't verify this framework's build environment yet; nothing will be published."
+
+  defp message(:build_env_drift, _class),
+    do:
+      "RSOLV's two builds of the project installed different packages (one changed on the package index between them), so RSOLV couldn't compare them and judged nothing. Re-run the issue's workflow."
 
   defp message({:platform, 409, code}, _class) when code in @ended,
     do: "This issue is already published or rejected; there is nothing left to do for it."
@@ -271,7 +281,7 @@ defmodule RsolvHost.Outcome do
 
   defp message(:verify_error, _class),
     do:
-      "RSOLV could not finish verifying this fix (the sandbox failed, or the project's install failed without the fix). Re-run the issue's workflow."
+      "RSOLV could not finish verifying this fix (the sandbox failed, the project's install failed without the fix, or the platform couldn't read a test report in time). Re-run the issue's workflow."
 
   defp message(:base_read_failed, _class),
     do:

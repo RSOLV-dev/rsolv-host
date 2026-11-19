@@ -59,10 +59,14 @@ defmodule RsolvHost.Roles.Verify do
   cap is that side's result (`timed_out`, or an empty report). A BUILD
   `install` or `prepare` step that fails, times out or floods its output, or
   an overlay refused, is the side's install failure; a `test_prepare` step
-  that does is its `prepare_failed`. A test that timed out is the platform's
-  verify error, which the role ends as `verify_timed_out` (exit 2): running it
-  again would time out again; only the sandbox's own `timeout` counts, not the
-  docker CLI the host stopped. The sandbox failing (Docker, the image,
+  that does is its `prepare_failed`. A test that timed out is that side's
+  result, which the platform fails; only the sandbox's own `timeout` counts,
+  not the docker CLI the host stopped. When both sides ran and the platform
+  still judges a verify error, its reasons name why: build evidence it
+  couldn't check is `build_evidence_refused` and a framework it has no
+  evidence rule for `build_evidence_unsupported` (both exit 2), two builds that
+  installed different packages `build_env_drift` (exit 3), anything else a
+  `verify_error` (exit 4). The sandbox failing (Docker, the image,
   bootstrap, a docker CLI past its grace, a teardown Docker can't confirm, a
   phase past its disk budget) is a verify error a new attempt may retry
   (exit 4).
@@ -308,7 +312,7 @@ defmodule RsolvHost.Roles.Verify do
         "build_evidence" => %{"red" => red_built, "green" => green_built}
       }
 
-      report(ctx, plan, body, :verify_timed_out)
+      report(ctx, plan, body, :judged)
     else
       {:verify_error, kind, reason} -> report(ctx, plan, %{"error" => kind}, reason)
     end
@@ -735,11 +739,25 @@ defmodule RsolvHost.Roles.Verify do
     case call(ctx, :verification, [body]) do
       {:ok, %{"verification" => "green"}} -> {:outcome, :verified, false}
       {:ok, %{"verification" => "failed"}} -> {:outcome, :verify_failed, false}
-      {:ok, %{"verification" => "verify_error"}} -> {:error, reason}
+      {:ok, %{"verification" => "verify_error"} = verdict} -> {:error, unjudged(reason, verdict)}
       {:ok, _malformed} -> {:error, :malformed_response}
       error -> error
     end
   end
+
+  # Both sides ran, so the platform's reasons say why it judged nothing: its
+  # build evidence rule, or (a report it couldn't parse in time) a verify
+  # error a new attempt may retry. Wire strings never become atoms.
+  defp unjudged(:judged, %{"reasons" => reasons}) when is_list(reasons),
+    do: Enum.find_value(reasons, :verify_error, &build_reason/1)
+
+  defp unjudged(:judged, _verdict), do: :verify_error
+  defp unjudged(reason, _verdict), do: reason
+
+  defp build_reason("build_env_drift"), do: :build_env_drift
+  defp build_reason("build_evidence_unsupported:" <> _framework), do: :build_evidence_unsupported
+  defp build_reason("build_evidence_" <> _why), do: :build_evidence_refused
+  defp build_reason(_other), do: nil
 
   defp now, do: System.monotonic_time(:millisecond)
 end
