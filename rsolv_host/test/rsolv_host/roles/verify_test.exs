@@ -1140,6 +1140,27 @@ defmodule RsolvHost.Roles.VerifyTest do
       assert Outcome.exit_code(result) == 4
     end
 
+    test "a report its side's deadline left no second to read goes up empty: the test ran, so it's the side's result",
+         context do
+      platform(context)
+
+      # RED's test ends, exit 1, with under a second of RED's time left: it
+      # used every whole second its `timeout` was given, and more.
+      sandbox([
+        {&(runs?(&1, "npx") and "jest" in elem(&1, 1) and side?(&1, "red")),
+         fn {"docker", args, _} ->
+           [_timeout, "-k", _kill, seconds | _argv] = Enum.drop_while(args, &(&1 != "timeout"))
+           Process.sleep(String.to_integer(seconds) * 1_000 + 10)
+           {:ok, %{status: 1, output: "FAIL"}}
+         end}
+      ])
+
+      Verify.run(%{issue: 7}, context.env, deps(context) ++ [budget_ms: 5 * 60_000 + 4_000])
+
+      assert %{"red" => red} = body()
+      assert red == %{"exit_code" => 1, "timed_out" => false, "report" => ""}
+    end
+
     for {label, answer} <- [
           {"missing", {:ok, %{status: 1, output: "cat: /tmp/r.json: No such file"}}},
           {"over the platform's 4 MiB cap", {:error, :output_too_large}}

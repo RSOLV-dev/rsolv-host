@@ -716,6 +716,10 @@ defmodule RsolvHost.Roles.Verify do
       {:ok, 0, bytes} ->
         {:ok, bytes}
 
+      # The test ran: no time left to read its report is a late report.
+      {:error, :deadline} ->
+        {:ok, ""}
+
       {:error, reason} when reason != :output_too_large ->
         {:verify_error, "sandbox", {:sandbox, reason}}
 
