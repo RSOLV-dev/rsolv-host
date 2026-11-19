@@ -108,6 +108,11 @@ defmodule RsolvHost.BaseFactsRailsgoatTest do
     end
 
     test "covers exactly the probes and their ancestors", %{paths: paths} do
+      assert paths["config"] == %{type: :tree}
+      assert paths["db"] == %{type: :tree}
+      assert paths["storage"] == %{type: :missing}
+      assert paths["test"] == %{type: :missing}
+
       {:ok, required} = BaseFacts.required_paths(probes())
       assert paths |> Map.keys() |> Enum.sort() == required
     end
