@@ -13,6 +13,11 @@ defmodule RsolvHost.ExecTest do
       assert {:ok, %{output: "$(id);`id`\n"}} = Exec.run("echo", ["$(id);`id`"])
     end
 
+    test "sets :env's variables for the program, over the BEAM's own" do
+      assert {:ok, %{status: 0, output: "C\n"}} =
+               Exec.run("printenv", ["LC_ALL"], env: [{"LC_ALL", "C"}])
+    end
+
     test "returns the program's exit status" do
       assert {:ok, %{status: 1, output: ""}} = Exec.run("false", [])
     end

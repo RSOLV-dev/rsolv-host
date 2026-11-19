@@ -490,7 +490,8 @@ defmodule RsolvHost.Sandbox do
           | :error
   def disk_used(sbx) do
     args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, sbx.home]
-    opts = [timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024]
+    # The C locale: `only_vanished?/1` reads du's messages.
+    opts = [timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024, env: [{"LC_ALL", "C"}]]
 
     with {:ok, %{status: status, output: output}} when status in [0, 1] <-
            sbx.exec.run("du", args, opts),
@@ -512,7 +513,7 @@ defmodule RsolvHost.Sandbox do
 
   # du 9.4 exits 1 for an entry removed between its listing and its stat or
   # open, as installs do all the time; what's gone holds no bytes du missed.
-  # ponytail: matches C/English messages; another locale is no measure.
+  # Its messages are the C locale's (`disk_used/1` runs it with LC_ALL=C).
   defp only_vanished?(output) do
     output
     |> String.split("\n", trim: true)

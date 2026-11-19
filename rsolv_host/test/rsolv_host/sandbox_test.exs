@@ -434,6 +434,18 @@ defmodule RsolvHost.SandboxTest do
       assert copy == sbx.copy_dir and opts[:timeout_ms] <= 30_000
     end
 
+    test "runs du and df in the C locale, whose messages it reads", %{sbx: sbx} do
+      FakeExec.script([{fn {"du", _, _} -> true end, ok("15\ttotal\n")}, df_rule(1, 1)])
+
+      Sandbox.disk_used(sbx)
+
+      for {exe, _args, opts} <- FakeExec.calls(),
+          exe in ["du", "df"],
+          do: assert(opts[:env] == [{"LC_ALL", "C"}], exe)
+
+      assert length(FakeExec.calls()) == 2
+    end
+
     test "is no measure when du couldn't read everything, whatever total it printed", %{sbx: sbx} do
       FakeExec.script([
         {fn {"du", _, _} -> true end,

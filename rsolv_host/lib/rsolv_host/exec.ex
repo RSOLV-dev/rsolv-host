@@ -23,7 +23,8 @@ defmodule RsolvHost.Exec do
 
   Options: `:input` (bytes written to stdin), `:timeout_ms` (default 60 s; the
   program is killed at the deadline), `:max_bytes` (default 1 MiB; the program
-  is killed when its output passes it).
+  is killed when its output passes it), `:env` (`[{name, value}]` set for the
+  program, over the BEAM's own).
 
   stderr is always merged into stdout: an inherited stderr would be the BEAM's
   own, which is the Actions log, so no child byte reaches it uncapped.
@@ -51,7 +52,9 @@ defmodule RsolvHost.Exec do
   merged, as for `run/3`.
   """
   @spec open(String.t(), [String.t()], keyword()) :: {:ok, port()} | {:error, :enoent}
-  def open(executable, args, _opts) do
+  def open(executable, args, opts) do
+    env = for {name, value} <- Keyword.get(opts, :env, []), do: {~c"#{name}", ~c"#{value}"}
+
     case System.find_executable(executable) do
       nil ->
         {:error, :enoent}
@@ -60,7 +63,7 @@ defmodule RsolvHost.Exec do
         {:ok,
          Port.open(
            {:spawn_executable, path},
-           [:binary, :exit_status, :use_stdio, :stderr_to_stdout, :hide, args: args]
+           [:binary, :exit_status, :use_stdio, :stderr_to_stdout, :hide, args: args, env: env]
          )}
     end
   end
