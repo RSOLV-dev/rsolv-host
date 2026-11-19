@@ -1,7 +1,7 @@
 defmodule RsolvHost.BaseFactsRailsgoatTest do
   # The Rails base-facts contract fixture (verify base-built plan, H′2; design
   # spec §5.4 protocol). The probe list is the platform's own
-  # (rsolv-platform test/fixtures/exported/base_probes.json at 66d4fb2a,
+  # (rsolv-platform test/fixtures/exported/base_probes.json, PR #366,
   # `VerifyPlans.probes("rspec", true)`); the repository is railsgoat's real
   # files at arubis/railsgoat-vulnerability-demo e2cd64e9, committed with
   # their real modes. The facts read here are exported for the platform's
@@ -89,15 +89,17 @@ defmodule RsolvHost.BaseFactsRailsgoatTest do
       end
     end
 
-    test "has db as a tree, because db/schema.rb is committed, and no test DB in it",
+    # The platform probes a test DB's directories, never the DB: TEST's
+    # test_prepare removes it, and its content could fill base facts.
+    test "has db as a tree, because db/schema.rb is committed, and storage missing",
          %{paths: paths} do
       assert paths["db"] == %{type: :tree}
-      assert paths["db/test.sqlite3"] == %{type: :missing}
-      assert paths["storage/test.sqlite3"] == %{type: :missing}
+      assert paths["storage"] == %{type: :missing}
+      refute Enum.any?(Map.keys(paths), &String.ends_with?(&1, ".sqlite3"))
     end
 
     test "has every other probe missing, the #355 pytest probes among them", %{paths: paths} do
-      present = ~w(Gemfile Gemfile.lock .ruby-version config/database.yml)
+      present = ~w(Gemfile Gemfile.lock .ruby-version config/database.yml db)
 
       for path <- probes() -- present do
         assert paths[path] == %{type: :missing}, path

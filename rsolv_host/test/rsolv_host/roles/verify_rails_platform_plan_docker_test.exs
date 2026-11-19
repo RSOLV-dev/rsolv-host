@@ -1,10 +1,12 @@
 defmodule RsolvHost.Roles.VerifyRailsPlatformPlanDockerTest do
   # Verify base-built plan P2.5: the platform's exact Rails v2 plan for
-  # railsgoat #324 (rsolv-platform test/fixtures/exported/railsgoat_324_v2.json),
-  # run by the role on railsgoat e2cd64e9, with #324's real RED snapshot and
-  # fix; then the same plan's steps for a migration transition and a real
-  # load failure. Each posted body is written to RSOLV_P2_OUT (when set) so the
-  # platform can vendor it.
+  # railsgoat #324 (rsolv-platform test/fixtures/exported/railsgoat_324_v2.json,
+  # vendored as test/fixtures/plans/), run by the role on railsgoat e2cd64e9
+  # with #324's real RED snapshot and fix (staging run a75dd74a, vendored as
+  # test/fixtures/railsgoat_324/); then the same plan's steps for a migration
+  # transition and a real load failure. With RSOLV_P2_OUT set, each posted
+  # body is written there: the platform vendors them as
+  # test/fixtures/rsolv_host/verification_railsgoat_*.json.
   use ExUnit.Case, async: false
 
   import RsolvHost.VerifyDocker, only: [checkout: 3, report: 2]
@@ -14,9 +16,8 @@ defmodule RsolvHost.Roles.VerifyRailsPlatformPlanDockerTest do
   @moduletag :docker
   @moduletag timeout: 1_800_000
 
-  @platform System.get_env("RSOLV_PLATFORM", "../../plat-p2")
-  @plan Path.join(@platform, "test/fixtures/exported/railsgoat_324_v2.json")
-  @fixtures Path.join(@platform, "test/fixtures/railsgoat_324")
+  @plan Path.expand("../../fixtures/plans/railsgoat_324_v2.json", __DIR__)
+  @fixtures Path.expand("../../fixtures/railsgoat_324", __DIR__)
   @railsgoat "https://github.com/arubis/railsgoat-vulnerability-demo"
   @railsgoat_sha "e2cd64e94e3eaeb3ded89c4ea9a64725f4a009ac"
   @red "spec/controllers/users_controller_sql_injection_spec.rb"

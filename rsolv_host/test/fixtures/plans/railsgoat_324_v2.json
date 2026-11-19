@@ -1,0 +1,110 @@
+{
+  "change_set": [
+    {
+      "base_blob_sha": "3a5e061c09ef38e6ae185a7cca02d15505fccfbc",
+      "base_mode": "100755",
+      "mode": "100755",
+      "new_blob_sha": "f382d8bad646ecf3d0e45fbcc38b78b2dea11211",
+      "op": "modify",
+      "path": "app/controllers/users_controller.rb"
+    },
+    {
+      "base_blob_sha": null,
+      "base_mode": null,
+      "mode": "100644",
+      "new_blob_sha": "3726e410bb15d8eeb8e069f9bca562a9a92adcd7",
+      "op": "add",
+      "path": "spec/controllers/users_controller_sql_injection_spec.rb"
+    }
+  ],
+  "change_set_digest": "sha256:af0199127bc4ca8b0f7bb5fda5a603baf90040fac3c6d491850ee0dd8cc02a77",
+  "env": { "RAILS_ENV": "test" },
+  "framework": "rspec",
+  "install": [
+    [
+      "bundle",
+      "config",
+      "set",
+      "--local",
+      "frozen",
+      "true"
+    ],
+    [
+      "bundle",
+      "config",
+      "unset",
+      "--local",
+      "without"
+    ],
+    [
+      "bundle",
+      "config",
+      "unset",
+      "without"
+    ],
+    [
+      "bundle",
+      "install"
+    ],
+    [
+      "bundle",
+      "list",
+      "--paths"
+    ]
+  ],
+  "install_timeout_s": 1800,
+  "policy_version": "2026-11-v4",
+  "prepare": [],
+  "red_digest": "sha256:c7a65795783e1da45b74b1e8a6dd20d90a1f190232e5ee327e68c09deea32667",
+  "red_paths": [
+    "spec/controllers/users_controller_sql_injection_spec.rb"
+  ],
+  "report": {
+    "argv": [
+      "cat",
+      "--",
+      "/tmp/rsolv-report.json"
+    ],
+    "format": "rspec_json"
+  },
+  "test": [
+    "bundle",
+    "exec",
+    "rspec",
+    "--format",
+    "json",
+    "--out",
+    "/tmp/rsolv-report.json",
+    "spec/controllers/users_controller_sql_injection_spec.rb"
+  ],
+  "test_prepare": [
+    [
+      "rm",
+      "-rf",
+      "--",
+      "tmp/cache/bootsnap",
+      "tmp/cache/bootsnap-compile-cache",
+      "tmp/cache/bootsnap-load-path-cache",
+      "db/schema_cache.yml",
+      "db/test.sqlite3",
+      "db/test.sqlite3-journal",
+      "db/test.sqlite3-wal",
+      "db/test.sqlite3-shm"
+    ],
+    [
+      "bundle",
+      "exec",
+      "rake",
+      "db:prepare"
+    ],
+    [
+      "rm",
+      "-f",
+      "--",
+      "/tmp/rsolv-report.json"
+    ]
+  ],
+  "test_timeout_s": 900,
+  "v": 2
+}
+
