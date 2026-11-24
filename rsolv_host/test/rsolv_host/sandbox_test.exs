@@ -479,6 +479,60 @@ defmodule RsolvHost.SandboxTest do
       assert Sandbox.disk_used(sbx) == {:ok, %{du: 15, fs: 7_000, inodes: 42}}
     end
 
+    # Exec spawns du by its full path, and du 9.4 names itself by argv[0]:
+    # on Ubuntu 24.04 its messages begin "/usr/bin/du: ", not "du: ".
+    test "is du's total when du named by its path says only what vanished", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         {:ok,
+          %{
+            status: 1,
+            output:
+              "/usr/bin/du: cannot access '/h/.gem/tmp/f21': No such file or directory\n" <>
+                "/usr/bin/du: cannot read directory '/h/.gem/ext': No such file or directory\n" <>
+                "10\t/c\n5\t/h\n15\ttotal\n"
+          }}},
+        df_rule(7_000, 42)
+      ])
+
+      assert Sandbox.disk_used(sbx) == {:ok, %{du: 15, fs: 7_000, inodes: 42}}
+    end
+
+    # What du 9.4 printed on an arm64 runner when mise moved a Ruby it had just
+    # extracted (diagnostic run 45366919134): the walk stopped there, so its
+    # total is short. du measures again.
+    @fts_cut "/usr/bin/du: fts_read failed: /h/.local/share/mise/installs/ruby/3.4.1/ruby-3.4.1/share: No such file or directory\n10\t/c\n2\t/h\n12\ttotal\n"
+
+    test "measures again when a directory vanished under du's walk, never taking the short total",
+         %{sbx: sbx} do
+      calls = :counters.new(1, [])
+
+      FakeExec.script([
+        {fn {"du", _, _} -> true end,
+         fn _call ->
+           :counters.add(calls, 1, 1)
+
+           if :counters.get(calls, 1) == 1,
+             do: {:ok, %{status: 1, output: @fts_cut}},
+             else: ok("10\t/c\n5\t/h\n15\ttotal\n")
+         end},
+        df_rule(7_000, 42)
+      ])
+
+      assert Sandbox.disk_used(sbx) == {:ok, %{du: 15, fs: 7_000, inodes: 42}}
+      assert :counters.get(calls, 1) == 2
+    end
+
+    test "is no measure when every walk is cut short", %{sbx: sbx} do
+      FakeExec.script([
+        {fn {"du", _, _} -> true end, {:ok, %{status: 1, output: @fts_cut}}},
+        df_rule(7_000, 42)
+      ])
+
+      assert Sandbox.disk_used(sbx) == :error
+      assert Enum.count(FakeExec.calls(), &match?({"du", _, _}, &1)) == 3
+    end
+
     test "is no measure when anything else stopped du, alongside a vanished file", %{sbx: sbx} do
       FakeExec.script([
         {fn {"du", _, _} -> true end,

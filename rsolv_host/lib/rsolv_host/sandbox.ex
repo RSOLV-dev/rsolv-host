@@ -63,6 +63,7 @@ defmodule RsolvHost.Sandbox do
   @setup_timeout_ms 60_000
   @du_timeout_ms 30_000
   @stop_wait_ms 35_000
+  @du_vanished ~r/\A(?:\S*\/)?du: (cannot (?:access|read directory) |fts_read failed: ).*: No such file or directory\z/
   # An image pull can be slow; the sandbox image carries every toolchain.
   @pull_timeout_ms 900_000
   @kill_after_s "10"
@@ -483,26 +484,25 @@ defmodule RsolvHost.Sandbox do
   A file or directory the project removed mid-walk (du 9.4 reports it and
   exits 1) isn't a failed read: what's gone holds no bytes. One renamed
   mid-walk can be missed for that measure; `df` still counts its bytes, as it
-  does a file unlinked while open.
+  does a file unlinked while open. A directory that vanished under the walk
+  itself (`fts_read failed`) stops it short, so du walks again, up to three
+  walks within the 30 s.
   """
   @spec disk_used(t()) ::
           {:ok, %{du: non_neg_integer(), fs: non_neg_integer(), inodes: non_neg_integer()}}
           | :error
   def disk_used(sbx) do
-    args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, sbx.home]
-    # The C locale: `only_vanished?/1` reads du's messages.
+    deadline = System.monotonic_time(:millisecond) + @du_timeout_ms
+    # The C locale: `du_total/3` reads du's messages.
     opts = [timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024, env: [{"LC_ALL", "C"}]]
 
-    with {:ok, %{status: status, output: output}} when status in [0, 1] <-
-           sbx.exec.run("du", args, opts),
-         true <- status == 0 or only_vanished?(output),
-         [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output),
+    with {:ok, total} <- du_total(sbx, deadline, 3),
          {:ok, %{status: 0, output: df}} <-
            sbx.exec.run("df", ["-B1", "--output=used,iused", "--", sbx.copy_dir], opts),
          [_, fs, inodes] <- Regex.run(~r/^\s*(\d+)\s+(\d+)\s*$/m, df) do
       {:ok,
        %{
-         du: String.to_integer(total),
+         du: total,
          fs: String.to_integer(fs),
          inodes: String.to_integer(inodes)
        }}
@@ -511,16 +511,44 @@ defmodule RsolvHost.Sandbox do
     end
   end
 
+  defp du_total(_sbx, _deadline, 0), do: :error
+
+  defp du_total(sbx, deadline, walks) do
+    args = ["-s", "-c", "-x", "-P", "-B1", "--", sbx.copy_dir, sbx.home]
+    timeout_ms = deadline - System.monotonic_time(:millisecond)
+    opts = [timeout_ms: timeout_ms, max_bytes: 1024 * 1024, env: [{"LC_ALL", "C"}]]
+
+    with true <- timeout_ms > 0,
+         {:ok, %{status: status, output: output}} when status in [0, 1] <-
+           sbx.exec.run("du", args, opts),
+         [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output) do
+      complaints =
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.reject(&(&1 =~ ~r/\A\d+\t/))
+        |> Enum.map(&complaint/1)
+
+      cond do
+        :other in complaints -> :error
+        :walk_cut in complaints -> du_total(sbx, deadline, walks - 1)
+        true -> {:ok, String.to_integer(total)}
+      end
+    else
+      _no_total -> :error
+    end
+  end
+
   # du 9.4 exits 1 for an entry removed between its listing and its stat or
   # open, as installs do all the time; what's gone holds no bytes du missed.
-  # Its messages are the C locale's (`disk_used/1` runs it with LC_ALL=C).
-  defp only_vanished?(output) do
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.reject(&(&1 =~ ~r/\A\d+\t/))
-    |> Enum.all?(
-      &(&1 =~ ~r/\Adu: cannot (access|read directory) .*: No such file or directory\z/)
-    )
+  # A directory removed while du was inside it stops that walk (fts_read
+  # failed): its total is short. du names itself by argv[0], its full path
+  # under Exec, in the C locale's messages (`disk_used/1` sets LC_ALL=C).
+  defp complaint(line) do
+    case Regex.run(@du_vanished, line, capture: :all_but_first) do
+      ["fts_read failed: "] -> :walk_cut
+      [_cannot] -> :vanished
+      nil -> :other
+    end
   end
 
   @doc """
