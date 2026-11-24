@@ -241,6 +241,8 @@ defmodule RsolvHost.OutcomeTest do
     test "any other session error, or an unknown reason, stays transient" do
       for data <- [
             %{"error" => "api_error: timeout"},
+            %{"error" => "api_error", "outcome" => "rate_limited"},
+            %{"status" => "failed", "error" => "api_error", "outcome" => "network"},
             %{"error" => "service_unavailable"},
             %{"error" => "service_unavailable", "reason" => "provider_auth_x"},
             %{"error" => "boom", "reason" => "provider_auth"},
