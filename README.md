@@ -72,6 +72,7 @@ breaking change. `rsolv-work.yml` retries once on 3.
 | 2 | Configuration, or something the customer can fix | `::error title=RSOLV configuration::` naming the fix (for example "Grant `id-token: write`") | none |
 | 3 | Transient platform or network failure | `::error title=RSOLV transient failure::` | `rsolv-work.yml` retries once, only on 3 |
 | 4 | Sandbox or runner infrastructure | `::error title=RSOLV sandbox setup::` naming the failed step | none |
+| 5 | A problem on RSOLV's side that a re-run won't fix | `::error title=RSOLV service problem::` | none |
 
 What falls in each class:
 
@@ -99,6 +100,10 @@ What falls in each class:
   answer in time, the project's install failing without the fix, its build changing a file
   the fix changes, or a test report the platform couldn't read in time), which a new attempt
   may retry.
+- **5, RSOLV service:** the platform's AI provider rejecting RSOLV's own credentials (the
+  session's `error` event `{"error": "service_unavailable", "reason": "provider_auth"}`).
+  Neither the customer nor a retry can fix it; RSOLV has to. A host older than 0.2.2 exits 3
+  on it.
 
 The `work` role writes the step outputs `outcome` and `has_patch` (`true` or `false`), and a
 job-summary row. `outcome` is one of:
