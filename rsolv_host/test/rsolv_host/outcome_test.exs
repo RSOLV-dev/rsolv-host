@@ -222,6 +222,37 @@ defmodule RsolvHost.OutcomeTest do
     end
   end
 
+  describe "the platform's AI provider refusing RSOLV's credential" do
+    @provider_auth {:session, %{"error" => "service_unavailable", "reason" => "provider_auth"}}
+
+    test "is RSOLV's service problem, exit 5, which the work workflow doesn't retry" do
+      assert Outcome.classify(@provider_auth) == :service
+      assert Outcome.exit_code({:error, @provider_auth}) == 5
+      assert Outcome.exit_code({:error, @provider_auth, :validated}) == 5
+    end
+
+    test "says it is on RSOLV's side and that re-running won't help" do
+      assert capture(&Outcome.annotate(@provider_auth, &1)) ==
+               "::error title=RSOLV service problem::RSOLV's AI provider rejected our credentials. " <>
+                 "This is a problem on RSOLV's side, not your repository; we've been alerted. " <>
+                 "Re-running won't help until it's fixed.\n"
+    end
+
+    test "any other session error, or an unknown reason, stays transient" do
+      for data <- [
+            %{"error" => "api_error: timeout"},
+            %{"error" => "api_error", "outcome" => "rate_limited"},
+            %{"status" => "failed", "error" => "api_error", "outcome" => "network"},
+            %{"error" => "service_unavailable"},
+            %{"error" => "service_unavailable", "reason" => "provider_auth_x"},
+            %{"error" => "boom", "reason" => "provider_auth"},
+            %{"status" => "failed"}
+          ] do
+        assert Outcome.classify({:session, data}) == :transient, inspect(data)
+      end
+    end
+  end
+
   describe "annotate/2" do
     test "names the fix for a missing OIDC permission" do
       assert capture(&Outcome.annotate(:oidc_unavailable, &1)) ==

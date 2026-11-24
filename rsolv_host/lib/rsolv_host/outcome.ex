@@ -2,7 +2,7 @@ defmodule RsolvHost.Outcome do
   @moduledoc """
   The host's exit-code contract (README "Exit codes"). Stable: changing a code is
   a breaking change. 0 model outcome, 1 host bug, 2 configuration, 3 transient
-  (retried once by `rsolv-work.yml`), 4 sandbox.
+  (retried once by `rsolv-work.yml`), 4 sandbox, 5 RSOLV service.
 
   Annotations are fixed text plus host-controlled values (atoms the host
   defines, integers); no binary from an error reason is ever written.
@@ -10,7 +10,7 @@ defmodule RsolvHost.Outcome do
 
   alias RsolvHost.ActionsLog
 
-  @type class :: :host_bug | :configuration | :transient | :sandbox
+  @type class :: :host_bug | :configuration | :transient | :sandbox | :service
   @type outcome ::
           :validated
           | :false_positive
@@ -51,7 +51,7 @@ defmodule RsolvHost.Outcome do
   @summary_header "| Issue | Outcome | Patch | Exit |\n|---|---|---|---|\n"
 
   @doc "Exit code for a role's result."
-  @spec exit_code(result()) :: 0..4
+  @spec exit_code(result()) :: 0..5
   def exit_code(:ok), do: 0
   def exit_code({:outcome, _outcome, _has_patch}), do: 0
   def exit_code({:error, reason}), do: reason |> classify() |> code()
@@ -118,6 +118,11 @@ defmodule RsolvHost.Outcome do
   def classify(:token_expired), do: :transient
   def classify(:token_unavailable), do: :transient
   def classify(:token_uncertain), do: :transient
+  # The platform's AI provider refused RSOLV's own credential: neither the
+  # customer's to fix nor passing on a retry.
+  def classify({:session, %{"error" => "service_unavailable", "reason" => "provider_auth"}}),
+    do: :service
+
   def classify({:session, _data}), do: :transient
   def classify(:stream_exhausted), do: :transient
   def classify(:session_timeout), do: :transient
@@ -144,6 +149,7 @@ defmodule RsolvHost.Outcome do
   defp code(:configuration), do: 2
   defp code(:transient), do: 3
   defp code(:sandbox), do: 4
+  defp code(:service), do: 5
 
   @doc "Writes the one `::error::` annotation for `reason`."
   @spec annotate(term(), IO.device()) :: :ok
@@ -156,6 +162,7 @@ defmodule RsolvHost.Outcome do
   defp title(:configuration), do: "RSOLV configuration"
   defp title(:transient), do: "RSOLV transient failure"
   defp title(:sandbox), do: "RSOLV sandbox setup"
+  defp title(:service), do: "RSOLV service problem"
 
   defp message(:usage, _class),
     do: "Invalid rsolv-host arguments. Call RSOLV through its reusable workflows."
@@ -325,6 +332,10 @@ defmodule RsolvHost.Outcome do
          "The sandbox broke rsolv-host's protocol (#{kind(reason)}), for example by writing to stderr during a scan. Use the sandbox image the RSOLV workflow pins."
 
   defp message(reason, :sandbox), do: "The sandbox failed (#{kind(reason)})."
+
+  defp message({:session, _data}, :service),
+    do:
+      "RSOLV's AI provider rejected our credentials. This is a problem on RSOLV's side, not your repository; we've been alerted. Re-running won't help until it's fixed."
 
   defp message({:platform, 409, "already_exchanged"}, :transient),
     do:
