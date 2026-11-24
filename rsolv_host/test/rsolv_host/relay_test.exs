@@ -287,6 +287,39 @@ defmodule RsolvHost.RelayTest do
     end
   end
 
+  describe "run_session/5 after a drop, a session that failed on RSOLV's provider credential" do
+    test "keeps the provider_auth classification the status reports, and nothing else", context do
+      keeper =
+        platform(context, [sse([{:progress, %{}}])], fn
+          %{request_path: "/api/v1/validation/status/s1"} = conn ->
+            Req.Test.json(conn, %{
+              status: "failed",
+              error: "service_unavailable",
+              reason: "provider_auth",
+              pending_tools: 0
+            })
+
+          _other ->
+            nil
+        end)
+
+      FakeExec.script([])
+
+      result = run(keeper)
+
+      assert result ==
+               {:error,
+                {:session,
+                 %{
+                   "status" => "failed",
+                   "error" => "service_unavailable",
+                   "reason" => "provider_auth"
+                 }}}
+
+      assert RsolvHost.Outcome.exit_code(result) == 5
+    end
+  end
+
   describe "run_session/5 budgets" do
     test "refuses a request id that isn't 1 to 128 of [A-Za-z0-9_-], before remembering it",
          context do

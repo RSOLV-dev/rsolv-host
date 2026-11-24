@@ -395,6 +395,19 @@ defmodule RsolvHost.Roles.WorkTest do
       assert {:error, {:session, _}} = Work.run(%{issue: 7}, context.env, deps(context))
     end
 
+    test "the platform's AI provider refusing RSOLV's credential exits 5", context do
+      platform(
+        validation:
+          sse([{:error, %{"error" => "service_unavailable", "reason" => "provider_auth"}}])
+      )
+
+      sandbox()
+
+      result = Work.run(%{issue: 7}, context.env, deps(context))
+
+      assert RsolvHost.Outcome.exit_code(result) == 5
+    end
+
     for {status, code} <- [{503, 3}, {422, 2}] do
       test "once VALIDATE confirmed, an upload answered #{status} records validated and exits #{code}",
            context do
