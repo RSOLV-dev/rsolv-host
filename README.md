@@ -101,7 +101,8 @@ What falls in each class:
   the fix changes, or a test report the platform couldn't read in time), which a new attempt
   may retry.
 - **5, RSOLV service:** the platform's AI provider rejecting RSOLV's own credentials (the
-  session's `error` event `{"error": "service_unavailable", "reason": "provider_auth"}`).
+  session's `error` event `{"error": "service_unavailable", "reason": "provider_auth"}`, or the
+  same fields on the session status after the event stream dropped).
   Neither the customer nor a retry can fix it; RSOLV has to. A host older than 0.2.2 exits 3
   on it.
 

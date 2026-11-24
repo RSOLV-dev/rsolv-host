@@ -102,10 +102,19 @@ defmodule RsolvHost.Relay do
 
   defp after_drop(session, backoff) do
     case status(session) do
-      {:ok, %{"status" => "failed"}} -> {:error, {:session, %{"status" => "failed"}}}
-      {:ok, %{"status" => "completed"}} -> {:error, :stream_exhausted}
-      {:error, {:platform, 404, _code}} -> {:error, :stream_exhausted}
-      _still_running_or_unknown -> reconnect(session, backoff)
+      # The platform keeps a failed session's bounded error for a client that
+      # missed the event; only its classification fields are carried.
+      {:ok, %{"status" => "failed"} = status} ->
+        {:error, {:session, Map.take(status, ["status", "error", "reason"])}}
+
+      {:ok, %{"status" => "completed"}} ->
+        {:error, :stream_exhausted}
+
+      {:error, {:platform, 404, _code}} ->
+        {:error, :stream_exhausted}
+
+      _still_running_or_unknown ->
+        reconnect(session, backoff)
     end
   end
 
