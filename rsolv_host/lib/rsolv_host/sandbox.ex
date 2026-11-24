@@ -493,13 +493,18 @@ defmodule RsolvHost.Sandbox do
     # The C locale: `only_vanished?/1` reads du's messages.
     opts = [timeout_ms: @du_timeout_ms, max_bytes: 1024 * 1024, env: [{"LC_ALL", "C"}]]
 
-    with {:ok, %{status: status, output: output}} when status in [0, 1] <-
-           sbx.exec.run("du", args, opts),
+    t0 = System.monotonic_time(:millisecond)
+    du_res = sbx.exec.run("du", args, opts)
+    if path = System.get_env("RSOLV_DU_TRACE") do
+      File.write!(path, inspect({System.os_time(:millisecond), sbx.container, System.monotonic_time(:millisecond) - t0, (case du_res do {:ok, %{status: st, output: o}} -> {st, o |> String.split("\n") |> Enum.reject(&(&1 =~ ~r/^\d+\t\//)) |> Enum.take(20)}; other -> other end)}, limit: :infinity, printable_limit: :infinity) <> "\n", [:append])
+    end
+    with {:ok, %{status: status, output: output}} when status in [0, 1] <- du_res,
          true <- status == 0 or only_vanished?(output),
          [_, total] <- Regex.run(~r/^(\d+)\ttotal$/m, output),
          {:ok, %{status: 0, output: df}} <-
            sbx.exec.run("df", ["-B1", "--output=used,iused", "--", sbx.copy_dir], opts),
          [_, fs, inodes] <- Regex.run(~r/^\s*(\d+)\s+(\d+)\s*$/m, df) do
+      if path = System.get_env("RSOLV_DU_TRACE"), do: File.write!(path, "  df fs=#{fs} inodes=#{inodes}\n", [:append])
       {:ok,
        %{
          du: String.to_integer(total),
@@ -561,6 +566,7 @@ defmodule RsolvHost.Sandbox do
       {^ref, :disk_limit} -> {:error, :disk_limit}
     after
       @stop_wait_ms ->
+        if path = System.get_env("RSOLV_DU_TRACE"), do: File.write!(path, "  STOP-WAIT TIMEOUT\n", [:append])
         stop_watchdog(watchdog)
         {:error, :disk_limit}
     end
@@ -591,12 +597,17 @@ defmodule RsolvHost.Sandbox do
   end
 
   defp verdict({:ok, used}, limits) do
-    if Enum.all?(limits, fn {key, max} -> Map.fetch!(used, key) <= max end),
+    v = if Enum.all?(limits, fn {key, max} -> Map.fetch!(used, key) <= max end),
       do: :within,
       else: :disk_limit
+    if path = System.get_env("RSOLV_DU_TRACE"), do: File.write!(path, "  VERDICT #{v} used=#{inspect(used)} limits=#{inspect(limits)}\n", [:append])
+    v
   end
 
-  defp verdict(:error, _limits), do: :disk_limit
+  defp verdict(:error, _limits) do
+    if path = System.get_env("RSOLV_DU_TRACE"), do: File.write!(path, "  VERDICT disk_limit NO-MEASURE\n", [:append])
+    :disk_limit
+  end
 
   @doc "Takes the sandbox off the proxy's network: from here on it has no network."
   @spec disconnect(t()) :: :ok | {:error, term()}

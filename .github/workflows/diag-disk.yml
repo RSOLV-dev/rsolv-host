@@ -1,0 +1,44 @@
+name: diag-disk
+on:
+  pull_request:
+    branches: [main]
+permissions: {}
+jobs:
+  trace:
+    if: github.head_ref == 'diag/arm64-disk-limit-trace'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ${{ matrix.runner }}
+    permissions: { contents: read }
+    defaults: { run: { working-directory: rsolv_host } }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with: { otp-version: "29.0.4", elixir-version: "1.20.2", version-type: strict }
+      - run: mix deps.get
+      - run: mix compile
+      - name: env facts
+        run: |
+          du --version | head -1; df -T / /tmp "$RUNNER_TEMP"; docker info --format '{{.DockerRootDir}} {{.Driver}}'; nproc; free -m
+      - name: railsgoat (p) test, 4 times, traced
+        shell: bash
+        env: { RSOLV_DU_TRACE: "${{ runner.temp }}/du-trace.log" }
+        run: |
+          for i in 1 2 3 4; do
+            echo "=== iteration $i" >> "$RSOLV_DU_TRACE"
+            mix test --include docker test/rsolv_host/roles/verify_toolchain_docker_test.exs:281 2>&1 | tail -5
+          done
+          echo "--- non-zero du / no-measure / over-budget / stop-wait lines"
+          grep -n -E '\{[0-9]+, "[^"]+", [0-9]+, \{[^0]|NO-MEASURE|VERDICT disk_limit|STOP-WAIT' "$RSOLV_DU_TRACE" || true
+          echo "--- slowest du (ms)"
+          grep -o -E '^\{[0-9]+, "[^"]+", [0-9]+' "$RSOLV_DU_TRACE" | awk -F', ' '{print $3}' | sort -n | tail -3
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: du-trace-${{ matrix.shard }}
+          path: ${{ runner.temp }}/du-trace.log
+          retention-days: 7
